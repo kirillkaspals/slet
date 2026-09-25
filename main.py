@@ -93,7 +93,11 @@ def save_paydays(payload: SletPayload):
 # Страница формы входа (Логин / Пароль)
 @app.get("/login", response_class=HTMLResponse)
 def login_page(request: Request, error: str = None):
-    return templates.TemplateResponse("login.html", {"request": request, "error": error})
+    return templates.TemplateResponse(
+        request=request,
+        name="login.html",
+        context={"error": error}
+    )
 
 # Обработка отправки формы входа
 @app.post("/login")
@@ -151,12 +155,15 @@ def view_site(request: Request, server_id: int = 1):
         cur.close()
         conn.close()
 
-        return templates.TemplateResponse("index.html", {
-            "request": request, 
-            "houses": houses, 
-            "bizs": bizs,
-            "server_id": server_id
-        })
+        return templates.TemplateResponse(
+            request=request,
+            name="index.html",
+            context={
+                "houses": houses,
+                "bizs": bizs,
+                "server_id": server_id
+            }
+        )
     except Exception as e:
         return HTMLResponse(
             f"<body style='background:#181825;color:#f38ba8;font-family:sans-serif;padding:20px;'>"
