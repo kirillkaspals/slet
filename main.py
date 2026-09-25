@@ -2,8 +2,8 @@ import os
 from pathlib import Path
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from fastapi import FastAPI, Header, HTTPException, Depends, Request
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Header, HTTPException, Depends, Request, Form, Response
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 from typing import List, Literal
@@ -12,23 +12,13 @@ app = FastAPI()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 API_KEY = os.getenv("API_KEY", "SECRET_KEY_12345")
+
+# Настройки логина и пароля для входа на сайт
+SITE_LOGIN = os.getenv("SITE_LOGIN", "admin")
 SITE_PASSWORD = os.getenv("SITE_PASSWORD", "mysecretpass")
 
-# Надежное определение пути к папке с шаблонами
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
-
-def get_db():
-    if not DATABASE_URL:
-        raise HTTPException(
-            status_code=500, 
-            detail="DATABASE_URL variable is not configured in Environment Variables!"
-        )
-    conn = psycopg2.connect(DATABASE_URL, sslmode="require")
-    try:
-        yield conn
-    finally:
-        conn.close()
 
 def verify_api_key(x_api_key: str = Header(...)):
     if x_api_key != API_KEY:
@@ -74,8 +64,13 @@ def startup_db():
     except Exception as e:
         print(f"[ERROR] Failed to initialize database on startup: {e}")
 
+# API для приема данных от Lua-скрипта
 @app.post("/api/paydays", dependencies=[Depends(verify_api_key)])
-def save_paydays(payload: SletPayload, conn=Depends(get_db)):
+def save_paydays(payload: SletPayload):
+    if not DATABASE_URL:
+        raise HTTPException(status_code=500, detail="Database URL not set")
+    
+    conn = psycopg2.connect(DATABASE_URL, sslmode="require")
     table = "house_paydays" if payload.type == "house" else "biz_paydays"
     id_col = "house_id" if payload.type == "house" else "biz_id"
     
@@ -93,20 +88,43 @@ def save_paydays(payload: SletPayload, conn=Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         cur.close()
+        conn.close()
 
+# Страница формы входа (Логин / Пароль)
+@app.get("/login", response_class=HTMLResponse)
+def login_page(request: Request, error: str = None):
+    return templates.TemplateResponse("login.html", {"request": request, "error": error})
+
+# Обработка отправки формы входа
+@app.post("/login")
+def login_submit(login: str = Form(...), password: str = Form(...)):
+    if login == SITE_LOGIN and password == SITE_PASSWORD:
+        response = RedirectResponse(url="/", status_code=303)
+        # Устанавливаем cookie авторизации
+        response.set_cookie(key="auth_token", value="authenticated", httponly=True, max_age=86400*7)
+        return response
+    else:
+        return RedirectResponse(url="/login?error=1", status_code=303)
+
+# Выход из системы
+@app.get("/logout")
+def logout():
+    response = RedirectResponse(url="/login", status_code=303)
+    response.delete_cookie("auth_token")
+    return response
+
+# Главная страница мониторинга слетов
 @app.get("/", response_class=HTMLResponse)
-def view_site(request: Request, password: str = "", server_id: int = 1):
-    if password != SITE_PASSWORD:
-        return HTMLResponse(
-            "<body style='background:#181825;color:white;font-family:sans-serif;text-align:center;padding-top:50px;'>"
-            "<h2>🔒 Доступ закрыт</h2><p>Укажите верный пароль в ссылке: <code>?password=ВАШ_ПАРОЛЬ</code></p></body>", 
-            status_code=403
-        )
+def view_site(request: Request, server_id: int = 1):
+    # Проверка cookies
+    auth_cookie = request.cookies.get("auth_token")
+    if auth_cookie != "authenticated":
+        return RedirectResponse(url="/login", status_code=303)
     
     if not DATABASE_URL:
         return HTMLResponse(
             "<body style='background:#181825;color:#f38ba8;font-family:sans-serif;padding:20px;text-align:center;'>"
-            "<h2>⚠️ Ошибка конфигурации</h2><p>Переменная <code>DATABASE_URL</code> не добавлена в Environment Variables на Render.</p></body>",
+            "<h2>⚠️ Ошибка конфигурации</h2><p>Переменная <code>DATABASE_URL</code> не добавлена на Render.</p></body>",
             status_code=500
         )
 
@@ -137,8 +155,7 @@ def view_site(request: Request, password: str = "", server_id: int = 1):
             "request": request, 
             "houses": houses, 
             "bizs": bizs,
-            "server_id": server_id,
-            "password": password
+            "server_id": server_id
         })
     except Exception as e:
         return HTMLResponse(
