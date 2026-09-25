@@ -1,211 +1,180 @@
-import os
-from pathlib import Path
-import psycopg2
-from psycopg2.extras import RealDictCursor
-from fastapi import FastAPI, Header, HTTPException, Depends, Request, Form, Response
-from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
-from typing import List, Literal
+import datetime
+from typing import List
+from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import HTMLResponse
 
-app = FastAPI()
+app = FastAPI(title="Arizona Slet Scanner")
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-API_KEY = os.getenv("API_KEY", "SECRET_KEY_12345")
-
-# Настройки логина и пароля для входа на сайт
-SITE_LOGIN = os.getenv("SITE_LOGIN", "admin")
-SITE_PASSWORD = os.getenv("SITE_PASSWORD", "mysecretpass")
-
-# Словарь серверов Arizona RP (1-33)
-SERVERS = {
-    1: "Phoenix",
-    2: "Tucson",
-    3: "Scottdale",
-    4: "Chandler",
-    5: "Brainburg",
-    6: "Saint-Rose",
-    7: "Mesa",
-    8: "Red-Rock",
-    9: "Yuma",
-    10: "Surprise",
-    11: "Prescott",
-    12: "Glendale",
-    13: "Kingman",
-    14: "Winslow",
-    15: "Payson",
-    16: "Gilbert",
-    17: "Show Low",
-    18: "Casa-Grande",
-    19: "Page",
-    20: "Sun-City",
-    21: "Queen-Creek",
-    22: "Sedona",
-    23: "Holiday",
-    24: "Wednesday",
-    25: "Yava",
-    26: "Faraway",
-    27: "Bumble Bee",
-    28: "Christmas",
-    29: "Love",
-    30: "Mirage",
-    31: "Drake",
-    32: "Space",
-    33: "Home"
+SERVER_NAMES = {
+    1: "Phoenix", 2: "Tucson", 3: "Scottdale", 4: "Chandler", 5: "Brainburg",
+    6: "Saint-Rose", 7: "Mesa", 8: "Red-Rock", 9: "Yuma", 10: "Surprise",
+    11: "Prescott", 12: "Glendale", 13: "Kingman", 14: "Winslow", 15: "Payson",
+    16: "Gilbert", 17: "Show Low", 18: "Casa-Grande", 19: "Page", 20: "Sun-City",
+    21: "Queen-Creek", 22: "Sedona", 23: "Holiday", 24: "Wednesday", 25: "Yava",
+    26: "Faraway", 27: "Bumble Bee", 28: "Christmas", 29: "Love", 30: "Mirage",
+    31: "Drake", 32: "Space", 33: "Home"
 }
 
-BASE_DIR = Path(__file__).resolve().parent
-templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+# Временная база данных в памяти
+database = {
+    "servers": {s_id: {"houses": [], "biz": [], "last_scan": None} for s_id in SERVER_NAMES.keys()}
+}
 
-def verify_api_key(x_api_key: str = Header(...)):
+API_KEY = "SECRET_KEY_12345"
+
+# --- ЭНДПОИНТЫ API ---
+
+@app.post("/api/paydays")
+async def receive_paydays(data: dict, x_api_key: str = Header(None)):
     if x_api_key != API_KEY:
-        raise HTTPException(status_code=403, detail="Access denied")
-
-class SletItem(BaseModel):
-    id: int
-    paydays: int
-
-class SletPayload(BaseModel):
-    server_id: int
-    type: Literal["house", "biz"]
-    items: List[SletItem]
-
-@app.on_event("startup")
-def startup_db():
-    if not DATABASE_URL:
-        print("[WARNING] DATABASE_URL is not set, skipping database init.")
-        return
-    try:
-        conn = psycopg2.connect(DATABASE_URL, sslmode="require")
-        cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS house_paydays (
-                id SERIAL PRIMARY KEY,
-                house_id INT NOT NULL,
-                paydays_left INT NOT NULL,
-                server_id INT NOT NULL,
-                scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS biz_paydays (
-                id SERIAL PRIMARY KEY,
-                biz_id INT NOT NULL,
-                paydays_left INT NOT NULL,
-                server_id INT NOT NULL,
-                scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-        conn.commit()
-        cur.close()
-        conn.close()
-        print("[SUCCESS] Tables initialized successfully.")
-    except Exception as e:
-        print(f"[ERROR] Failed to initialize database on startup: {e}")
-
-# API для приема данных от Lua-скрипта
-@app.post("/api/paydays", dependencies=[Depends(verify_api_key)])
-def save_paydays(payload: SletPayload):
-    if not DATABASE_URL:
-        raise HTTPException(status_code=500, detail="Database URL not set")
+        raise HTTPException(status_code=403, detail="Invalid API Key")
     
-    conn = psycopg2.connect(DATABASE_URL, sslmode="require")
-    table = "house_paydays" if payload.type == "house" else "biz_paydays"
-    id_col = "house_id" if payload.type == "house" else "biz_id"
+    srv_id = data.get("server_id")
+    dataType = data.get("type")
+    items = data.get("items", [])
+
+    if srv_id not in database["servers"]:
+        raise HTTPException(status_code=400, detail="Unknown Server ID")
+
+    if dataType == "house":
+        database["servers"][srv_id]["houses"] = items
+    elif dataType == "biz":
+        database["servers"][srv_id]["biz"] = items
+
+    database["servers"][srv_id]["last_scan"] = datetime.datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+
+    return {"status": "ok"}
+
+@app.get("/api/summary")
+async def get_summary():
+    summary = []
+    for srv_id, name in SERVER_NAMES.items():
+        srv_data = database["servers"][srv_id]
+        summary.append({
+            "server_id": srv_id,
+            "server_name": name,
+            "last_scan": srv_data["last_scan"] or "Нет данных",
+            "houses_count": len(srv_data["houses"]),
+            "biz_count": len(srv_data["biz"])
+        })
+    return summary
+
+@app.get("/api/server/{server_id}")
+async def get_server_data(server_id: int):
+    if server_id not in database["servers"]:
+        raise HTTPException(status_code=404, detail="Server not found")
     
-    cur = conn.cursor()
-    try:
-        for item in payload.items:
-            cur.execute(f"""
-                INSERT INTO {table} ({id_col}, paydays_left, server_id, scanned_at)
-                VALUES (%s, %s, %s, NOW())
-            """, (item.id, item.paydays, payload.server_id))
-        conn.commit()
-        return {"status": "success", "saved": len(payload.items)}
-    except Exception as e:
-        conn.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        cur.close()
-        conn.close()
+    srv_data = database["servers"][server_id]
+    return {
+        "server_id": server_id,
+        "server_name": SERVER_NAMES.get(server_id, "Unknown"),
+        "last_scan": srv_data["last_scan"],
+        "houses": sorted(srv_data["houses"], key=lambda x: x["paydays"]),
+        "biz": sorted(srv_data["biz"], key=lambda x: x["paydays"])
+    }
 
-# Страница формы входа (Логин / Пароль)
-@app.get("/login", response_class=HTMLResponse)
-def login_page(request: Request, error: str = None):
-    return templates.TemplateResponse(
-        request=request,
-        name="login.html",
-        context={"error": error}
-    )
+# --- ГЛАВНАЯ СТРАНИЦА САЙТА ---
 
-# Обработка отправки формы входа
-@app.post("/login")
-def login_submit(login: str = Form(...), password: str = Form(...)):
-    if login == SITE_LOGIN and password == SITE_PASSWORD:
-        response = RedirectResponse(url="/", status_code=303)
-        # Устанавливаем cookie авторизации
-        response.set_cookie(key="auth_token", value="authenticated", httponly=True, max_age=86400*7)
-        return response
-    else:
-        return RedirectResponse(url="/login?error=1", status_code=303)
-
-# Выход из системы
-@app.get("/logout")
-def logout():
-    response = RedirectResponse(url="/login", status_code=303)
-    response.delete_cookie("auth_token")
-    return response
-
-# Главная страница мониторинга слетов
 @app.get("/", response_class=HTMLResponse)
-def view_site(request: Request, server_id: int = 1):
-    # Проверка cookies
-    auth_cookie = request.cookies.get("auth_token")
-    if auth_cookie != "authenticated":
-        return RedirectResponse(url="/login", status_code=303)
-    
-    if not DATABASE_URL:
-        return HTMLResponse(
-            "<body style='background:#181825;color:#f38ba8;font-family:sans-serif;padding:20px;text-align:center;'>"
-            "<h2>⚠️ Ошибка конфигурации</h2><p>Переменная <code>DATABASE_URL</code> не добавлена на Render.</p></body>",
-            status_code=500
-        )
+async def serve_index():
+    return """
+    <!DOCTYPE html>
+    <html lang="ru">
+    <head>
+        <meta charset="UTF-8">
+        <title>Arizona Slet Scanner</title>
+        <style>
+            body { font-family: Arial, sans-serif; background: #1a1a1a; color: #fff; margin: 20px; }
+            .nav-tabs { display: flex; flex-wrap: wrap; gap: 5px; border-bottom: 2px solid #333; padding-bottom: 10px; }
+            .tab-btn { background: #2a2a2a; color: #fff; border: 1px solid #444; padding: 8px 15px; cursor: pointer; border-radius: 4px; }
+            .tab-btn.active { background: #007bff; border-color: #0056b3; }
+            .tab-btn.summary-btn { background: #28a745; }
+            .content-area { margin-top: 20px; }
+            .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 15px; }
+            .card { background: #2a2a2a; padding: 15px; border-radius: 8px; border: 1px solid #333; }
+            .card h3 { margin-top: 0; color: #007bff; }
+            table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+            th, td { border: 1px solid #333; padding: 8px; text-align: left; }
+            th { background: #252525; }
+        </style>
+    </head>
+    <body>
+        <h1>Arizona RP — Сканер Слётов</h1>
+        <div class="nav-tabs" id="tabs-header">
+            <button class="tab-btn summary-btn active" onclick="loadSummary()">📊 Общая сводка</button>
+        </div>
+        <div class="content-area" id="content"></div>
 
-    try:
-        conn = psycopg2.connect(DATABASE_URL, sslmode="require")
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        
-        cur.execute("""
-            SELECT DISTINCT ON (house_id) house_id, paydays_left, scanned_at 
-            FROM house_paydays WHERE server_id = %s
-            ORDER BY house_id, scanned_at DESC
-        """, (server_id,))
-        houses = cur.fetchall()
-        houses = sorted(houses, key=lambda x: x['paydays_left'])
+        <script>
+            const SERVER_NAMES = {
+                1: "Phoenix", 2: "Tucson", 3: "Scottdale", 4: "Chandler", 5: "Brainburg",
+                6: "Saint-Rose", 7: "Mesa", 8: "Red-Rock", 9: "Yuma", 10: "Surprise",
+                11: "Prescott", 12: "Glendale", 13: "Kingman", 14: "Winslow", 15: "Payson",
+                16: "Gilbert", 17: "Show Low", 18: "Casa-Grande", 19: "Page", 20: "Sun-City",
+                21: "Queen-Creek", 22: "Sedona", 23: "Holiday", 24: "Wednesday", 25: "Yava",
+                26: "Faraway", 27: "Bumble Bee", 28: "Christmas", 29: "Love", 30: "Mirage",
+                31: "Drake", 32: "Space", 33: "Home"
+            };
 
-        cur.execute("""
-            SELECT DISTINCT ON (biz_id) biz_id, paydays_left, scanned_at 
-            FROM biz_paydays WHERE server_id = %s
-            ORDER BY biz_id, scanned_at DESC
-        """, (server_id,))
-        bizs = cur.fetchall()
-        bizs = sorted(bizs, key=lambda x: x['paydays_left'])
-
-        cur.close()
-        conn.close()
-
-        return templates.TemplateResponse(
-            request=request,
-            name="index.html",
-            context={
-                "houses": houses,
-                "bizs": bizs,
-                "server_id": server_id,
-                "servers": SERVERS,
-                "current_server_name": SERVERS.get(server_id, f"Server #{server_id}")
+            function initTabs() {
+                const header = document.getElementById('tabs-header');
+                for (let id in SERVER_NAMES) {
+                    const btn = document.createElement('button');
+                    btn.className = 'tab-btn';
+                    btn.innerText = `${id}. ${SERVER_NAMES[id]}`;
+                    btn.onclick = () => loadServerData(id, btn);
+                    header.appendChild(btn);
+                }
             }
-        )
-    except Exception as e:
-        return HTMLResponse(
-            f"<body style='background:#181825;color:#f38ba8;font-family:sans-serif;padding:20px;'>"
-            f"<h2>❌ Ошибка базы данных:</h2><pre>{str(e)}</pre></body>",
-            status_code=500
-        )
+
+            function setActiveTab(element) {
+                document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+                element.classList.add('active');
+            }
+
+            async function loadSummary() {
+                setActiveTab(document.querySelector('.summary-btn'));
+                const res = await fetch('/api/summary');
+                const data = await res.json();
+                let html = `<h2>📊 Общая сводка по серверам</h2><div class="grid">`;
+                data.forEach(srv => {
+                    html += `
+                        <div class="card">
+                            <h3>${srv.server_id}. ${srv.server_name}</h3>
+                            <p><b>Скан:</b> ${srv.last_scan}</p>
+                            <p>🏠 Домов: <b>${srv.houses_count}</b></p>
+                            <p>🏢 Бизнесов: <b>${srv.biz_count}</b></p>
+                        </div>
+                    `;
+                });
+                html += `</div>`;
+                document.getElementById('content').innerHTML = html;
+            }
+
+            async function loadServerData(serverId, btnElement) {
+                setActiveTab(btnElement);
+                const res = await fetch(`/api/server/${serverId}`);
+                const data = await res.json();
+
+                let html = `<h2>Сервер: ${data.server_name} (${data.server_id})</h2>`;
+                html += `<p>Последнее обновление: <b>${data.last_scan || 'Нет данных'}</b></p>`;
+                html += `<h3>🏠 Дома</h3>` + renderTable(data.houses);
+                html += `<h3>🏢 Бизнесы</h3>` + renderTable(data.biz);
+                document.getElementById('content').innerHTML = html;
+            }
+
+            function renderTable(items) {
+                if (!items || items.length === 0) return `<p>Нет данных</p>`;
+                let t = `<table><tr><th>ID Объекта</th><th>Осталось PayDay</th></tr>`;
+                items.forEach(i => {
+                    t += `<tr><td>№${i.id}</td><td><b>${i.paydays} PD</b></td></tr>`;
+                });
+                return t + `</table>`;
+            }
+
+            initTabs();
+            loadSummary();
+        </script>
+    </body>
+    </html>
+    """
