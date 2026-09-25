@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from fastapi import FastAPI, Header, HTTPException, Depends, Request
@@ -13,9 +14,16 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 API_KEY = os.getenv("API_KEY", "SECRET_KEY_12345")
 SITE_PASSWORD = os.getenv("SITE_PASSWORD", "mysecretpass")
 
-templates = Jinja2Templates(directory="templates")
+# Надежное определение пути к папке с шаблонами
+BASE_DIR = Path(__file__).resolve().parent
+templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 def get_db():
+    if not DATABASE_URL:
+        raise HTTPException(
+            status_code=500, 
+            detail="DATABASE_URL variable is not configured in Environment Variables!"
+        )
     conn = psycopg2.connect(DATABASE_URL, sslmode="require")
     try:
         yield conn
@@ -38,28 +46,33 @@ class SletPayload(BaseModel):
 @app.on_event("startup")
 def startup_db():
     if not DATABASE_URL:
+        print("[WARNING] DATABASE_URL is not set, skipping database init.")
         return
-    conn = psycopg2.connect(DATABASE_URL, sslmode="require")
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS house_paydays (
-            id SERIAL PRIMARY KEY,
-            house_id INT NOT NULL,
-            paydays_left INT NOT NULL,
-            server_id INT NOT NULL,
-            scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE TABLE IF NOT EXISTS biz_paydays (
-            id SERIAL PRIMARY KEY,
-            biz_id INT NOT NULL,
-            paydays_left INT NOT NULL,
-            server_id INT NOT NULL,
-            scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
-    conn.commit()
-    cur.close()
-    conn.close()
+    try:
+        conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS house_paydays (
+                id SERIAL PRIMARY KEY,
+                house_id INT NOT NULL,
+                paydays_left INT NOT NULL,
+                server_id INT NOT NULL,
+                scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE TABLE IF NOT EXISTS biz_paydays (
+                id SERIAL PRIMARY KEY,
+                biz_id INT NOT NULL,
+                paydays_left INT NOT NULL,
+                server_id INT NOT NULL,
+                scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+        print("[SUCCESS] Tables initialized successfully.")
+    except Exception as e:
+        print(f"[ERROR] Failed to initialize database on startup: {e}")
 
 @app.post("/api/paydays", dependencies=[Depends(verify_api_key)])
 def save_paydays(payload: SletPayload, conn=Depends(get_db)):
@@ -82,33 +95,54 @@ def save_paydays(payload: SletPayload, conn=Depends(get_db)):
         cur.close()
 
 @app.get("/", response_class=HTMLResponse)
-def view_site(request: Request, password: str = "", server_id: int = 1, conn=Depends(get_db)):
+def view_site(request: Request, password: str = "", server_id: int = 1):
     if password != SITE_PASSWORD:
-        return HTMLResponse("<h2 style='color:white;text-align:center;'>Доступ закрыт. Укажите верный пароль.</h2>", status_code=403)
+        return HTMLResponse(
+            "<body style='background:#181825;color:white;font-family:sans-serif;text-align:center;padding-top:50px;'>"
+            "<h2>🔒 Доступ закрыт</h2><p>Укажите верный пароль в ссылке: <code>?password=ВАШ_ПАРОЛЬ</code></p></body>", 
+            status_code=403
+        )
     
-    cur = conn.cursor(cursor_factory=RealDictCursor)
-    
-    cur.execute("""
-        SELECT DISTINCT ON (house_id) house_id, paydays_left, scanned_at 
-        FROM house_paydays WHERE server_id = %s
-        ORDER BY house_id, scanned_at DESC
-    """, (server_id,))
-    houses = cur.fetchall()
-    houses = sorted(houses, key=lambda x: x['paydays_left'])
+    if not DATABASE_URL:
+        return HTMLResponse(
+            "<body style='background:#181825;color:#f38ba8;font-family:sans-serif;padding:20px;text-align:center;'>"
+            "<h2>⚠️ Ошибка конфигурации</h2><p>Переменная <code>DATABASE_URL</code> не добавлена в Environment Variables на Render.</p></body>",
+            status_code=500
+        )
 
-    cur.execute("""
-        SELECT DISTINCT ON (biz_id) biz_id, paydays_left, scanned_at 
-        FROM biz_paydays WHERE server_id = %s
-        ORDER BY biz_id, scanned_at DESC
-    """, (server_id,))
-    bizs = cur.fetchall()
-    bizs = sorted(bizs, key=lambda x: x['paydays_left'])
+    try:
+        conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+        cur = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cur.execute("""
+            SELECT DISTINCT ON (house_id) house_id, paydays_left, scanned_at 
+            FROM house_paydays WHERE server_id = %s
+            ORDER BY house_id, scanned_at DESC
+        """, (server_id,))
+        houses = cur.fetchall()
+        houses = sorted(houses, key=lambda x: x['paydays_left'])
 
-    cur.close()
-    return templates.TemplateResponse("index.html", {
-        "request": request, 
-        "houses": houses, 
-        "bizs": bizs,
-        "server_id": server_id,
-        "password": password
-    })
+        cur.execute("""
+            SELECT DISTINCT ON (biz_id) biz_id, paydays_left, scanned_at 
+            FROM biz_paydays WHERE server_id = %s
+            ORDER BY biz_id, scanned_at DESC
+        """, (server_id,))
+        bizs = cur.fetchall()
+        bizs = sorted(bizs, key=lambda x: x['paydays_left'])
+
+        cur.close()
+        conn.close()
+
+        return templates.TemplateResponse("index.html", {
+            "request": request, 
+            "houses": houses, 
+            "bizs": bizs,
+            "server_id": server_id,
+            "password": password
+        })
+    except Exception as e:
+        return HTMLResponse(
+            f"<body style='background:#181825;color:#f38ba8;font-family:sans-serif;padding:20px;'>"
+            f"<h2>❌ Ошибка базы данных:</h2><pre>{str(e)}</pre></body>",
+            status_code=500
+        )
