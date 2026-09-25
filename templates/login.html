@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Авторизация | Arizona Slet Scanner</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            background-color: #181825; 
+            color: #cdd6f4; 
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+            min-height: 100vh; 
+        }
+        .login-card { 
+            background: #1e1e2e; 
+            padding: 30px; 
+            border-radius: 12px; 
+            box-shadow: 0 8px 24px rgba(0,0,0,0.5); 
+            width: 100%; 
+            max-width: 380px; 
+            text-align: center; 
+        }
+        .login-card h2 { color: #89b4fa; margin-bottom: 20px; font-size: 24px; }
+        .input-group { margin-bottom: 18px; text-align: left; }
+        .input-group label { display: block; margin-bottom: 6px; color: #a6adc8; font-size: 14px; }
+        .input-group input { 
+            width: 100%; 
+            padding: 10px 14px; 
+            border-radius: 6px; 
+            border: 1px solid #45475a; 
+            background: #313244; 
+            color: #cdd6f4; 
+            font-size: 15px; 
+            outline: none; 
+            transition: border-color 0.2s; 
+        }
+        .input-group input:focus { border-color: #89b4fa; }
+        .btn { 
+            width: 100%; 
+            padding: 12px; 
+            background: #89b4fa; 
+            color: #11111b; 
+            border: none; 
+            border-radius: 6px; 
+            font-size: 16px; 
+            font-weight: bold; 
+            cursor: pointer; 
+            transition: background 0.2s; 
+        }
+        .btn:hover { background: #b4befe; }
+        .error-msg { 
+            background: #f38ba8; 
+            color: #11111b; 
+            padding: 10px; 
+            border-radius: 6px; 
+            margin-bottom: 15px; 
+            font-size: 14px; 
+            font-weight: bold; 
+        }
+    </style>
+</head>
+<body>
+    <div class="login-card">
+        <h2>🔒 Вход в систему</h2>
+        
+        {% if error %}
+        <div class="error-msg">Неверный логин или пароль!</div>
+        {% endif %}
+
+        <form action="/login" method="POST">
+            <div class="input-group">
+                <label for="login">Логин</label>
+                <input type="text" id="login" name="login" placeholder="Введите логин" required autocomplete="off">
+            </div>
+            <div class="input-group">
+                <label for="password">Пароль</label>
+                <input type="password" id="password" name="password" placeholder="Введите пароль" required>
+            </div>
+            <button type="submit" class="btn">Войти</button>
+        </form>
+    </div>
+</body>
+</html>
