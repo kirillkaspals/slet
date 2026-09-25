@@ -2,61 +2,106 @@
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Мониторинг Слетов Arizona RP</title>
     <style>
         body { font-family: Arial, sans-serif; background-color: #181825; color: #cdd6f4; margin: 20px; }
-        h1, h2 { text-align: center; color: #89b4fa; }
-        .grid { display: flex; gap: 20px; justify-content: center; flex-wrap: wrap; }
-        .card { background: #1e1e2e; padding: 15px; border-radius: 10px; width: 45%; min-width: 320px; }
+        .header-container { display: flex; justify-content: space-between; align-items: center; max-width: 1200px; margin: 0 auto 20px auto; flex-wrap: wrap; gap: 15px; }
+        h1 { margin: 0; color: #89b4fa; font-size: 24px; }
+        .controls { display: flex; align-items: center; gap: 15px; }
+        select { background-color: #313244; color: #cdd6f4; border: 1px solid #45475a; border-radius: 8px; padding: 8px 12px; font-size: 14px; cursor: pointer; outline: none; }
+        select:focus { border-color: #89b4fa; }
+        .logout-btn { background-color: #f38ba8; color: #11111b; text-decoration: none; padding: 8px 14px; border-radius: 8px; font-weight: bold; font-size: 14px; transition: 0.2s; }
+        .logout-btn:hover { background-color: #eba0ac; }
+        .grid { display: flex; gap: 20px; justify-content: center; flex-wrap: wrap; max-width: 1200px; margin: 0 auto; }
+        .card { background: #1e1e2e; padding: 15px; border-radius: 10px; width: 48%; min-width: 320px; box-sizing: border-box; }
+        h2 { text-align: center; color: #89b4fa; margin-top: 0; }
         table { width: 100%; border-collapse: collapse; margin-top: 10px; }
         th, td { padding: 10px; text-align: center; border-bottom: 1px solid #313244; }
-        th { background-color: #313244; }
+        th { background-color: #313244; color: #a6adc8; }
         .danger { color: #f38ba8; font-weight: bold; }
-        .warning { color: #f9e2af; }
-        .ok { color: #a6e3a1; }
+        .warning { color: #f9e2af; font-weight: bold; }
+        .ok { color: #a6e3a1; font-weight: bold; }
     </style>
 </head>
 <body>
-    <h1>📊 Мониторинг Слетов (Сервер №{{ server_id }})</h1>
+
+    <div class="header-container">
+        <h1>📊 Мониторинг Слетов — {{ current_server_name }} [№{{ server_id }}]</h1>
+        
+        <div class="controls">
+            <label for="server-select">Сервер:</label>
+            <select id="server-select" onchange="location = '?server_id=' + this.value;">
+                {% for sid, sname in servers.items() %}
+                    <option value="{{ sid }}" {% if sid == server_id %}selected{% endif %}>
+                        [{{ sid }}] {{ sname }}
+                    </option>
+                {% endfor %}
+            </select>
+
+            <a href="/logout" class="logout-btn">Выйти</a>
+        </div>
+    </div>
+
     <div class="grid">
+        <!-- Таблица домов -->
         <div class="card">
             <h2>🏠 Дома</h2>
             <table>
                 <thead>
-                    <tr><th>№ Дома</th><th>Осталось PD</th><th>Время скана</th></tr>
+                    <tr>
+                        <th>№ Дома</th>
+                        <th>Осталось PD</th>
+                        <th>Время скана</th>
+                    </tr>
                 </thead>
                 <tbody>
                     {% for item in houses %}
                     <tr>
                         <td><b>Дом {{ item.house_id }}</b></td>
-                        <td class="{% if item.paydays_left <= 3 %}danger{% elif item.paydays_left <= 8 %}warning{% else %}ok{% endif %}">{{ item.paydays_left }} PD</td>
+                        <td class="{% if item.paydays_left <= 3 %}danger{% elif item.paydays_left <= 8 %}warning{% else %}ok{% endif %}">
+                            {{ item.paydays_left }} PD
+                        </td>
                         <td>{{ item.scanned_at.strftime('%H:%M %d.%m') }}</td>
                     </tr>
                     {% else %}
-                    <tr><td colspan="3">Нет данных</td></tr>
+                    <tr>
+                        <td colspan="3">Нет данных</td>
+                    </tr>
                     {% endfor %}
                 </tbody>
             </table>
         </div>
+
+        <!-- Таблица бизнесов -->
         <div class="card">
             <h2>🏢 Бизнесы</h2>
             <table>
                 <thead>
-                    <tr><th>№ Бизнеса</th><th>Осталось PD</th><th>Время скана</th></tr>
+                    <tr>
+                        <th>№ Бизнеса</th>
+                        <th>Осталось PD</th>
+                        <th>Время скана</th>
+                    </tr>
                 </thead>
                 <tbody>
                     {% for item in bizs %}
                     <tr>
                         <td><b>Бизнес {{ item.biz_id }}</b></td>
-                        <td class="{% if item.paydays_left <= 3 %}danger{% elif item.paydays_left <= 8 %}warning{% else %}ok{% endif %}">{{ item.paydays_left }} PD</td>
+                        <td class="{% if item.paydays_left <= 3 %}danger{% elif item.paydays_left <= 8 %}warning{% else %}ok{% endif %}">
+                            {{ item.paydays_left }} PD
+                        </td>
                         <td>{{ item.scanned_at.strftime('%H:%M %d.%m') }}</td>
                     </tr>
                     {% else %}
-                    <tr><td colspan="3">Нет данных</td></tr>
+                    <tr>
+                        <td colspan="3">Нет данных</td>
+                    </tr>
                     {% endfor %}
                 </tbody>
             </table>
         </div>
     </div>
+
 </body>
 </html>
