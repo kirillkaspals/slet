@@ -1,12 +1,21 @@
 import datetime
 from typing import List, Optional
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from fastapi.responses import HTMLResponse
 
 app = FastAPI(title="Arizona Slet Scanner")
 
-# Словарь для перевода названий серверов в числовой ID для сайта
+# Разрешаем запросы со всех источников
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 SERVER_NAME_TO_ID = {
     "Phoenix": 1, "Tucson": 2, "Scottdale": 3, "Chandler": 4, "Brainburg": 5,
     "Saint-Rose": 6, "Mesa": 7, "Red-Rock": 8, "Yuma": 9, "Surprise": 10,
@@ -17,7 +26,6 @@ SERVER_NAME_TO_ID = {
     "Drake": 31, "Space": 32, "Home": 33
 }
 
-# Временная база данных в памяти для всех 33 серверов
 database = {
     "servers": {s_id: {"houses": [], "biz": [], "last_scan": None} for s_id in SERVER_NAME_TO_ID.values()}
 }
@@ -35,10 +43,18 @@ class Payload(BaseModel):
     scanner: Optional[str] = "unknown"
     entries: List[PropertyEntry]
 
-# --- ЭНДПОИНТ ПРИЕМА ДАННЫХ ОТ СКРИПТА ---
+@app.get("/ping")
+async def ping():
+    return {"status": "ok"}
+
 @app.post("/api/paydays")
-async def receive_paydays(data: Payload, x_secret_key: str = Header(None)):
-    if x_secret_key != SECRET_KEY:
+async def receive_paydays(
+    data: Payload, 
+    x_secret_key: Optional[str] = Header(None, alias="X-Secret-Key"),
+    x_api_key: Optional[str] = Header(None, alias="X-API-Key")
+):
+    key = x_secret_key or x_api_key
+    if key != SECRET_KEY:
         raise HTTPException(status_code=403, detail="Invalid API Key")
     
     server_name = data.server
@@ -52,22 +68,20 @@ async def receive_paydays(data: Payload, x_secret_key: str = Header(None)):
 
     for item in data.entries:
         entry_data = {
-            "id": item.propId if item.propId is not None else item.pos,  # Если ID нет, подставляем позицию в списке
+            "id": item.propId if item.propId is not None else item.pos,
             "paydays": item.pd
         }
         if item.propType == "house":
             houses.append(entry_data)
-        elif item.propType == "business":
+        elif item.propType in ["business", "biz"]:
             biz.append(entry_data)
 
-    # Сохраняем в базу данных
     database["servers"][server_id]["houses"] = houses
     database["servers"][server_id]["biz"] = biz
     database["servers"][server_id]["last_scan"] = datetime.datetime.now().strftime("%d.%m.%Y %H:%M:%S")
 
     return {"status": "ok", "received": len(data.entries)}
 
-# --- ЭНДПОИНТ ОБЩЕЙ СВОДКИ ---
 @app.get("/api/summary")
 async def get_summary():
     summary = []
@@ -82,14 +96,12 @@ async def get_summary():
         })
     return summary
 
-# --- ЭНДПОИНТ ДАННЫХ КОНКРЕТНОГО СЕРВЕРА ---
 @app.get("/api/server/{server_id}")
 async def get_server_data(server_id: int):
     if server_id not in database["servers"]:
         raise HTTPException(status_code=404, detail="Server not found")
     
     srv_data = database["servers"][server_id]
-    # Находим имя сервера по ID
     server_name = next((k for k, v in SERVER_NAME_TO_ID.items() if v == server_id), "Unknown")
     
     return {
@@ -100,7 +112,6 @@ async def get_server_data(server_id: int):
         "biz": sorted(srv_data["biz"], key=lambda x: x["paydays"])
     }
 
-# --- ИНТЕРФЕЙС САЙТА ---
 @app.get("/", response_class=HTMLResponse)
 async def serve_index():
     return """
@@ -191,7 +202,7 @@ async def serve_index():
 
             function renderTable(items) {
                 if (!items || items.length === 0) return `<p>Нет данных</p>`;
-                let t = `<table><tr><th>ID / Номер в списке</th><th>Осталось PayDay</th></tr>`;
+                let t = `<table><tr><th>№ в списке / ID</th><th>Осталось PayDay</th></tr>`;
                 items.forEach(i => {
                     t += `<tr><td>№${i.id}</td><td><b>${i.paydays} PD</b></td></tr>`;
                 });
