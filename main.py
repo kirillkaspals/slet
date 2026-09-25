@@ -17,6 +17,43 @@ API_KEY = os.getenv("API_KEY", "SECRET_KEY_12345")
 SITE_LOGIN = os.getenv("SITE_LOGIN", "admin")
 SITE_PASSWORD = os.getenv("SITE_PASSWORD", "mysecretpass")
 
+# Словарь серверов Arizona RP (1-33)
+SERVERS = {
+    1: "Phoenix",
+    2: "Tucson",
+    3: "Scottdale",
+    4: "Chandler",
+    5: "Brainburg",
+    6: "Saint-Rose",
+    7: "Mesa",
+    8: "Red-Rock",
+    9: "Yuma",
+    10: "Surprise",
+    11: "Prescott",
+    12: "Glendale",
+    13: "Kingman",
+    14: "Winslow",
+    15: "Payson",
+    16: "Gilbert",
+    17: "Show Low",
+    18: "Casa-Grande",
+    19: "Page",
+    20: "Sun-City",
+    21: "Queen-Creek",
+    22: "Sedona",
+    23: "Holiday",
+    24: "Wednesday",
+    25: "Yava",
+    26: "Faraway",
+    27: "Bumble Bee",
+    28: "Christmas",
+    29: "Love",
+    30: "Mirage",
+    31: "Drake",
+    32: "Space",
+    33: "Home"
+}
+
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
@@ -161,7 +198,9 @@ def view_site(request: Request, server_id: int = 1):
             context={
                 "houses": houses,
                 "bizs": bizs,
-                "server_id": server_id
+                "server_id": server_id,
+                "servers": SERVERS,
+                "current_server_name": SERVERS.get(server_id, f"Server #{server_id}")
             }
         )
     except Exception as e:
