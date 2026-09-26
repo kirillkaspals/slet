@@ -359,9 +359,14 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
                         prev_it["isPendingPair"] = False
 
         existing_scan = next((s for s in scans if s["scanId"] == scan_id), None)
+        has_houses_in_payload = any(item.propType == "house" for item in payload.entries)
+        has_biz_in_payload = any(item.propType != "house" for item in payload.entries)
+
         if existing_scan:
-            existing_scan["houses"] = houses
-            existing_scan["businesses"] = businesses
+            if has_houses_in_payload:
+                existing_scan["houses"] = houses
+            if has_biz_in_payload:
+                existing_scan["businesses"] = businesses
             existing_scan["scanTime"] = now_msk.strftime("%Y-%m-%d %H:%M:%S")
             existing_scan["isConfirmed"] = is_pair_found
             existing_scan["hasPair"] = is_pair_found
@@ -681,7 +686,6 @@ DASHBOARD_HTML = """
             return html + '</table>';
         }
 
-        // Проверка: должен ли объект слететь в следующий PayDay с учетом правил сервера
         function willDropNextPayday(item, serverRules, propType) {
             if (!item || item.isPendingPair) return false;
             
@@ -760,7 +764,6 @@ DASHBOARD_HTML = """
                         document.getElementById(`houses-view-${srv}`).innerHTML = renderTable(latestConfirmed.houses, srv, latestConfirmed.scanId, 'house', false);
                         document.getElementById(`biz-view-${srv}`).innerHTML = renderTable(latestConfirmed.businesses, srv, latestConfirmed.scanId, 'biz', false);
 
-                        // Логика фильтрации для вкладки "Ближайшие слеты"
                         const serverRules = info.dropRules || {};
                         const droppingHouses = (latestConfirmed.houses || []).filter(h => willDropNextPayday(h, serverRules, 'house'));
                         const droppingBiz = (latestConfirmed.businesses || []).filter(b => willDropNextPayday(b, serverRules, 'biz'));
