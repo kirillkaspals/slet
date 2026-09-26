@@ -739,8 +739,6 @@ DASHBOARD_HTML = """
 
             let paydaysApplied = 0;
             while (paydaysApplied < neededPayDays) {
-                // Пейдей в 05:00 списывает PD, но СЛЁТ в 05:00 не происходит. 
-                // Если слёт выпадает на 05:00, targetTime переносится на 06:00.
                 paydaysApplied++;
                 if (paydaysApplied === neededPayDays && targetTime.getHours() === 5) {
                     targetTime.setHours(6);
@@ -850,8 +848,6 @@ DASHBOARD_HTML = """
             const pdAfterPayday = item.pd - decrement;
             const dropCondition = pdAfterPayday < dropLimit;
 
-            // Если списание происходит в 5 утра и лимит достигнут, слёт переносится на 6 утра.
-            // Но в категории "Ближайшие слёты" данный объект должен находиться как в 5, так и в 6 утра.
             return dropCondition;
         }
 
@@ -866,11 +862,15 @@ DASHBOARD_HTML = """
 
                 for (const srv of ALL_SERVERS) {
                     const info = data[srv];
-                    if (!info) continue;
 
-                    document.querySelectorAll(`.season-badge-${srv}`).forEach(elem => {
-                        if (info.season) elem.innerText = `Сезон: ${info.season.display}`;
-                    });
+                    // ✅ Гарантированно обновляем лейбл сезона еще ДО всех возможных continue
+                    if (info && info.season) {
+                        document.querySelectorAll(`.season-badge-${srv}`).forEach(elem => {
+                            elem.innerText = `Сезон: ${info.season.display}`;
+                        });
+                    }
+
+                    if (!info) continue;
 
                     const scans = info.scans || [];
                     const manageTabsElem = document.getElementById(`scan-tabs-${srv}`);
