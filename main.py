@@ -64,38 +64,47 @@ class Payload(BaseModel):
 
 class UpdateStatusModel(BaseModel):
     server: str
+    scanId: str
     propType: str
     pos: int
     status: str
 
 class DeleteItemModel(BaseModel):
     server: str
+    scanId: str
     propType: str
     pos: int
 
 class AddItemModel(BaseModel):
     server: str
+    scanId: str
     propType: str
     pd: int
     propId: Optional[int] = None
 
 # --- РАБОТА С ФАЙЛАМИ И ДАННЫМИ ---
 def load_data_from_file() -> Dict[str, dict]:
-    data_store = {srv: {"houses": [], "businesses": [], "lastScanTime": None} for srv in ALL_SERVERS}
+    data_store = {srv: {"scans": []} for srv in ALL_SERVERS}
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
                 for srv in ALL_SERVERS:
                     if srv in loaded:
-                        data_store[srv] = loaded[srv]
-                        if "lastScanTime" not in data_store[srv]:
-                            data_store[srv]["lastScanTime"] = None
-                        # Совместимость со старыми файлами: заполняем basePd если его не было
-                        for cat in ["houses", "businesses"]:
-                            for item in data_store[srv].get(cat, []):
-                                if "basePd" not in item:
-                                    item["basePd"] = item["pd"]
+                        # Миграция старого формата данных под новый массив scans
+                        if "scans" in loaded[srv]:
+                            data_store[srv] = loaded[srv]
+                        else:
+                            old_h = loaded[srv].get("houses", [])
+                            old_b = loaded[srv].get("businesses", [])
+                            if old_h or old_b:
+                                scan_time = loaded[srv].get("lastScanTime") or datetime.now(MSK_TZ).strftime("%Y-%m-%d %H:%M:%S")
+                                data_store[srv]["scans"] = [{
+                                    "scanId": scan_time,
+                                    "scanTime": scan_time,
+                                    "houses": old_h,
+                                    "businesses": old_b
+                                }]
             print("Данные успешно загружены из файла.")
         except Exception as e:
             print(f"Ошибка чтения JSON-файла: {e}")
@@ -134,24 +143,31 @@ async def process_hourly_payday():
     async with data_lock:
         print(f"[{datetime.now(MSK_TZ).strftime('%Y-%m-%d %H:%M:%S')}] Списание PayDay для общего вида...")
         for srv, data in server_data.items():
-            # Дома (отнимаем только у текущего pd)
+            scans = data.get("scans", [])
+            if not scans:
+                continue
+            
+            # Списание происходит у самого последнего сканирования
+            latest_scan = scans[-1]
+
+            # Дома
             updated_houses = []
-            for h in data["houses"]:
+            for h in latest_scan["houses"]:
                 decrement = 1 if h.get("status") == "insured" else 2
                 h["pd"] -= decrement
                 if h["pd"] > 0:
                     updated_houses.append(h)
-            data["houses"] = sorted(updated_houses, key=lambda x: x["pd"])
+            latest_scan["houses"] = sorted(updated_houses, key=lambda x: x["pd"])
 
             # Бизнесы
             updated_biz = []
-            for b in data["businesses"]:
+            for b in latest_scan["businesses"]:
                 st = b.get("status", "insured")
                 decrement = 1 if st == "insured" else (2 if st == "uninsured" else 4)
                 b["pd"] -= decrement
                 if b["pd"] > 0:
                     updated_biz.append(b)
-            data["businesses"] = sorted(updated_biz, key=lambda x: x["pd"])
+            latest_scan["businesses"] = sorted(updated_biz, key=lambda x: x["pd"])
 
         await save_data_to_file_async()
 
@@ -197,38 +213,44 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
     srv = payload.server
     scan_time = datetime.now(MSK_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
+    houses = []
+    businesses = []
+
+    for item in payload.entries:
+        record = {
+            "basePd": item.pd,
+            "pd": item.pd,
+            "propId": item.propId,
+            "pos": item.pos,
+            "status": "insured",
+            "updatedAt": datetime.now(MSK_TZ).strftime("%H:%M:%S")
+        }
+        if item.propType == "house":
+            houses.append(record)
+        else:
+            businesses.append(record)
+
+    houses = sorted(houses, key=lambda x: x["pd"])
+    businesses = sorted(businesses, key=lambda x: x["pd"])
+
+    new_scan = {
+        "scanId": scan_time,
+        "scanTime": scan_time,
+        "houses": houses,
+        "businesses": businesses
+    }
+
     async with data_lock:
         if srv not in server_data:
-            server_data[srv] = {"houses": [], "businesses": [], "lastScanTime": scan_time}
+            server_data[srv] = {"scans": []}
         
-        server_data[srv]["lastScanTime"] = scan_time
+        if "scans" not in server_data[srv]:
+            server_data[srv]["scans"] = []
 
-        for item in payload.entries:
-            record = {
-                "basePd": item.pd, # Запоминаем исходный PayDay при сканировании
-                "pd": item.pd,     # Текущий PayDay (будет отниматься каждый час)
-                "propId": item.propId,
-                "pos": item.pos,
-                "status": "insured",
-                "updatedAt": datetime.now(MSK_TZ).strftime("%H:%M:%S")
-            }
-            target_key = "houses" if item.propType == "house" else "businesses"
-            existing_list = server_data[srv][target_key]
-            
-            updated = False
-            for idx, existing_item in enumerate(existing_list):
-                if existing_item["pos"] == item.pos:
-                    record["status"] = existing_item.get("status", "insured")
-                    existing_list[idx] = record
-                    updated = True
-                    break
-            
-            if not updated:
-                existing_list.append(record)
-
-            server_data[srv][target_key] = sorted(existing_list, key=lambda x: x["pd"])
-
+        # Сохраняем новый скан в массив истории серверов
+        server_data[srv]["scans"].append(new_scan)
         await save_data_to_file_async()
+
     return {"status": "ok", "count": len(payload.entries), "scanTime": scan_time}
 
 @app.post("/api/update_status")
@@ -236,57 +258,63 @@ async def update_status(data: UpdateStatusModel):
     srv = data.server
     async with data_lock:
         if srv in server_data:
-            target_key = "houses" if data.propType in ["house", "houses"] else "businesses"
-            for item in server_data[srv][target_key]:
-                if item["pos"] == data.pos:
-                    item["status"] = data.status
-                    await save_data_to_file_async()
-                    return {"status": "success"}
-    raise HTTPException(status_code=404, detail="Item or Server not found")
+            for scan in server_data[srv].get("scans", []):
+                if scan["scanId"] == data.scanId:
+                    target_key = "houses" if data.propType in ["house", "houses"] else "businesses"
+                    for item in scan[target_key]:
+                        if item["pos"] == data.pos:
+                            item["status"] = data.status
+                            await save_data_to_file_async()
+                            return {"status": "success"}
+    raise HTTPException(status_code=404, detail="Scan, Item or Server not found")
 
 @app.post("/api/delete_item")
 async def delete_item(data: DeleteItemModel):
     srv = data.server
     async with data_lock:
         if srv in server_data:
-            target_key = "houses" if data.propType in ["house", "houses"] else "businesses"
-            server_data[srv][target_key] = [
-                item for item in server_data[srv][target_key] if item["pos"] != data.pos
-            ]
-            await save_data_to_file_async()
-            return {"status": "success"}
-    raise HTTPException(status_code=404, detail="Server not found")
+            for scan in server_data[srv].get("scans", []):
+                if scan["scanId"] == data.scanId:
+                    target_key = "houses" if data.propType in ["house", "houses"] else "businesses"
+                    scan[target_key] = [
+                        item for item in scan[target_key] if item["pos"] != data.pos
+                    ]
+                    await save_data_to_file_async()
+                    return {"status": "success"}
+    raise HTTPException(status_code=404, detail="Server or Scan not found")
 
 @app.post("/api/add_item")
 async def add_item(data: AddItemModel):
     srv = data.server
     async with data_lock:
         if srv in server_data:
-            target_key = "houses" if data.propType in ["house", "houses"] else "businesses"
-            existing_positions = [item["pos"] for item in server_data[srv][target_key]]
-            new_pos = max(existing_positions, default=0) + 1
-            
-            new_record = {
-                "basePd": data.pd,
-                "pd": data.pd,
-                "propId": data.propId,
-                "pos": new_pos,
-                "status": "insured",
-                "updatedAt": datetime.now(MSK_TZ).strftime("%H:%M:%S")
-            }
-            
-            server_data[srv][target_key].append(new_record)
-            server_data[srv][target_key] = sorted(server_data[srv][target_key], key=lambda x: x["pd"])
-            await save_data_to_file_async()
-            return {"status": "success"}
-    raise HTTPException(status_code=404, detail="Server not found")
+            for scan in server_data[srv].get("scans", []):
+                if scan["scanId"] == data.scanId:
+                    target_key = "houses" if data.propType in ["house", "houses"] else "businesses"
+                    existing_positions = [item["pos"] for item in scan[target_key]]
+                    new_pos = max(existing_positions, default=0) + 1
+                    
+                    new_record = {
+                        "basePd": data.pd,
+                        "pd": data.pd,
+                        "propId": data.propId,
+                        "pos": new_pos,
+                        "status": "insured",
+                        "updatedAt": datetime.now(MSK_TZ).strftime("%H:%M:%S")
+                    }
+                    
+                    scan[target_key].append(new_record)
+                    scan[target_key] = sorted(scan[target_key], key=lambda x: x["pd"])
+                    await save_data_to_file_async()
+                    return {"status": "success"}
+    raise HTTPException(status_code=404, detail="Server or Scan not found")
 
 @app.get("/api/paydays")
 async def get_paydays():
     async with data_lock:
         return {
             srv: {
-                **data,
+                "scans": data.get("scans", []),
                 "season": get_server_season_info(srv)
             }
             for srv, data in server_data.items()
@@ -316,10 +344,14 @@ DASHBOARD_HTML = """
         .server-card { background-color: #1e1e1e; border: 1px solid #333; border-radius: 8px; padding: 15px 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
         .server-header { border-bottom: 1px solid #333; padding-bottom: 8px; margin-bottom: 12px; }
         .server-title { font-size: 1.3em; font-weight: bold; color: #4caf50; display: flex; justify-content: space-between; align-items: center; }
-        .server-meta { display: flex; gap: 10px; align-items: center; margin-top: 4px; font-size: 0.85em; }
-        .scan-time-badge { background-color: #1a2733; color: #64b5f6; border: 1px solid #1e88e5; padding: 2px 8px; border-radius: 4px; font-weight: 500; }
         .season-badge { font-size: 0.75em; background-color: #332a12; color: #ffb74d; border: 1px solid #ff9800; padding: 3px 8px; border-radius: 12px; font-weight: normal; }
         
+        /* Вкладки подсканирований для сервера */
+        .scan-tabs-container { display: flex; gap: 6px; margin-bottom: 15px; overflow-x: auto; padding-bottom: 4px; border-bottom: 1px solid #2a2a2a; }
+        .scan-subtab { background-color: #252525; color: #888; border: 1px solid #3a3a3a; padding: 4px 10px; font-size: 0.8em; border-radius: 4px; cursor: pointer; whitespace: nowrap; transition: 0.2s; }
+        .scan-subtab.active { background-color: #1e88e5; color: #fff; border-color: #64b5f6; font-weight: bold; }
+        .scan-subtab:hover:not(.active) { background-color: #333; color: #ddd; }
+
         .tables-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
         @media (max-width: 768px) { .tables-grid { grid-template-columns: 1fr; } }
         .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
@@ -348,6 +380,9 @@ DASHBOARD_HTML = """
         .empty { color: #666; font-style: italic; font-size: 0.85em; }
     </style>
     <script>
+        // Хранение активных закладок сканирований для каждого сервера
+        const activeServerScans = {};
+
         function switchTab(tabName) {
             document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
@@ -361,30 +396,41 @@ DASHBOARD_HTML = """
             }
         }
 
-        async function setStatus(server, propType, pos, status) {
+        function selectScanTab(server, scanId) {
+            activeServerScans[server] = scanId;
+            loadData();
+        }
+
+        async function setStatus(server, scanId, propType, pos, status) {
             try {
                 await fetch('/api/update_status', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ server, propType, pos, status })
+                    body: JSON.stringify({ server, scanId, propType, pos, status })
                 });
                 loadData();
             } catch(e) { console.error(e); }
         }
 
-        async function deleteItem(server, propType, pos) {
+        async function deleteItem(server, scanId, propType, pos) {
             if (!confirm('Удалить эту запись?')) return;
             try {
                 await fetch('/api/delete_item', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ server, propType, pos })
+                    body: JSON.stringify({ server, scanId, propType, pos })
                 });
                 loadData();
             } catch(e) { console.error(e); }
         }
 
         async function addItemPrompt(server, propType) {
+            const scanId = activeServerScans[server];
+            if (!scanId) {
+                alert('Сначала выберите или дождитесь сканирования!');
+                return;
+            }
+
             const title = propType === 'house' ? 'дом' : 'бизнес';
             const pdStr = prompt(`Введите оставшиеся PayDay для нового ${title}:`);
             if (!pdStr) return;
@@ -402,21 +448,19 @@ DASHBOARD_HTML = """
                 await fetch('/api/add_item', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ server, propType, pd, propId })
+                    body: JSON.stringify({ server, scanId, propType, pd, propId })
                 });
                 loadData();
             } catch(e) { console.error(e); }
         }
 
-        function renderTable(items, server, type, interactive = true) {
+        function renderTable(items, server, scanId, type, interactive = true) {
             if (!items || items.length === 0) return '<span class="empty">Нет данных</span>';
             
             let html = '<table><tr><th>№</th><th>ID</th><th>PD</th><th>Статус</th>' + (interactive ? '<th></th>' : '') + '</tr>';
             
             items.forEach((item, idx) => {
                 const st = item.status || 'insured';
-                
-                // Для управления — исходный (basePd), для общего вида — уменьшающийся (pd)
                 const displayPd = interactive ? (item.basePd !== undefined ? item.basePd : item.pd) : item.pd;
                 const badgeClass = interactive ? 'pd-badge-fixed' : 'pd-badge';
 
@@ -424,9 +468,9 @@ DASHBOARD_HTML = """
                 if (interactive) {
                     statusControl = `
                         <div class="btn-group">
-                            <button class="btn-opt ${st === 'insured' ? 'active-insured' : ''}" onclick="setStatus('${server}', '${type}', ${item.pos}, 'insured')">Страх.</button>
-                            <button class="btn-opt ${st === 'uninsured' ? 'active-uninsured' : ''}" onclick="setStatus('${server}', '${type}', ${item.pos}, 'uninsured')">Не страх.</button>
-                            ${type === 'biz' ? `<button class="btn-opt ${st === 'no_activity' ? 'active-noact' : ''}" onclick="setStatus('${server}', 'biz',${item.pos}, 'no_activity')">Без зан.</button>` : ''}
+                            <button class="btn-opt ${st === 'insured' ? 'active-insured' : ''}" onclick="setStatus('${server}', '${scanId}', '${type}', ${item.pos}, 'insured')">Страх.</button>
+                            <button class="btn-opt ${st === 'uninsured' ? 'active-uninsured' : ''}" onclick="setStatus('${server}', '${scanId}', '${type}', ${item.pos}, 'uninsured')">Не страх.</button>
+                            ${type === 'biz' ? `<button class="btn-opt ${st === 'no_activity' ? 'active-noact' : ''}" onclick="setStatus('${server}', '${scanId}', 'biz',${item.pos}, 'no_activity')">Без зан.</button>` : ''}
                         </div>`;
                 } else {
                     let label = st === 'insured' ? 'Страховка' : (st === 'uninsured' ? 'Без страховки' : 'Без занятости');
@@ -439,7 +483,7 @@ DASHBOARD_HTML = """
                     <td>${item.propId ? '№' + item.propId : '—'}</td>
                     <td><span class="${badgeClass}">${displayPd} pd</span></td>
                     <td>${statusControl}</td>
-                    ${interactive ? `<td><button class="btn-del" onclick="deleteItem('${server}', '${type}',${item.pos})">✖</button></td>` : ''}
+                    ${interactive ? `<td><button class="btn-del" onclick="deleteItem('${server}', '${scanId}', '${type}',${item.pos})">✖</button></td>` : ''}
                 </tr>`;
             });
             return html + '</table>';
@@ -455,21 +499,49 @@ DASHBOARD_HTML = """
                         if (info.season) elem.innerText = `Сезон: ${info.season.display}`;
                     });
 
-                    document.querySelectorAll(`.scan-time-${server}`).forEach(elem => {
-                        elem.innerText = info.lastScanTime ? `Сканирование: ${info.lastScanTime}` : 'Сканирование: Нет данных';
-                    });
+                    const scans = info.scans || [];
+                    const manageTabsElem = document.getElementById(`scan-tabs-${server}`);
+                    
+                    if (scans.length === 0) {
+                        if (manageTabsElem) manageTabsElem.innerHTML = '<span class="empty">Сканирований пока нет</span>';
+                        document.getElementById(`houses-manage-${server}`).innerHTML = '<span class="empty">Нет данных</span>';
+                        document.getElementById(`biz-manage-${server}`).innerHTML = '<span class="empty">Нет данных</span>';
+                        document.getElementById(`houses-view-${server}`).innerHTML = '<span class="empty">Нет данных</span>';
+                        document.getElementById(`biz-view-${server}`).innerHTML = '<span class="empty">Нет данных</span>';
+                        continue;
+                    }
 
-                    // Таблицы управления (показывают зафиксированный basePd)
+                    // Выбираем активную подвкладку (по умолчанию самую последнюю)
+                    if (!activeServerScans[server] || !scans.some(s => s.scanId === activeServerScans[server])) {
+                        activeServerScans[server] = scans[scans.length - 1].scanId;
+                    }
+
+                    // Отрисовка кнопок-подвкладок для режима Управление
+                    let tabsHtml = '';
+                    scans.forEach(scan => {
+                        const isActive = scan.scanId === activeServerScans[server];
+                        const timeOnly = scan.scanTime.split(' ')[1] || scan.scanTime;
+                        const count = (scan.houses ? scan.houses.length : 0) + (scan.businesses ? scan.businesses.length : 0);
+                        
+                        tabsHtml += `<button class="scan-subtab ${isActive ? 'active' : ''}" onclick="selectScanTab('${server}', '${scan.scanId}')">
+                            🕒 ${timeOnly} (${count})
+                        </button>`;
+                    });
+                    if (manageTabsElem) manageTabsElem.innerHTML = tabsHtml;
+
+                    // Отрисовка таблиц вкладки УПРАВЛЕНИЕ для выбранного скана
+                    const selectedScan = scans.find(s => s.scanId === activeServerScans[server]) || scans[scans.length - 1];
                     const hManage = document.getElementById(`houses-manage-${server}`);
                     const bManage = document.getElementById(`biz-manage-${server}`);
-                    if (hManage) hManage.innerHTML = renderTable(info.houses, server, 'house', true);
-                    if (bManage) bManage.innerHTML = renderTable(info.businesses, server, 'biz', true);
+                    if (hManage) hManage.innerHTML = renderTable(selectedScan.houses, server, selectedScan.scanId, 'house', true);
+                    if (bManage) bManage.innerHTML = renderTable(selectedScan.businesses, server, selectedScan.scanId, 'biz', true);
 
-                    // Таблицы общего вида (показывают отнимаемый pd)
+                    // Отрисовка таблиц ОБЩЕГО ВИДА (всегда показывает самый СВЕЖИЙ скан с отнимаемыми pd)
+                    const latestScan = scans[scans.length - 1];
                     const hView = document.getElementById(`houses-view-${server}`);
                     const bView = document.getElementById(`biz-view-${server}`);
-                    if (hView) hView.innerHTML = renderTable(info.houses, server, 'house', false);
-                    if (bView) bView.innerHTML = renderTable(info.businesses, server, 'biz', false);
+                    if (hView) hView.innerHTML = renderTable(latestScan.houses, server, latestScan.scanId, 'house', false);
+                    if (bView) bView.innerHTML = renderTable(latestScan.businesses, server, latestScan.scanId, 'biz', false);
                 }
             } catch(e) { console.error(e); }
         }
@@ -518,10 +590,13 @@ async def render_dashboard():
                     <span>#{idx:02d} {srv}</span>
                     <span class="season-badge season-badge-{srv}">Сезон: {season_info['display']}</span>
                 </div>
-                <div class="server-meta">
-                    <span class="scan-time-badge scan-time-{srv}">Сканирование: Загрузка...</span>
-                </div>
             </div>
+            
+            <!-- Лента подвкладок сканирований -->
+            <div id="scan-tabs-{srv}" class="scan-tabs-container">
+                <span class="empty">Загрузка сканирований...</span>
+            </div>
+
             <div class="tables-grid">
                 <div>
                     <div class="section-header">
@@ -548,9 +623,6 @@ async def render_dashboard():
                 <div class="server-title">
                     <span>#{idx:02d} {srv}</span>
                     <span class="season-badge season-badge-{srv}">Сезон: {season_info['display']}</span>
-                </div>
-                <div class="server-meta">
-                    <span class="scan-time-badge scan-time-{srv}">Сканирование: Загрузка...</span>
                 </div>
             </div>
             <div class="tables-grid">
