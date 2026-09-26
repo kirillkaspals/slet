@@ -16,7 +16,6 @@ SECRET_KEY = "usefguIHSFUSDFGUjhjfk88448"
 DATA_FILE = "server_data.json"
 MSK_TZ = zoneinfo.ZoneInfo("Europe/Moscow")
 
-# Понедельник перед слётом (21 сентября 2026, 05:00 МСК)
 BASE_WEEK_START = datetime(2026, 9, 21, 5, 0, 0, tzinfo=MSK_TZ)
 
 ALL_SERVERS = [
@@ -75,6 +74,10 @@ class DeleteItemModel(BaseModel):
     propType: str
     pos: int
 
+class DeleteScanModel(BaseModel):
+    server: str
+    scanId: str
+
 class AddItemModel(BaseModel):
     server: str
     scanId: str
@@ -90,21 +93,8 @@ def load_data_from_file() -> Dict[str, dict]:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
                 for srv in ALL_SERVERS:
-                    if srv in loaded:
-                        # Миграция старого формата данных под новый массив scans
-                        if "scans" in loaded[srv]:
-                            data_store[srv] = loaded[srv]
-                        else:
-                            old_h = loaded[srv].get("houses", [])
-                            old_b = loaded[srv].get("businesses", [])
-                            if old_h or old_b:
-                                scan_time = loaded[srv].get("lastScanTime") or datetime.now(MSK_TZ).strftime("%Y-%m-%d %H:%M:%S")
-                                data_store[srv]["scans"] = [{
-                                    "scanId": scan_time,
-                                    "scanTime": scan_time,
-                                    "houses": old_h,
-                                    "businesses": old_b
-                                }]
+                    if srv in loaded and "scans" in loaded[srv]:
+                        data_store[srv] = loaded[srv]
             print("Данные успешно загружены из файла.")
         except Exception as e:
             print(f"Ошибка чтения JSON-файла: {e}")
@@ -138,7 +128,7 @@ def get_server_season_info(server: str) -> dict:
         "display": f"{season_name} ({season_id})"
     }
 
-# --- ЛОГИКА PAYDAY ---
+# --- ЛОГИКА PAYDAY ДЛЯ ОБЩЕГО ВИДА ---
 async def process_hourly_payday():
     async with data_lock:
         print(f"[{datetime.now(MSK_TZ).strftime('%Y-%m-%d %H:%M:%S')}] Списание PayDay для общего вида...")
@@ -147,21 +137,18 @@ async def process_hourly_payday():
             if not scans:
                 continue
             
-            # Списание происходит у самого последнего сканирования
             latest_scan = scans[-1]
 
-            # Дома
             updated_houses = []
-            for h in latest_scan["houses"]:
+            for h in latest_scan.get("houses", []):
                 decrement = 1 if h.get("status") == "insured" else 2
                 h["pd"] -= decrement
                 if h["pd"] > 0:
                     updated_houses.append(h)
             latest_scan["houses"] = sorted(updated_houses, key=lambda x: x["pd"])
 
-            # Бизнесы
             updated_biz = []
-            for b in latest_scan["businesses"]:
+            for b in latest_scan.get("businesses", []):
                 st = b.get("status", "insured")
                 decrement = 1 if st == "insured" else (2 if st == "uninsured" else 4)
                 b["pd"] -= decrement
@@ -189,7 +176,6 @@ async def lifespan(app: FastAPI):
     async with data_lock:
         await save_data_to_file_async()
 
-# --- ИНИЦИАЛИЗАЦИЯ FASTAPI ---
 app = FastAPI(title="Arizona Property Tracker API", lifespan=lifespan)
 
 app.add_middleware(
@@ -211,47 +197,91 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
         )
 
     srv = payload.server
-    scan_time = datetime.now(MSK_TZ).strftime("%Y-%m-%d %H:%M:%S")
-
-    houses = []
-    businesses = []
-
-    for item in payload.entries:
-        record = {
-            "basePd": item.pd,
-            "pd": item.pd,
-            "propId": item.propId,
-            "pos": item.pos,
-            "status": "insured",
-            "updatedAt": datetime.now(MSK_TZ).strftime("%H:%M:%S")
-        }
-        if item.propType == "house":
-            houses.append(record)
-        else:
-            businesses.append(record)
-
-    houses = sorted(houses, key=lambda x: x["pd"])
-    businesses = sorted(businesses, key=lambda x: x["pd"])
-
-    new_scan = {
-        "scanId": scan_time,
-        "scanTime": scan_time,
-        "houses": houses,
-        "businesses": businesses
-    }
+    now_msk = datetime.now(MSK_TZ)
+    hour_label = now_msk.strftime("%H:00")
+    scan_id = f"{now_msk.strftime('%Y-%m-%d')} {hour_label}"
 
     async with data_lock:
         if srv not in server_data:
             server_data[srv] = {"scans": []}
-        
         if "scans" not in server_data[srv]:
             server_data[srv]["scans"] = []
 
-        # Сохраняем новый скан в массив истории серверов
-        server_data[srv]["scans"].append(new_scan)
+        scans = server_data[srv]["scans"]
+        
+        # Получаем предыдущий скан для автоопределения страховки
+        prev_scan = scans[-1] if len(scans) > 0 and scans[-1]["scanId"] != scan_id else (scans[-2] if len(scans) > 1 else None)
+
+        def find_prev_item(prop_type: str, prop_id: Optional[int], pos: int):
+            if not prev_scan:
+                return None
+            items = prev_scan["houses"] if prop_type == "house" else prev_scan["businesses"]
+            if prop_id is not None:
+                for it in items:
+                    if it.get("propId") == prop_id:
+                        return it
+            for it in items:
+                if it.get("pos") == pos:
+                    return it
+            return None
+
+        houses = []
+        businesses = []
+
+        for item in payload.entries:
+            prev_item = find_prev_item(item.propType, item.propId, item.pos)
+            
+            # Автоматическое определение статуса страховки
+            auto_status = "insured"
+            if prev_item is not None:
+                diff = prev_item.get("basePd", prev_item["pd"]) - item.pd
+                if item.propType == "house":
+                    if diff >= 2:
+                        auto_status = "uninsured"
+                    else:
+                        auto_status = "insured"
+                else: # biz
+                    if diff >= 4:
+                        auto_status = "no_activity"
+                    elif diff >= 2:
+                        auto_status = "uninsured"
+                    else:
+                        auto_status = "insured"
+            
+            record = {
+                "basePd": item.pd,
+                "pd": item.pd,
+                "propId": item.propId,
+                "pos": item.pos,
+                "status": auto_status,
+                "updatedAt": now_msk.strftime("%H:%M:%S")
+            }
+            if item.propType == "house":
+                houses.append(record)
+            else:
+                businesses.append(record)
+
+        houses = sorted(houses, key=lambda x: x["pd"])
+        businesses = sorted(businesses, key=lambda x: x["pd"])
+
+        # Проверяем, есть ли уже скан за этот часовой интервал
+        existing_scan = next((s for s in scans if s["scanId"] == scan_id), None)
+        if existing_scan:
+            existing_scan["houses"] = houses
+            existing_scan["businesses"] = businesses
+            existing_scan["scanTime"] = now_msk.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            scans.append({
+                "scanId": scan_id,
+                "hourLabel": hour_label,
+                "scanTime": now_msk.strftime("%Y-%m-%d %H:%M:%S"),
+                "houses": houses,
+                "businesses": businesses
+            })
+
         await save_data_to_file_async()
 
-    return {"status": "ok", "count": len(payload.entries), "scanTime": scan_time}
+    return {"status": "ok", "scanId": scan_id, "count": len(payload.entries)}
 
 @app.post("/api/update_status")
 async def update_status(data: UpdateStatusModel):
@@ -266,7 +296,7 @@ async def update_status(data: UpdateStatusModel):
                             item["status"] = data.status
                             await save_data_to_file_async()
                             return {"status": "success"}
-    raise HTTPException(status_code=404, detail="Scan, Item or Server not found")
+    raise HTTPException(status_code=404, detail="Scan or Item not found")
 
 @app.post("/api/delete_item")
 async def delete_item(data: DeleteItemModel):
@@ -276,12 +306,22 @@ async def delete_item(data: DeleteItemModel):
             for scan in server_data[srv].get("scans", []):
                 if scan["scanId"] == data.scanId:
                     target_key = "houses" if data.propType in ["house", "houses"] else "businesses"
-                    scan[target_key] = [
-                        item for item in scan[target_key] if item["pos"] != data.pos
-                    ]
+                    scan[target_key] = [item for item in scan[target_key] if item["pos"] != data.pos]
                     await save_data_to_file_async()
                     return {"status": "success"}
     raise HTTPException(status_code=404, detail="Server or Scan not found")
+
+@app.post("/api/delete_scan")
+async def delete_scan(data: DeleteScanModel):
+    srv = data.server
+    async with data_lock:
+        if srv in server_data and "scans" in server_data[srv]:
+            server_data[srv]["scans"] = [
+                s for s in server_data[srv]["scans"] if s["scanId"] != data.scanId
+            ]
+            await save_data_to_file_async()
+            return {"status": "success"}
+    raise HTTPException(status_code=404, detail="Scan not found")
 
 @app.post("/api/add_item")
 async def add_item(data: AddItemModel):
@@ -320,7 +360,7 @@ async def get_paydays():
             for srv, data in server_data.items()
         }
 
-# --- ДАШБОРД (ИНТЕРФЕЙС) ---
+# --- ДАШБОРД ---
 DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html lang="ru">
@@ -346,11 +386,14 @@ DASHBOARD_HTML = """
         .server-title { font-size: 1.3em; font-weight: bold; color: #4caf50; display: flex; justify-content: space-between; align-items: center; }
         .season-badge { font-size: 0.75em; background-color: #332a12; color: #ffb74d; border: 1px solid #ff9800; padding: 3px 8px; border-radius: 12px; font-weight: normal; }
         
-        /* Вкладки подсканирований для сервера */
-        .scan-tabs-container { display: flex; gap: 6px; margin-bottom: 15px; overflow-x: auto; padding-bottom: 4px; border-bottom: 1px solid #2a2a2a; }
-        .scan-subtab { background-color: #252525; color: #888; border: 1px solid #3a3a3a; padding: 4px 10px; font-size: 0.8em; border-radius: 4px; cursor: pointer; whitespace: nowrap; transition: 0.2s; }
+        .scan-tabs-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid #2a2a2a; padding-bottom: 6px; }
+        .scan-tabs-container { display: flex; gap: 6px; overflow-x: auto; }
+        .scan-subtab { background-color: #252525; color: #888; border: 1px solid #3a3a3a; padding: 4px 12px; font-size: 0.85em; border-radius: 4px; cursor: pointer; whitespace: nowrap; transition: 0.2s; }
         .scan-subtab.active { background-color: #1e88e5; color: #fff; border-color: #64b5f6; font-weight: bold; }
         .scan-subtab:hover:not(.active) { background-color: #333; color: #ddd; }
+
+        .btn-delete-scan { background-color: #b71c1c; color: #fff; border: none; padding: 4px 8px; border-radius: 4px; font-size: 0.75em; font-weight: bold; cursor: pointer; transition: 0.2s; }
+        .btn-delete-scan:hover { background-color: #d32f2f; }
 
         .tables-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
         @media (max-width: 768px) { .tables-grid { grid-template-columns: 1fr; } }
@@ -380,7 +423,6 @@ DASHBOARD_HTML = """
         .empty { color: #666; font-style: italic; font-size: 0.85em; }
     </style>
     <script>
-        // Хранение активных закладок сканирований для каждого сервера
         const activeServerScans = {};
 
         function switchTab(tabName) {
@@ -420,6 +462,22 @@ DASHBOARD_HTML = """
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ server, scanId, propType, pos })
                 });
+                loadData();
+            } catch(e) { console.error(e); }
+        }
+
+        async function deleteWholeScan(server) {
+            const scanId = activeServerScans[server];
+            if (!scanId) return;
+            if (!confirm(`Удалить весь скан ${scanId} для сервера ${server}?`)) return;
+
+            try {
+                await fetch('/api/delete_scan', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ server, scanId })
+                });
+                delete activeServerScans[server];
                 loadData();
             } catch(e) { console.error(e); }
         }
@@ -501,9 +559,11 @@ DASHBOARD_HTML = """
 
                     const scans = info.scans || [];
                     const manageTabsElem = document.getElementById(`scan-tabs-${server}`);
+                    const delScanBtnElem = document.getElementById(`btn-del-scan-${server}`);
                     
                     if (scans.length === 0) {
-                        if (manageTabsElem) manageTabsElem.innerHTML = '<span class="empty">Сканирований пока нет</span>';
+                        if (manageTabsElem) manageTabsElem.innerHTML = '<span class="empty">Сканирований нет</span>';
+                        if (delScanBtnElem) delScanBtnElem.style.display = 'none';
                         document.getElementById(`houses-manage-${server}`).innerHTML = '<span class="empty">Нет данных</span>';
                         document.getElementById(`biz-manage-${server}`).innerHTML = '<span class="empty">Нет данных</span>';
                         document.getElementById(`houses-view-${server}`).innerHTML = '<span class="empty">Нет данных</span>';
@@ -511,32 +571,29 @@ DASHBOARD_HTML = """
                         continue;
                     }
 
-                    // Выбираем активную подвкладку (по умолчанию самую последнюю)
+                    if (delScanBtnElem) delScanBtnElem.style.display = 'inline-block';
+
                     if (!activeServerScans[server] || !scans.some(s => s.scanId === activeServerScans[server])) {
                         activeServerScans[server] = scans[scans.length - 1].scanId;
                     }
 
-                    // Отрисовка кнопок-подвкладок для режима Управление
+                    // Подвкладки формата HH:00
                     let tabsHtml = '';
                     scans.forEach(scan => {
                         const isActive = scan.scanId === activeServerScans[server];
-                        const timeOnly = scan.scanTime.split(' ')[1] || scan.scanTime;
-                        const count = (scan.houses ? scan.houses.length : 0) + (scan.businesses ? scan.businesses.length : 0);
-                        
+                        const label = scan.hourLabel || (scan.scanTime ? scan.scanTime.split(' ')[1].substring(0, 5) : 'Скан');
                         tabsHtml += `<button class="scan-subtab ${isActive ? 'active' : ''}" onclick="selectScanTab('${server}', '${scan.scanId}')">
-                            🕒 ${timeOnly} (${count})
+                            🕒 ${label}
                         </button>`;
                     });
                     if (manageTabsElem) manageTabsElem.innerHTML = tabsHtml;
 
-                    // Отрисовка таблиц вкладки УПРАВЛЕНИЕ для выбранного скана
                     const selectedScan = scans.find(s => s.scanId === activeServerScans[server]) || scans[scans.length - 1];
                     const hManage = document.getElementById(`houses-manage-${server}`);
                     const bManage = document.getElementById(`biz-manage-${server}`);
                     if (hManage) hManage.innerHTML = renderTable(selectedScan.houses, server, selectedScan.scanId, 'house', true);
                     if (bManage) bManage.innerHTML = renderTable(selectedScan.businesses, server, selectedScan.scanId, 'biz', true);
 
-                    // Отрисовка таблиц ОБЩЕГО ВИДА (всегда показывает самый СВЕЖИЙ скан с отнимаемыми pd)
                     const latestScan = scans[scans.length - 1];
                     const hView = document.getElementById(`houses-view-${server}`);
                     const bView = document.getElementById(`biz-view-${server}`);
@@ -592,9 +649,11 @@ async def render_dashboard():
                 </div>
             </div>
             
-            <!-- Лента подвкладок сканирований -->
-            <div id="scan-tabs-{srv}" class="scan-tabs-container">
-                <span class="empty">Загрузка сканирований...</span>
+            <div class="scan-tabs-bar">
+                <div id="scan-tabs-{srv}" class="scan-tabs-container">
+                    <span class="empty">Загрузка...</span>
+                </div>
+                <button id="btn-del-scan-{srv}" class="btn-delete-scan" onclick="deleteWholeScan('{srv}')">🗑️ Удалить скан</button>
             </div>
 
             <div class="tables-grid">
