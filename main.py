@@ -22,9 +22,9 @@ ALL_SERVERS = [
     "Phoenix", "Tucson", "Scottdale", "Chandler", "Brainburg",
     "Saint-Rose", "Mesa", "Red-Rock", "Yuma", "Surprise",
     "Prescott", "Glendale", "Kingman", "Winslow", "Payson",
-    "Gilbert", "Show Low", "Casa-Grande", "Page", "Sun-City",
+    "Gilbert", "Show-Low", "Casa-Grande", "Page", "Sun-City",
     "Queen-Creek", "Sedona", "Holiday", "Wednesday", "Yava",
-    "Faraway", "Bumble Bee", "Christmas", "Love", "Mirage",
+    "Faraway", "Bumble-Bee", "Christmas", "Love", "Mirage",
     "Drake", "Space", "Home"
 ]
 
@@ -41,9 +41,9 @@ BASE_SERVER_SEASONS = {
     "Brainburg": 4, "Saint-Rose": 4, "Mesa": 3, "Red-Rock": 2,
     "Yuma": 4, "Surprise": 2, "Prescott": 1, "Glendale": 2,
     "Kingman": 5, "Winslow": 3, "Payson": 3, "Gilbert": 5,
-    "Show Low": 5, "Casa-Grande": 5, "Page": 1, "Sun-City": 3,
+    "Show-Low": 5, "Casa-Grande": 5, "Page": 1, "Sun-City": 3,
     "Queen-Creek": 5, "Sedona": 1, "Holiday": 4, "Wednesday": 2,
-    "Yava": 2, "Faraway": 2, "Bumble Bee": 5, "Christmas": 2,
+    "Yava": 2, "Faraway": 2, "Bumble-Bee": 5, "Christmas": 2,
     "Love": 2, "Mirage": 2, "Drake": 2, "Space": 5, "Home": 1
 }
 
@@ -65,7 +65,7 @@ SERVER_DROP_RULES = {
     "Winslow":     {"house": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}, "biz": {"insured": 1, "uninsured_min": 1, "uninsured_max": 2}},
     "Payson":      {"house": {"insured": 1, "uninsured_min": 1, "uninsured_max": 2}, "biz": {"insured": 1, "uninsured_min": 1, "uninsured_max": 2}},
     "Gilbert":     {"house": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}, "biz": {"insured": 1, "uninsured_min": 1, "uninsured_max": 2}},
-    "Show Low":    {"house": {"insured": 1, "uninsured_min": 1, "uninsured_max": 2}, "biz": {"insured": 1, "uninsured_min": 1, "uninsured_max": 2}},
+    "Show-Low":    {"house": {"insured": 1, "uninsured_min": 1, "uninsured_max": 2}, "biz": {"insured": 1, "uninsured_min": 1, "uninsured_max": 2}},
     "Casa-Grande": {"house": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}, "biz": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}},
     "Page":        {"house": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}, "biz": {"insured": 2, "uninsured_min": 1, "uninsured_max": 2}},
     "Sun-City":    {"house": {"insured": 1, "uninsured_min": 1, "uninsured_max": 2}, "biz": {"insured": 1, "uninsured_min": 1, "uninsured_max": 2}},
@@ -75,7 +75,7 @@ SERVER_DROP_RULES = {
     "Wednesday":   {"house": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}, "biz": {"insured": 1, "uninsured_min": 1, "uninsured_max": 2}},
     "Yava":        {"house": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}, "biz": {"insured": 1, "uninsured_min": 1, "uninsured_max": 2}},
     "Faraway":     {"house": {"insured": 1, "uninsured_min": 1, "uninsured_max": 2}, "biz": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}},
-    "Bumble Bee":  {"house": {"insured": 1, "uninsured_min": 1, "uninsured_max": 2}, "biz": {"insured": 1, "uninsured_min": 1, "uninsured_max": 2}},
+    "Bumble-Bee":  {"house": {"insured": 1, "uninsured_min": 1, "uninsured_max": 2}, "biz": {"insured": 1, "uninsured_min": 1, "uninsured_max": 2}},
     "Christmas":   {"house": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}, "biz": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}},
     "Mirage":      {"house": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}, "biz": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}},
     "Love":        {"house": {"insured": 1, "uninsured_min": 1, "uninsured_max": 2}, "biz": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}},
@@ -612,9 +612,9 @@ DASHBOARD_HTML = """
             "Phoenix", "Tucson", "Scottdale", "Chandler", "Brainburg",
             "Saint-Rose", "Mesa", "Red-Rock", "Yuma", "Surprise",
             "Prescott", "Glendale", "Kingman", "Winslow", "Payson",
-            "Gilbert", "Show Low", "Casa-Grande", "Page", "Sun-City",
+            "Gilbert", "Show-Low", "Casa-Grande", "Page", "Sun-City",
             "Queen-Creek", "Sedona", "Holiday", "Wednesday", "Yava",
-            "Faraway", "Bumble Bee", "Christmas", "Love", "Mirage",
+            "Faraway", "Bumble-Bee", "Christmas", "Love", "Mirage",
             "Drake", "Space", "Home"
         ];
         const activeServerScans = {};
@@ -863,7 +863,7 @@ DASHBOARD_HTML = """
                 for (const srv of ALL_SERVERS) {
                     const info = data[srv];
 
-                    // ✅ Гарантированно обновляем лейбл сезона еще ДО всех возможных continue
+                    // ✅ Обновляем лейбл сезона еще ДО всех возможных continue
                     if (info && info.season) {
                         document.querySelectorAll(`.season-badge-${srv}`).forEach(elem => {
                             elem.innerText = `Сезон: ${info.season.display}`;
