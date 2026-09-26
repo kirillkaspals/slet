@@ -128,6 +128,23 @@ def get_server_season_info(server: str) -> dict:
         "display": f"{season_name} ({season_id})"
     }
 
+def get_latest_verified_scan(scans: List[dict]) -> Optional[dict]:
+    """
+    Возвращает самый последний ПОДТВЕРЖДЁННЫЙ скан для «Общего вида».
+    Скан считается подтверждённым, если он имеет статус isVerified = True
+    или является единственным в системе.
+    """
+    if not scans:
+        return None
+    
+    # Ищем последний подтвержденный
+    verified_scans = [s for s in scans if s.get("isVerified", False)]
+    if verified_scans:
+        return verified_scans[-1]
+    
+    # Если еще ни один скан не подтвержден, берем самый первый базовый
+    return scans[0]
+
 # --- ЛОГИКА PAYDAY ДЛЯ ОБЩЕГО ВИДА ---
 async def process_hourly_payday():
     async with data_lock:
@@ -137,24 +154,27 @@ async def process_hourly_payday():
             if not scans:
                 continue
             
-            latest_scan = scans[-1]
+            # В "Общем виде" списываем PayDay только у ПОДТВЕРЖДЁННОГО скана
+            target_scan = get_latest_verified_scan(scans)
+            if not target_scan:
+                continue
 
             updated_houses = []
-            for h in latest_scan.get("houses", []):
+            for h in target_scan.get("houses", []):
                 decrement = 1 if h.get("status") == "insured" else 2
                 h["pd"] -= decrement
                 if h["pd"] > 0:
                     updated_houses.append(h)
-            latest_scan["houses"] = sorted(updated_houses, key=lambda x: x["pd"])
+            target_scan["houses"] = sorted(updated_houses, key=lambda x: x["pd"])
 
             updated_biz = []
-            for b in latest_scan.get("businesses", []):
+            for b in target_scan.get("businesses", []):
                 st = b.get("status", "insured")
                 decrement = 1 if st == "insured" else (2 if st == "uninsured" else 4)
                 b["pd"] -= decrement
                 if b["pd"] > 0:
                     updated_biz.append(b)
-            latest_scan["businesses"] = sorted(updated_biz, key=lambda x: x["pd"])
+            target_scan["businesses"] = sorted(updated_biz, key=lambda x: x["pd"])
 
         await save_data_to_file_async()
 
@@ -209,7 +229,7 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
 
         scans = server_data[srv]["scans"]
         
-        # Получаем предыдущий скан для автоопределения страховки
+        # Получаем предыдущий скан
         prev_scan = scans[-1] if len(scans) > 0 and scans[-1]["scanId"] != scan_id else (scans[-2] if len(scans) > 1 else None)
 
         def find_prev_item(prop_type: str, prop_id: Optional[int], pos: int):
@@ -225,21 +245,22 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
                     return it
             return None
 
+        # Защита от случайных сканов:
+        # Скан считается подтвержденным (isVerified = True), ТОЛЬКО если найден предыдущий скан!
+        is_verified = True if prev_scan is not None else False
+
         houses = []
         businesses = []
 
         for item in payload.entries:
             prev_item = find_prev_item(item.propType, item.propId, item.pos)
             
-            # Автоматическое определение статуса страховки
+            # Вычисление страховки по разнице
             auto_status = "insured"
             if prev_item is not None:
                 diff = prev_item.get("basePd", prev_item["pd"]) - item.pd
                 if item.propType == "house":
-                    if diff >= 2:
-                        auto_status = "uninsured"
-                    else:
-                        auto_status = "insured"
+                    auto_status = "uninsured" if diff >= 2 else "insured"
                 else: # biz
                     if diff >= 4:
                         auto_status = "no_activity"
@@ -264,24 +285,26 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
         houses = sorted(houses, key=lambda x: x["pd"])
         businesses = sorted(businesses, key=lambda x: x["pd"])
 
-        # Проверяем, есть ли уже скан за этот часовой интервал
         existing_scan = next((s for s in scans if s["scanId"] == scan_id), None)
         if existing_scan:
             existing_scan["houses"] = houses
             existing_scan["businesses"] = businesses
             existing_scan["scanTime"] = now_msk.strftime("%Y-%m-%d %H:%M:%S")
+            if is_verified:
+                existing_scan["isVerified"] = True
         else:
             scans.append({
                 "scanId": scan_id,
                 "hourLabel": hour_label,
                 "scanTime": now_msk.strftime("%Y-%m-%d %H:%M:%S"),
+                "isVerified": is_verified,
                 "houses": houses,
                 "businesses": businesses
             })
 
         await save_data_to_file_async()
 
-    return {"status": "ok", "scanId": scan_id, "count": len(payload.entries)}
+    return {"status": "ok", "scanId": scan_id, "isVerified": is_verified, "count": len(payload.entries)}
 
 @app.post("/api/update_status")
 async def update_status(data: UpdateStatusModel):
@@ -352,13 +375,16 @@ async def add_item(data: AddItemModel):
 @app.get("/api/paydays")
 async def get_paydays():
     async with data_lock:
-        return {
-            srv: {
-                "scans": data.get("scans", []),
+        formatted_data = {}
+        for srv, data in server_data.items():
+            scans = data.get("scans", [])
+            latest_verified = get_latest_verified_scan(scans)
+            formatted_data[srv] = {
+                "scans": scans,
+                "latestVerifiedScan": latest_verified,
                 "season": get_server_season_info(srv)
             }
-            for srv, data in server_data.items()
-        }
+        return formatted_data
 
 # --- ДАШБОРД ---
 DASHBOARD_HTML = """
@@ -390,6 +416,7 @@ DASHBOARD_HTML = """
         .scan-tabs-container { display: flex; gap: 6px; overflow-x: auto; }
         .scan-subtab { background-color: #252525; color: #888; border: 1px solid #3a3a3a; padding: 4px 12px; font-size: 0.85em; border-radius: 4px; cursor: pointer; whitespace: nowrap; transition: 0.2s; }
         .scan-subtab.active { background-color: #1e88e5; color: #fff; border-color: #64b5f6; font-weight: bold; }
+        .scan-subtab.unverified { border: 1px dashed #ff9800; }
         .scan-subtab:hover:not(.active) { background-color: #333; color: #ddd; }
 
         .btn-delete-scan { background-color: #b71c1c; color: #fff; border: none; padding: 4px 8px; border-radius: 4px; font-size: 0.75em; font-weight: bold; cursor: pointer; transition: 0.2s; }
@@ -558,6 +585,7 @@ DASHBOARD_HTML = """
                     });
 
                     const scans = info.scans || [];
+                    const latestVerifiedScan = info.latestVerifiedScan;
                     const manageTabsElem = document.getElementById(`scan-tabs-${server}`);
                     const delScanBtnElem = document.getElementById(`btn-del-scan-${server}`);
                     
@@ -577,28 +605,38 @@ DASHBOARD_HTML = """
                         activeServerScans[server] = scans[scans.length - 1].scanId;
                     }
 
-                    // Подвкладки формата HH:00
+                    // Подвкладки сканов
                     let tabsHtml = '';
                     scans.forEach(scan => {
                         const isActive = scan.scanId === activeServerScans[server];
                         const label = scan.hourLabel || (scan.scanTime ? scan.scanTime.split(' ')[1].substring(0, 5) : 'Скан');
-                        tabsHtml += `<button class="scan-subtab ${isActive ? 'active' : ''}" onclick="selectScanTab('${server}', '${scan.scanId}')">
-                            🕒 ${label}
+                        const isVerified = scan.isVerified;
+                        
+                        tabsHtml += `<button class="scan-subtab ${isActive ? 'active' : ''} ${!isVerified ? 'unverified' : ''}" 
+                            title="${!isVerified ? 'Одиночный (неподтвержденный) скан' : 'Подтвержденный скан'}"
+                            onclick="selectScanTab('${server}', '${scan.scanId}')">
+                            🕒 ${label} ${!isVerified ? '⚠️' : ''}
                         </button>`;
                     });
                     if (manageTabsElem) manageTabsElem.innerHTML = tabsHtml;
 
+                    // 1. Вкладка УПРАВЛЕНИЯ (выбранный скан)
                     const selectedScan = scans.find(s => s.scanId === activeServerScans[server]) || scans[scans.length - 1];
                     const hManage = document.getElementById(`houses-manage-${server}`);
                     const bManage = document.getElementById(`biz-manage-${server}`);
                     if (hManage) hManage.innerHTML = renderTable(selectedScan.houses, server, selectedScan.scanId, 'house', true);
                     if (bManage) bManage.innerHTML = renderTable(selectedScan.businesses, server, selectedScan.scanId, 'biz', true);
 
-                    const latestScan = scans[scans.length - 1];
+                    // 2. ОБЩИЙ ВИД (показывает ТОЛЬКО ПОДТВЕРЖДЁННЫЙ скан)
                     const hView = document.getElementById(`houses-view-${server}`);
                     const bView = document.getElementById(`biz-view-${server}`);
-                    if (hView) hView.innerHTML = renderTable(latestScan.houses, server, latestScan.scanId, 'house', false);
-                    if (bView) bView.innerHTML = renderTable(latestScan.businesses, server, latestScan.scanId, 'biz', false);
+                    if (latestVerifiedScan) {
+                        if (hView) hView.innerHTML = renderTable(latestVerifiedScan.houses, server, latestVerifiedScan.scanId, 'house', false);
+                        if (bView) bView.innerHTML = renderTable(latestVerifiedScan.businesses, server, latestVerifiedScan.scanId, 'biz', false);
+                    } else {
+                        if (hView) hView.innerHTML = '<span class="empty">Ожидание подтвержденного скана...</span>';
+                        if (bView) bView.innerHTML = '<span class="empty">Ожидание подтвержденного скана...</span>';
+                    }
                 }
             } catch(e) { console.error(e); }
         }
