@@ -4,20 +4,12 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
-
-app = FastAPI(title="Arizona Property Tracker API")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import contextlib
 
 SECRET_KEY = "usefguIHSFUSDFGUjhjfk88448"
 
-# Список всех 33 серверов Arizona RP по порядку
+# Список всех 33 серверов Arizona RP
 ALL_SERVERS = [
     "Phoenix", "Tucson", "Scottdale", "Chandler", "Brainburg",
     "Saint-Rose", "Mesa", "Red-Rock", "Yuma", "Surprise",
@@ -28,10 +20,61 @@ ALL_SERVERS = [
     "Drake", "Space", "Home"
 ]
 
-# Хранилище данных: { "Saint-Rose": { "houses": [...], "businesses": [...] } }
+# Хранилище данных
 server_data = {
     srv: {"houses": [], "businesses": []} for srv in ALL_SERVERS
 }
+
+# Автоматическое списание PayDay каждый час в 00 минут
+def process_hourly_payday():
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Выполнение списания PayDay...")
+    for srv, data in server_data.items():
+        # Дома
+        updated_houses = []
+        for h in data["houses"]:
+            # insured (1), uninsured (2)
+            decrement = 1 if h.get("status") == "insured" else 2
+            h["pd"] -= decrement
+            if h["pd"] > 0:
+                updated_houses.append(h)
+        data["houses"] = sorted(updated_houses, key=lambda x: x["pd"])
+
+        # Бизнесы
+        updated_biz = []
+        for b in data["businesses"]:
+            # insured (1), uninsured (2), no_activity (4)
+            st = b.get("status", "insured")
+            if st == "insured":
+                decrement = 1
+            elif st == "uninsured":
+                decrement = 2
+            else:  # no_activity
+                decrement = 4
+            
+            b["pd"] -= decrement
+            if b["pd"] > 0:
+                updated_biz.append(b)
+        data["businesses"] = sorted(updated_biz, key=lambda x: x["pd"])
+
+scheduler = AsyncIOScheduler()
+
+@contextlib.asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Запуск планировщика в 00 минут каждого часа
+    scheduler.add_job(process_hourly_payday, 'cron', minute=0)
+    scheduler.start()
+    yield
+    scheduler.shutdown()
+
+app = FastAPI(title="Arizona Property Tracker API", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 class PropertyEntry(BaseModel):
     propType: str
@@ -43,6 +86,12 @@ class Payload(BaseModel):
     server: str
     scanner: Optional[str] = "unknown"
     entries: List[PropertyEntry]
+
+class UpdateStatusModel(BaseModel):
+    server: str
+    propType: str  # house или biz
+    pos: int
+    status: str    # insured, uninsured, no_activity
 
 @app.post("/api/paydays")
 async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header(None)):
@@ -64,6 +113,7 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
             "pd": item.pd,
             "propId": item.propId,
             "pos": item.pos,
+            "status": "insured", # По умолчанию страхован
             "updatedAt": datetime.utcnow().strftime("%H:%M:%S")
         }
         if item.propType == "house":
@@ -71,13 +121,23 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
         else:
             businesses.append(record)
 
-    # Обновляем списки по серверу (сортируем по PayDay)
     if houses:
         server_data[srv]["houses"] = sorted(houses, key=lambda x: x["pd"])
     if businesses:
         server_data[srv]["businesses"] = sorted(businesses, key=lambda x: x["pd"])
 
     return {"status": "ok", "count": len(payload.entries)}
+
+@app.post("/api/update_status")
+async def update_status(data: UpdateStatusModel):
+    srv = data.server
+    if srv in server_data:
+        target_list = server_data[srv]["houses"] if data.propType == "house" else server_data[srv]["businesses"]
+        for item in target_list:
+            if item["pos"] == data.pos:
+                item["status"] = data.status
+                return {"status": "success"}
+    raise HTTPException(status_code=404, detail="Item not found")
 
 @app.get("/api/paydays")
 async def get_paydays():
@@ -109,7 +169,7 @@ async def render_dashboard():
                 display: flex;
                 flex-direction: column;
                 gap: 15px;
-                max-width: 900px;
+                max-width: 1000px;
                 margin: 0 auto;
             }
             .server-card {
@@ -126,15 +186,13 @@ async def render_dashboard():
                 border-bottom: 1px solid #333;
                 padding-bottom: 8px;
                 margin-bottom: 12px;
-                display: flex;
-                justify-content: space-between;
             }
             .tables-grid {
                 display: grid;
                 grid-template-columns: 1fr 1fr;
                 gap: 15px;
             }
-            @media (max-width: 600px) {
+            @media (max-width: 768px) {
                 .tables-grid { grid-template-columns: 1fr; }
             }
             .section-title {
@@ -146,10 +204,10 @@ async def render_dashboard():
             table {
                 width: 100%;
                 border-collapse: collapse;
-                font-size: 0.9em;
+                font-size: 0.85em;
             }
             th, td {
-                padding: 6px 10px;
+                padding: 6px 8px;
                 text-align: left;
                 border-bottom: 1px solid #2a2a2a;
             }
@@ -161,9 +219,50 @@ async def render_dashboard():
                 border-radius: 4px;
                 font-weight: bold;
             }
+            .btn-group {
+                display: flex;
+                gap: 3px;
+            }
+            .btn-opt {
+                background-color: #2a2a2a;
+                color: #888;
+                border: 1px solid #444;
+                padding: 3px 6px;
+                font-size: 0.75em;
+                border-radius: 4px;
+                cursor: pointer;
+                transition: 0.2s;
+            }
+            .btn-opt.active-insured {
+                background-color: #2e7d32;
+                color: #fff;
+                border-color: #4caf50;
+            }
+            .btn-opt.active-uninsured {
+                background-color: #c62828;
+                color: #fff;
+                border-color: #ef5350;
+            }
+            .btn-opt.active-noact {
+                background-color: #b71c1c;
+                color: #fff;
+                border-color: #ff1744;
+                font-weight: bold;
+            }
             .empty { color: #666; font-style: italic; font-size: 0.85em; }
         </style>
         <script>
+            async function setStatus(server, propType, pos, status) {
+                try {
+                    await fetch('/api/update_status', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ server, propType, pos, status })
+                    });
+                    loadData();
+                } catch(e) { console.error(e); }
+            }
+
             async function loadData() {
                 try {
                     const res = await fetch('/api/paydays');
@@ -177,9 +276,20 @@ async def render_dashboard():
                             if (info.houses.length === 0) {
                                 hTable.innerHTML = '<span class="empty">Нет данных</span>';
                             } else {
-                                let html = '<table><tr><th>№</th><th>ID Дома</th><th>PayDay</th></tr>';
+                                let html = '<table><tr><th>№</th><th>ID</th><th>PD</th><th>Тип слета</th></tr>';
                                 info.houses.forEach((item, idx) => {
-                                    html += `<tr><td>${idx+1}</td><td>${item.propId ? '№' + item.propId : '—'}</td><td><span class="pd-badge">${item.pd} pd</span></td></tr>`;
+                                    const st = item.status || 'insured';
+                                    html += `<tr>
+                                        <td>${idx+1}</td>
+                                        <td>${item.propId ? '№' + item.propId : '—'}</td>
+                                        <td><span class="pd-badge">${item.pd} pd</span></td>
+                                        <td>
+                                            <div class="btn-group">
+                                                <button class="btn-opt ${st === 'insured' ? 'active-insured' : ''}" onclick="setStatus('${server}', 'house', ${item.pos}, 'insured')">Страх.</button>
+                                                <button class="btn-opt ${st === 'uninsured' ? 'active-uninsured' : ''}" onclick="setStatus('${server}', 'house', ${item.pos}, 'uninsured')">Не страх.</button>
+                                            </div>
+                                        </td>
+                                    </tr>`;
                                 });
                                 html += '</table>';
                                 hTable.innerHTML = html;
@@ -190,9 +300,21 @@ async def render_dashboard():
                             if (info.businesses.length === 0) {
                                 bTable.innerHTML = '<span class="empty">Нет данных</span>';
                             } else {
-                                let html = '<table><tr><th>№</th><th>ID Бизнеса</th><th>PayDay</th></tr>';
+                                let html = '<table><tr><th>№</th><th>ID</th><th>PD</th><th>Тип слета</th></tr>';
                                 info.businesses.forEach((item, idx) => {
-                                    html += `<tr><td>${idx+1}</td><td>${item.propId ? '№' + item.propId : '—'}</td><td><span class="pd-badge">${item.pd} pd</span></td></tr>`;
+                                    const st = item.status || 'insured';
+                                    html += `<tr>
+                                        <td>${idx+1}</td>
+                                        <td>${item.propId ? '№' + item.propId : '—'}</td>
+                                        <td><span class="pd-badge">${item.pd} pd</span></td>
+                                        <td>
+                                            <div class="btn-group">
+                                                <button class="btn-opt ${st === 'insured' ? 'active-insured' : ''}" onclick="setStatus('${server}', 'biz', ${item.pos}, 'insured')">Страх.</button>
+                                                <button class="btn-opt ${st === 'uninsured' ? 'active-uninsured' : ''}" onclick="setStatus('${server}', 'biz', ${item.pos}, 'uninsured')">Не страх.</button>
+                                                <button class="btn-opt ${st === 'no_activity' ? 'active-noact' : ''}" onclick="setStatus('${server}', 'biz', ${item.pos}, 'no_activity')">Без зан.</button>
+                                            </div>
+                                        </td>
+                                    </tr>`;
                                 });
                                 html += '</table>';
                                 bTable.innerHTML = html;
@@ -213,9 +335,7 @@ async def render_dashboard():
     for idx, srv in enumerate(ALL_SERVERS, 1):
         html_content += f"""
             <div class="server-card">
-                <div class="server-title">
-                    <span>#{idx} {srv}</span>
-                </div>
+                <div class="server-title">#{idx} {srv}</div>
                 <div class="tables-grid">
                     <div>
                         <div class="section-title">🏠 Дома</div>
