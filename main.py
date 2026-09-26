@@ -3,11 +3,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 import asyncio
 import contextlib
+import zoneinfo
+import json
+import os
 
 SECRET_KEY = "usefguIHSFUSDFGUjhjfk88448"
+DATA_FILE = "server_data.json"
 
 # Список всех 33 серверов Arizona RP
 ALL_SERVERS = [
@@ -20,10 +24,103 @@ ALL_SERVERS = [
     "Drake", "Space", "Home"
 ]
 
-# Хранилище данных
-server_data = {
-    srv: {"houses": [], "businesses": []} for srv in ALL_SERVERS
+# Словарик сезонов ловли
+SEASONS_MAP = {
+    1: "По инфе",
+    2: "Скорострелы",
+    3: "Автогонки",
+    4: "По новому",
+    5: "Мотогонки"
 }
+
+# Исходная расстановка сезонов на базовую неделю
+BASE_WEEK_START = datetime(2025, 9, 22, 5, 0, 0, tzinfo=zoneinfo.ZoneInfo("Europe/Moscow"))
+
+BASE_SERVER_SEASONS = {
+    "Phoenix": 4,      # 01 - По новому(4)
+    "Tucson": 1,       # 02 - По инфе(1)
+    "Scottdale": 2,    # 03 - Скорострелы(2)
+    "Chandler": 1,     # 04 - По инфе(1)
+    "Brainburg": 4,    # 05 - По новому(4)
+    "Saint-Rose": 4,   # 06 - По новому(4)
+    "Mesa": 3,         # 07 - Автогонки(3)
+    "Red-Rock": 2,     # 08 - Скорострелы(2)
+    "Yuma": 4,         # 09 - По новому(4)
+    "Surprise": 2,     # 10 - Скорострелы(2)
+    "Prescott": 1,     # 11 - По инфе(1)
+    "Glendale": 2,     # 12 - Скорострелы(2)
+    "Kingman": 5,      # 13 - Мотогонки(5)
+    "Winslow": 3,      # 14 - Автогонки(3)
+    "Payson": 3,       # 15 - Автогонки(3)
+    "Gilbert": 5,      # 16 - Мотогонки(5)
+    "Show Low": 5,     # 17 - Мотогонки(5)
+    "Casa-Grande": 5,  # 18 - Мотогонки(5)
+    "Page": 1,         # 19 - По инфе(1)
+    "Sun-City": 3,     # 20 - Автогонки(3)
+    "Queen-Creek": 5,  # 21 - Мотогонки(5)
+    "Sedona": 1,       # 22 - По инфе(1)
+    "Holiday": 4,      # 23 - По новому(4)
+    "Wednesday": 2,    # 24 - Скорострелы(2)
+    "Yava": 2,         # 25 - Скорострелы(2)
+    "Faraway": 2,      # 26 - Скорострелы(2)
+    "Bumble Bee": 5,   # 27 - Мотогонки(5)
+    "Christmas": 2,    # 28 - Скорострелы(2)
+    "Love": 2,         # 29 - Скорострелы(2)
+    "Mirage": 2,       # 30 - Скорострелы(2)
+    "Drake": 2,        # 31 - Скорострелы(2)
+    "Space": 5,        # 32 - Мотогонки(5)
+    "Home": 1          # 33 - По инфе(1)
+}
+
+# --- Логика сохранения и загрузки данных ---
+def save_data_to_file():
+    """Сохраняет текущие данные серверов в JSON-файл."""
+    try:
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
+            json.dump(server_data, f, ensure_ascii=False, indent=4)
+    except Exception as e:
+        print(f"Ошибка сохранения данных в файл: {e}")
+
+def load_data_from_file():
+    """Загружает данные из JSON-файла при старте."""
+    data_store = {srv: {"houses": [], "businesses": []} for srv in ALL_SERVERS}
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+                for srv in ALL_SERVERS:
+                    if srv in loaded:
+                        data_store[srv] = loaded[srv]
+            print("Данные успешно загружены из файла!")
+        except Exception as e:
+            print(f"Ошибка загрузки данных из файла: {e}")
+    return data_store
+
+# Инициализация хранилища данных с загрузкой из файла
+server_data = load_data_from_file()
+
+def get_current_season_id(server: str) -> int:
+    """Вычисляет ID сезона с учетом смещения недель от базового понедельника (5:00 МСК)."""
+    base_id = BASE_SERVER_SEASONS.get(server, 1)
+    now_msk = datetime.now(zoneinfo.ZoneInfo("Europe/Moscow"))
+    
+    diff = now_msk - BASE_WEEK_START
+    weeks_passed = diff.days // 7
+    
+    if diff.total_seconds() < 0:
+        weeks_passed = 0
+        
+    current_season_id = ((base_id - 1 + weeks_passed) % 5) + 1
+    return current_season_id
+
+def get_server_season_info(server: str) -> dict:
+    season_id = get_current_season_id(server)
+    season_name = SEASONS_MAP[season_id]
+    return {
+        "id": season_id,
+        "name": season_name,
+        "display": f"{season_name} ({season_id})"
+    }
 
 # Функция списания PayDay
 def process_hourly_payday():
@@ -54,7 +151,9 @@ def process_hourly_payday():
                 updated_biz.append(b)
         data["businesses"] = sorted(updated_biz, key=lambda x: x["pd"])
 
-# Фоновое измерение времени с ровным срабатыванием в 00 минут каждого часа
+    save_data_to_file()
+
+# Фоновый цикл
 async def hourly_loop():
     while True:
         now = datetime.now()
@@ -70,6 +169,7 @@ async def lifespan(app: FastAPI):
     task = asyncio.create_task(hourly_loop())
     yield
     task.cancel()
+    save_data_to_file()
 
 app = FastAPI(title="Arizona Property Tracker API", lifespan=lifespan)
 
@@ -142,6 +242,7 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
     if businesses:
         server_data[srv]["businesses"] = sorted(businesses, key=lambda x: x["pd"])
 
+    save_data_to_file()
     return {"status": "ok", "count": len(payload.entries)}
 
 @app.post("/api/update_status")
@@ -152,6 +253,7 @@ async def update_status(data: UpdateStatusModel):
         for item in target_list:
             if item["pos"] == data.pos:
                 item["status"] = data.status
+                save_data_to_file()
                 return {"status": "success"}
     raise HTTPException(status_code=404, detail="Item not found")
 
@@ -161,6 +263,7 @@ async def delete_item(data: DeleteItemModel):
     if srv in server_data:
         target_key = "houses" if data.propType in ["house", "houses"] else "businesses"
         server_data[srv][target_key] = [item for item in server_data[srv][target_key] if item["pos"] != data.pos]
+        save_data_to_file()
         return {"status": "success"}
     raise HTTPException(status_code=404, detail="Server not found")
 
@@ -170,7 +273,6 @@ async def add_item(data: AddItemModel):
     if srv in server_data:
         target_key = "houses" if data.propType in ["house", "houses"] else "businesses"
         
-        # Генерируем уникальный pos для ручного элемента
         existing_positions = [item["pos"] for item in server_data[srv][target_key]]
         new_pos = max(existing_positions, default=0) + 1
         
@@ -184,12 +286,19 @@ async def add_item(data: AddItemModel):
         
         server_data[srv][target_key].append(new_record)
         server_data[srv][target_key] = sorted(server_data[srv][target_key], key=lambda x: x["pd"])
+        save_data_to_file()
         return {"status": "success"}
     raise HTTPException(status_code=404, detail="Server not found")
 
 @app.get("/api/paydays")
 async def get_paydays():
-    return server_data
+    response_data = {}
+    for srv, data in server_data.items():
+        response_data[srv] = {
+            **data,
+            "season": get_server_season_info(srv)
+        }
+    return response_data
 
 @app.get("/", response_class=HTMLResponse)
 async def render_dashboard():
@@ -234,6 +343,18 @@ async def render_dashboard():
                 border-bottom: 1px solid #333;
                 padding-bottom: 8px;
                 margin-bottom: 12px;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+            }
+            .season-badge {
+                font-size: 0.75em;
+                background-color: #332a12;
+                color: #ffb74d;
+                border: 1px solid #ff9800;
+                padding: 3px 8px;
+                border-radius: 12px;
+                font-weight: normal;
             }
             .tables-grid {
                 display: grid;
@@ -386,6 +507,11 @@ async def render_dashboard():
                     const data = await res.json();
                     
                     for (const [server, info] of Object.entries(data)) {
+                        const seasonElem = document.getElementById(`season-${server}`);
+                        if (seasonElem && info.season) {
+                            seasonElem.innerText = `Сезон: ${info.season.display}`;
+                        }
+
                         const hTable = document.getElementById(`houses-${server}`);
                         const bTable = document.getElementById(`biz-${server}`);
                         
@@ -429,8 +555,8 @@ async def render_dashboard():
                                         <td><span class="pd-badge">${item.pd} pd</span></td>
                                         <td>
                                             <div class="btn-group">
-                                                <button class="btn-opt ${st === 'insured' ? 'active-insured' : ''}" onclick="setStatus('${server}', 'house', ${item.pos}, 'insured')">Страх.</button>
-                                                <button class="btn-opt ${st === 'uninsured' ? 'active-uninsured' : ''}" onclick="setStatus('${server}', 'house', ${item.pos}, 'uninsured')">Не страх.</button>
+                                                <button class="btn-opt ${st === 'insured' ? 'active-insured' : ''}" onclick="setStatus('${server}', 'biz', ${item.pos}, 'insured')">Страх.</button>
+                                                <button class="btn-opt ${st === 'uninsured' ? 'active-uninsured' : ''}" onclick="setStatus('${server}', 'biz', ${item.pos}, 'uninsured')">Не страх.</button>
                                                 <button class="btn-opt ${st === 'no_activity' ? 'active-noact' : ''}" onclick="setStatus('${server}', 'biz', ${item.pos}, 'no_activity')">Без зан.</button>
                                             </div>
                                         </td>
@@ -456,9 +582,13 @@ async def render_dashboard():
     """
 
     for idx, srv in enumerate(ALL_SERVERS, 1):
+        season_info = get_server_season_info(srv)
         html_content += f"""
             <div class="server-card">
-                <div class="server-title">#{idx} {srv}</div>
+                <div class="server-title">
+                    <span>#{idx:02d} {srv}</span>
+                    <span id="season-{srv}" class="season-badge">Сезон: {season_info['display']}</span>
+                </div>
                 <div class="tables-grid">
                     <div>
                         <div class="section-header">
