@@ -58,7 +58,6 @@ def process_hourly_payday():
 async def hourly_loop():
     while True:
         now = datetime.now()
-        # Вычисляем секунды до следующего часа (минута 00, секунда 00)
         seconds_until_next_hour = (60 - now.minute - 1) * 60 + (60 - now.second)
         if seconds_until_next_hour <= 0:
             seconds_until_next_hour = 3600
@@ -68,7 +67,6 @@ async def hourly_loop():
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Запускаем асинхронную фоновую задачу при старте сервера
     task = asyncio.create_task(hourly_loop())
     yield
     task.cancel()
@@ -99,6 +97,17 @@ class UpdateStatusModel(BaseModel):
     propType: str
     pos: int
     status: str
+
+class DeleteItemModel(BaseModel):
+    server: str
+    propType: str
+    pos: int
+
+class AddItemModel(BaseModel):
+    server: str
+    propType: str
+    pd: int
+    propId: Optional[int] = None
 
 @app.post("/api/paydays")
 async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header(None)):
@@ -139,12 +148,44 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
 async def update_status(data: UpdateStatusModel):
     srv = data.server
     if srv in server_data:
-        target_list = server_data[srv]["houses"] if data.propType == "house" else server_data[srv]["businesses"]
+        target_list = server_data[srv]["houses"] if data.propType in ["house", "houses"] else server_data[srv]["businesses"]
         for item in target_list:
             if item["pos"] == data.pos:
                 item["status"] = data.status
                 return {"status": "success"}
     raise HTTPException(status_code=404, detail="Item not found")
+
+@app.post("/api/delete_item")
+async def delete_item(data: DeleteItemModel):
+    srv = data.server
+    if srv in server_data:
+        target_key = "houses" if data.propType in ["house", "houses"] else "businesses"
+        server_data[srv][target_key] = [item for item in server_data[srv][target_key] if item["pos"] != data.pos]
+        return {"status": "success"}
+    raise HTTPException(status_code=404, detail="Server not found")
+
+@app.post("/api/add_item")
+async def add_item(data: AddItemModel):
+    srv = data.server
+    if srv in server_data:
+        target_key = "houses" if data.propType in ["house", "houses"] else "businesses"
+        
+        # Генерируем уникальный pos для ручного элемента
+        existing_positions = [item["pos"] for item in server_data[srv][target_key]]
+        new_pos = max(existing_positions, default=0) + 1
+        
+        new_record = {
+            "pd": data.pd,
+            "propId": data.propId,
+            "pos": new_pos,
+            "status": "insured",
+            "updatedAt": datetime.utcnow().strftime("%H:%M:%S")
+        }
+        
+        server_data[srv][target_key].append(new_record)
+        server_data[srv][target_key] = sorted(server_data[srv][target_key], key=lambda x: x["pd"])
+        return {"status": "success"}
+    raise HTTPException(status_code=404, detail="Server not found")
 
 @app.get("/api/paydays")
 async def get_paydays():
@@ -202,11 +243,30 @@ async def render_dashboard():
             @media (max-width: 768px) {
                 .tables-grid { grid-template-columns: 1fr; }
             }
+            .section-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 6px;
+            }
             .section-title {
                 font-size: 0.95em;
                 font-weight: bold;
-                margin-bottom: 6px;
                 color: #00bcd4;
+            }
+            .btn-add {
+                background-color: #008cba;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 2px 8px;
+                font-size: 0.85em;
+                font-weight: bold;
+                cursor: pointer;
+                transition: 0.2s;
+            }
+            .btn-add:hover {
+                background-color: #005f73;
             }
             table {
                 width: 100%;
@@ -256,6 +316,20 @@ async def render_dashboard():
                 border-color: #ff1744;
                 font-weight: bold;
             }
+            .btn-del {
+                background-color: transparent;
+                color: #ef5350;
+                border: 1px solid #ef5350;
+                padding: 2px 6px;
+                font-size: 0.8em;
+                border-radius: 4px;
+                cursor: pointer;
+                transition: 0.2s;
+            }
+            .btn-del:hover {
+                background-color: #ef5350;
+                color: #fff;
+            }
             .empty { color: #666; font-style: italic; font-size: 0.85em; }
         </style>
         <script>
@@ -265,6 +339,42 @@ async def render_dashboard():
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ server, propType, pos, status })
+                    });
+                    loadData();
+                } catch(e) { console.error(e); }
+            }
+
+            async function deleteItem(server, propType, pos) {
+                if (!confirm('Удалить эту запись?')) return;
+                try {
+                    await fetch('/api/delete_item', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ server, propType, pos })
+                    });
+                    loadData();
+                } catch(e) { console.error(e); }
+            }
+
+            async function addItemPrompt(server, propType) {
+                const title = propType === 'house' ? 'дом' : 'бизнес';
+                const pdStr = prompt(`Введите оставшиеся PayDay для нового ${title}:`);
+                if (!pdStr) return;
+                
+                const pd = parseInt(pdStr, 10);
+                if (isNaN(pd) || pd <= 0) {
+                    alert('Некорректное значение PayDay!');
+                    return;
+                }
+
+                const idStr = prompt(`Введите ID ${title} (или оставьте пустым):`);
+                const propId = idStr && !isNaN(parseInt(idStr, 10)) ? parseInt(idStr, 10) : null;
+
+                try {
+                    await fetch('/api/add_item', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ server, propType, pd, propId })
                     });
                     loadData();
                 } catch(e) { console.error(e); }
@@ -283,7 +393,7 @@ async def render_dashboard():
                             if (info.houses.length === 0) {
                                 hTable.innerHTML = '<span class="empty">Нет данных</span>';
                             } else {
-                                let html = '<table><tr><th>№</th><th>ID</th><th>PD</th><th>Тип слета</th></tr>';
+                                let html = '<table><tr><th>№</th><th>ID</th><th>PD</th><th>Тип слета</th><th></th></tr>';
                                 info.houses.forEach((item, idx) => {
                                     const st = item.status || 'insured';
                                     html += `<tr>
@@ -296,6 +406,9 @@ async def render_dashboard():
                                                 <button class="btn-opt ${st === 'uninsured' ? 'active-uninsured' : ''}" onclick="setStatus('${server}', 'house', ${item.pos}, 'uninsured')">Не страх.</button>
                                             </div>
                                         </td>
+                                        <td>
+                                            <button class="btn-del" onclick="deleteItem('${server}', 'house', ${item.pos})">✖</button>
+                                        </td>
                                     </tr>`;
                                 });
                                 html += '</table>';
@@ -307,7 +420,7 @@ async def render_dashboard():
                             if (info.businesses.length === 0) {
                                 bTable.innerHTML = '<span class="empty">Нет данных</span>';
                             } else {
-                                let html = '<table><tr><th>№</th><th>ID</th><th>PD</th><th>Тип слета</th></tr>';
+                                let html = '<table><tr><th>№</th><th>ID</th><th>PD</th><th>Тип слета</th><th></th></tr>';
                                 info.businesses.forEach((item, idx) => {
                                     const st = item.status || 'insured';
                                     html += `<tr>
@@ -316,10 +429,13 @@ async def render_dashboard():
                                         <td><span class="pd-badge">${item.pd} pd</span></td>
                                         <td>
                                             <div class="btn-group">
-                                                <button class="btn-opt ${st === 'insured' ? 'active-insured' : ''}" onclick="setStatus('${server}', 'biz', ${item.pos}, 'insured')">Страх.</button>
-                                                <button class="btn-opt ${st === 'uninsured' ? 'active-uninsured' : ''}" onclick="setStatus('${server}', 'biz', ${item.pos}, 'uninsured')">Не страх.</button>
+                                                <button class="btn-opt ${st === 'insured' ? 'active-insured' : ''}" onclick="setStatus('${server}', 'house', ${item.pos}, 'insured')">Страх.</button>
+                                                <button class="btn-opt ${st === 'uninsured' ? 'active-uninsured' : ''}" onclick="setStatus('${server}', 'house', ${item.pos}, 'uninsured')">Не страх.</button>
                                                 <button class="btn-opt ${st === 'no_activity' ? 'active-noact' : ''}" onclick="setStatus('${server}', 'biz', ${item.pos}, 'no_activity')">Без зан.</button>
                                             </div>
+                                        </td>
+                                        <td>
+                                            <button class="btn-del" onclick="deleteItem('${server}', 'biz', ${item.pos})">✖</button>
                                         </td>
                                     </tr>`;
                                 });
@@ -345,11 +461,17 @@ async def render_dashboard():
                 <div class="server-title">#{idx} {srv}</div>
                 <div class="tables-grid">
                     <div>
-                        <div class="section-title">🏠 Дома</div>
+                        <div class="section-header">
+                            <span class="section-title">🏠 Дома</span>
+                            <button class="btn-add" onclick="addItemPrompt('{srv}', 'house')">+ Добавить</button>
+                        </div>
                         <div id="houses-{srv}"><span class="empty">Загрузка...</span></div>
                     </div>
                     <div>
-                        <div class="section-title">🏢 Бизнесы</div>
+                        <div class="section-header">
+                            <span class="section-title">🏢 Бизнесы</span>
+                            <button class="btn-add" onclick="addItemPrompt('{srv}', 'biz')">+ Добавить</button>
+                        </div>
                         <div id="biz-{srv}"><span class="empty">Загрузка...</span></div>
                     </div>
                 </div>
