@@ -3,7 +3,7 @@ import contextlib
 import json
 import os
 import zoneinfo
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 from fastapi import FastAPI, Header, HTTPException, status
@@ -184,17 +184,10 @@ def get_latest_confirmed_scan(scans: List[dict]) -> Optional[dict]:
         return dependent_scans[-1]
     return scans[-1] if scans else None
 
-# --- АЛГОРИТМ УМНОГО СОПОСТАВЛЕНИЯ ПРИ СМЕЩЕНИИ ПОЗИЦИЙ И ЗАМОРОЗКЕ ---
+# --- АЛГОРИТМ УМНОГО СОПОСТАВЛЕНИЯ ---
 def find_pairs_with_offset(prev_items: List[dict], curr_entries: List[PropertyEntry], prop_type: str):
-    """
-    Сопоставляет объекты с прошлым сканированием с учетом оффсета.
-    diff == 0  -> Заморожен
-    diff == 1  -> Застрахован
-    diff == 2  -> Без страховки
-    diff == 4  -> Без занятости (только для биз)
-    """
     valid_diffs = {0, 1, 2} if prop_type == "house" else {0, 1, 2, 4}
-    matches = {} # {idx_curr: (prev_item, status)}
+    matches = {}
     used_prev_indices = set()
 
     def determine_status(diff: int, p_type: str) -> str:
@@ -204,7 +197,6 @@ def find_pairs_with_offset(prev_items: List[dict], curr_entries: List[PropertyEn
             return "uninsured" if diff >= 2 else "insured"
         return "no_activity" if diff >= 4 else ("uninsured" if diff >= 2 else "insured")
 
-    # 1. Сначала пытаемся сопоставить по прямому совпадению propId (если передан)
     for c_idx, curr in enumerate(curr_entries):
         if curr.propId is not None:
             for p_idx, prev in enumerate(prev_items):
@@ -219,7 +211,6 @@ def find_pairs_with_offset(prev_items: List[dict], curr_entries: List[PropertyEn
                         used_prev_indices.add(p_idx)
                         break
 
-    # 2. Сопоставление по порядку следования и валидной разнице PD
     for c_idx, curr in enumerate(curr_entries):
         if c_idx in matches:
             continue
@@ -239,10 +230,13 @@ def find_pairs_with_offset(prev_items: List[dict], curr_entries: List[PropertyEn
 
     return matches
 
-# --- ЛОГИКА PAYDAY ДЛЯ ОБЩЕГО ВИДА ---
+# --- ЛОГИКА PAYDAY (Списание в 5:00 идет, но удаление заблокировано до 6:00) ---
 async def process_hourly_payday():
+    now_msk = datetime.now(MSK_TZ)
+    is_restart_hour = (now_msk.hour == 5)
+
     async with data_lock:
-        print(f"[{datetime.now(MSK_TZ).strftime('%Y-%m-%d %H:%M:%S')}] Списание PayDay для общего вида...")
+        print(f"[{now_msk.strftime('%Y-%m-%d %H:%M:%S')}] Выполнение списания PayDay (Рестарт: {is_restart_hour})...")
         for srv, data in server_data.items():
             scans = data.get("scans", [])
             if not scans:
@@ -265,7 +259,9 @@ async def process_hourly_payday():
                     h["pd"] -= decrement
                 
                 drop_limit = get_drop_limit(srv, "house", st)
-                if h["pd"] >= drop_limit:
+                
+                # В 05:00 МСК списание прошло, но удаление НЕ происходит (блокировка слёта до 06:00)
+                if is_restart_hour or h["pd"] >= drop_limit:
                     updated_houses.append(h)
 
             latest_scan["houses"] = sorted(updated_houses, key=lambda x: x["pos"])
@@ -283,7 +279,9 @@ async def process_hourly_payday():
                     b["pd"] -= decrement
                 
                 drop_limit = get_drop_limit(srv, "biz", st)
-                if b["pd"] >= drop_limit:
+                
+                # В 05:00 МСК списание прошло, но удаление НЕ происходит
+                if is_restart_hour or b["pd"] >= drop_limit:
                     updated_biz.append(b)
 
             latest_scan["businesses"] = sorted(updated_biz, key=lambda x: x["pos"])
@@ -355,7 +353,6 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
         prev_houses = prev_scan.get("houses", []) if prev_scan else []
         prev_biz = prev_scan.get("businesses", []) if prev_scan else []
 
-        # Поиск пар с учетом смещения и возможной заморозки
         house_matches = find_pairs_with_offset(prev_houses, house_entries, "house") if prev_scan else {}
         biz_matches = find_pairs_with_offset(prev_biz, biz_entries, "biz") if prev_scan else {}
 
@@ -553,7 +550,7 @@ DASHBOARD_HTML = """
         .tab-content { display: none; }
         .tab-content.active { display: block; }
 
-        .servers-container { display: flex; flex-direction: column; gap: 15px; max-width: 1000px; margin: 0 auto; }
+        .servers-container { display: flex; flex-direction: column; gap: 15px; max-width: 1100px; margin: 0 auto; }
         .server-card { background-color: #1e1e1e; border: 1px solid #333; border-radius: 8px; padding: 15px 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
         .server-header { border-bottom: 1px solid #333; padding-bottom: 8px; margin-bottom: 12px; }
         .server-title { font-size: 1.3em; font-weight: bold; color: #4caf50; display: flex; justify-content: space-between; align-items: center; }
@@ -570,7 +567,7 @@ DASHBOARD_HTML = """
         .btn-delete-scan:hover { background-color: #d32f2f; }
 
         .tables-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
-        @media (max-width: 768px) { .tables-grid { grid-template-columns: 1fr; } }
+        @media (max-width: 850px) { .tables-grid { grid-template-columns: 1fr; } }
         .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
         .section-title { font-size: 0.95em; font-weight: bold; color: #00bcd4; }
         .btn-add { background-color: #008cba; color: white; border: none; border-radius: 4px; padding: 2px 8px; font-size: 0.85em; font-weight: bold; cursor: pointer; transition: 0.2s; }
@@ -582,6 +579,9 @@ DASHBOARD_HTML = """
         .pd-badge-drop { background-color: #d32f2f; color: #ffeb3b; padding: 2px 6px; border-radius: 4px; font-weight: bold; animation: pulse 1.5s infinite; }
         .pd-badge-fixed { background-color: #37474f; color: #81d4fa; border: 1px solid #00838f; padding: 2px 6px; border-radius: 4px; font-weight: bold; }
         
+        .time-left-badge { font-weight: bold; color: #ffb74d; font-size: 0.85em; background-color: #231b0c; padding: 2px 6px; border-radius: 4px; border: 1px solid #5d4037; }
+        .time-left-frozen { font-weight: bold; color: #64b5f6; font-size: 0.85em; }
+
         @keyframes pulse {
             0% { opacity: 1; }
             50% { opacity: 0.6; }
@@ -709,10 +709,66 @@ DASHBOARD_HTML = """
             } catch(e) { console.error(e); }
         }
 
-        function renderTable(items, server, scanId, type, interactive = true, isDropTab = false) {
+        // --- ВЫЧИСЛЕНИЕ ВРЕМЕНИ ДО СЛЁТА (СЛЕТЫ ТОЛЬКО ПОСЛЕ 5 УТРА — В 6.00 И ДАЛЕЕ) ---
+        function calculateDropTime(pd, status, serverRules, propType) {
+            if (status === 'frozen') {
+                return { text: '❄️ Заморожен', isFrozen: true };
+            }
+
+            const rules = serverRules[propType] || { insured: 2, uninsured_min: 2, uninsured_max: 3 };
+            let decrement = 1;
+            let dropLimit = rules.insured;
+
+            if (status === 'uninsured') {
+                decrement = 2;
+                dropLimit = rules.uninsured_min;
+            } else if (status === 'no_activity') {
+                decrement = 4;
+                dropLimit = rules.uninsured_min;
+            }
+
+            const neededPayDays = Math.max(0, Math.ceil((pd - (dropLimit - 1)) / decrement));
+
+            const now = new Date();
+            const utcTime = now.getTime() + (now.getTimezoneOffset() * 60000);
+            const mskNow = new Date(utcTime + (3 * 3600000)); // Время МСК
+
+            let targetTime = new Date(mskNow);
+            targetTime.setMinutes(0, 0, 0);
+            targetTime.setHours(targetTime.getHours() + 1); // Ближайший PayDay
+
+            let paydaysApplied = 0;
+            while (paydaysApplied < neededPayDays) {
+                // Пейдей в 05:00 списывает PD, но СЛЁТ в 05:00 не происходит. 
+                // Если слёт выпадает на 05:00, targetTime переносится на 06:00.
+                paydaysApplied++;
+                if (paydaysApplied === neededPayDays && targetTime.getHours() === 5) {
+                    targetTime.setHours(6);
+                } else if (paydaysApplied < neededPayDays) {
+                    targetTime.setHours(targetTime.getHours() + 1);
+                }
+            }
+
+            const diffMs = targetTime.getTime() - mskNow.getTime();
+            if (diffMs <= 0) return { text: '< 1 мин', isFrozen: false };
+
+            const totalMinutes = Math.floor(diffMs / 60000);
+            const hours = Math.floor(totalMinutes / 60);
+            const minutes = totalMinutes % 60;
+
+            let timeStr = '';
+            if (hours > 0) timeStr += `${hours} ч `;
+            timeStr += `${minutes} мин`;
+
+            return { text: timeStr, isFrozen: false };
+        }
+
+        function renderTable(items, server, scanId, type, interactive = true, isDropTab = false, serverRules = {}) {
             if (!items || items.length === 0) return '<span class="empty">Нет данных</span>';
             
-            let html = '<table><tr><th>№</th><th>ID</th><th>PD</th><th>Статус</th>' + (interactive ? '<th></th>' : '') + '</tr>';
+            let html = '<table><tr><th>№</th><th>ID</th><th>PD</th><th>Статус</th>' + 
+                       (!interactive ? '<th>Слёт через</th>' : '') + 
+                       (interactive ? '<th></th>' : '') + '</tr>';
             
             items.forEach((item) => {
                 const st = item.status || 'insured';
@@ -745,11 +801,23 @@ DASHBOARD_HTML = """
                     }
                 }
 
+                let dropTimeTd = '';
+                if (!interactive) {
+                    if (isPending) {
+                        dropTimeTd = '<td><span class="empty">—</span></td>';
+                    } else {
+                        const dropInfo = calculateDropTime(item.pd, st, serverRules, type);
+                        const badgeStyle = dropInfo.isFrozen ? 'time-left-frozen' : 'time-left-badge';
+                        dropTimeTd = `<td><span class="${badgeStyle}">${dropInfo.text}</span></td>`;
+                    }
+                }
+
                 html += `<tr>
                     <td>${item.pos}</td>
                     <td>${item.propId ? '№' + item.propId : '—'}</td>
                     <td><span class="${badgeClass}">${displayPd} pd</span></td>
                     <td>${statusControl}</td>
+                    ${dropTimeTd}
                     ${interactive ? `<td><button class="btn-del" onclick="deleteItem('${server}', '${scanId}', '${type}',${item.pos})">✖</button></td>` : ''}
                 </tr>`;
             });
@@ -760,7 +828,7 @@ DASHBOARD_HTML = """
             if (!item || item.isPendingPair) return false;
             
             const st = item.status || 'insured';
-            if (st === 'frozen') return false; // Замороженные объекты не слетают
+            if (st === 'frozen') return false;
             
             const rules = serverRules[propType] || { insured: 2, uninsured_min: 2, uninsured_max: 3 };
             
@@ -775,8 +843,16 @@ DASHBOARD_HTML = """
                 dropLimit = rules.uninsured_min;
             }
 
+            const now = new Date();
+            const utcTime = now.getTime() + (now.getTimezoneOffset() * 60000);
+            const mskNow = new Date(utcTime + (3 * 3600000));
+
             const pdAfterPayday = item.pd - decrement;
-            return pdAfterPayday < dropLimit;
+            const dropCondition = pdAfterPayday < dropLimit;
+
+            // Если списание происходит в 5 утра и лимит достигнут, слёт переносится на 6 утра.
+            // Но в категории "Ближайшие слёты" данный объект должен находиться как в 5, так и в 6 утра.
+            return dropCondition;
         }
 
         async function loadData() {
@@ -828,15 +904,16 @@ DASHBOARD_HTML = """
                     }
 
                     const curScan = scans.find(s => s.scanId === activeScanId) || scans[scans.length - 1];
-                    document.getElementById(`houses-manage-${srv}`).innerHTML = renderTable(curScan.houses, srv, curScan.scanId, 'house', true);
-                    document.getElementById(`biz-manage-${srv}`).innerHTML = renderTable(curScan.businesses, srv, curScan.scanId, 'biz', true);
+                    const serverRules = info.dropRules || {};
+
+                    document.getElementById(`houses-manage-${srv}`).innerHTML = renderTable(curScan.houses, srv, curScan.scanId, 'house', true, false, serverRules);
+                    document.getElementById(`biz-manage-${srv}`).innerHTML = renderTable(curScan.businesses, srv, curScan.scanId, 'biz', true, false, serverRules);
 
                     const latestConfirmed = info.latestConfirmedScan;
                     if (latestConfirmed) {
-                        document.getElementById(`houses-view-${srv}`).innerHTML = renderTable(latestConfirmed.houses, srv, latestConfirmed.scanId, 'house', false);
-                        document.getElementById(`biz-view-${srv}`).innerHTML = renderTable(latestConfirmed.businesses, srv, latestConfirmed.scanId, 'biz', false);
+                        document.getElementById(`houses-view-${srv}`).innerHTML = renderTable(latestConfirmed.houses, srv, latestConfirmed.scanId, 'house', false, false, serverRules);
+                        document.getElementById(`biz-view-${srv}`).innerHTML = renderTable(latestConfirmed.businesses, srv, latestConfirmed.scanId, 'biz', false, false, serverRules);
 
-                        const serverRules = info.dropRules || {};
                         const droppingHouses = (latestConfirmed.houses || []).filter(h => willDropNextPayday(h, serverRules, 'house'));
                         const droppingBiz = (latestConfirmed.businesses || []).filter(b => willDropNextPayday(b, serverRules, 'biz'));
 
@@ -853,11 +930,11 @@ DASHBOARD_HTML = """
                                     <div class="tables-grid">
                                         <div>
                                             <div class="section-title">Слетающие дома в PD</div>
-                                            ${renderTable(droppingHouses, srv, latestConfirmed.scanId, 'house', false, true)}
+                                            ${renderTable(droppingHouses, srv, latestConfirmed.scanId, 'house', false, true, serverRules)}
                                         </div>
                                         <div>
                                             <div class="section-title">Слетающие бизнесы в PD</div>
-                                            ${renderTable(droppingBiz, srv, latestConfirmed.scanId, 'biz', false, true)}
+                                            ${renderTable(droppingBiz, srv, latestConfirmed.scanId, 'biz', false, true, serverRules)}
                                         </div>
                                     </div>
                                 </div>`;
