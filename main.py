@@ -48,8 +48,6 @@ BASE_SERVER_SEASONS = {
 }
 
 # --- ПРАВИЛА СЛЕТА ИМУЩЕСТВА (минимальный порог PD для слёта) ---
-# Для незастрахованных (варианты 1/2 и 2/3) указывается минимальный PayDay (uninsured_min),
-# при котором объект уже может слететь (1 для 1/2, 2 для 2/3).
 SERVER_DROP_RULES = {
     "Phoenix":     {"house": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}, "biz": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}},
     "Tucson":      {"house": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}, "biz": {"insured": 2, "uninsured_min": 1, "uninsured_max": 2}},
@@ -59,10 +57,7 @@ SERVER_DROP_RULES = {
     "Saint-Rose":  {"house": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}, "biz": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}},
     "Mesa":        {"house": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}, "biz": {"insured": 2, "uninsured_min": 1, "uninsured_max": 2}},
     "Red-Rock":    {"house": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}, "biz": {"insured": 1, "uninsured_min": 1, "uninsured_max": 2}},
-    
-    # Yuma: страхованные дома = 1 PD, незастрахованные = 1/2 PD
     "Yuma":        {"house": {"insured": 1, "uninsured_min": 1, "uninsured_max": 2}, "biz": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}},
-    
     "Surprise":    {"house": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}, "biz": {"insured": 2, "uninsured_min": 1, "uninsured_max": 2}},
     "Prescott":    {"house": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}, "biz": {"insured": 2, "uninsured_min": 1, "uninsured_max": 2}},
     "Glendale":    {"house": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}, "biz": {"insured": 1, "uninsured_min": 1, "uninsured_max": 2}},
@@ -82,10 +77,7 @@ SERVER_DROP_RULES = {
     "Faraway":     {"house": {"insured": 1, "uninsured_min": 1, "uninsured_max": 2}, "biz": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}},
     "Bumble Bee":  {"house": {"insured": 1, "uninsured_min": 1, "uninsured_max": 2}, "biz": {"insured": 1, "uninsured_min": 1, "uninsured_max": 2}},
     "Christmas":   {"house": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}, "biz": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}},
-    
-    # Mirage: страхованные дома = 2 PD, незастрахованные = 2/3 PD
     "Mirage":      {"house": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}, "biz": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}},
-    
     "Love":        {"house": {"insured": 1, "uninsured_min": 1, "uninsured_max": 2}, "biz": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}},
     "Drake":       {"house": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}, "biz": {"insured": 1, "uninsured_min": 1, "uninsured_max": 2}},
     "Space":       {"house": {"insured": 1, "uninsured_min": 1, "uninsured_max": 2}, "biz": {"insured": 2, "uninsured_min": 1, "uninsured_max": 2}},
@@ -93,17 +85,13 @@ SERVER_DROP_RULES = {
 }
 
 def get_drop_limit(server: str, prop_type: str, status: str) -> int:
-    """Возвращает минимальный порог PD, при котором имущество может слететь"""
     srv_rules = SERVER_DROP_RULES.get(server, {
         "house": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3},
         "biz": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}
     })
-    
     rules = srv_rules.get(prop_type, {"insured": 2, "uninsured_min": 2, "uninsured_max": 3})
-    
     if status == "uninsured":
         return rules.get("uninsured_min", 2)
-        
     return rules.get("insured", 2)
 
 data_lock = asyncio.Lock()
@@ -196,7 +184,7 @@ def get_latest_confirmed_scan(scans: List[dict]) -> Optional[dict]:
         return dependent_scans[-1]
     return scans[-1] if scans else None
 
-# --- ЛОГИКА PAYDAY ДЛЯ ОБЩЕГО ВИДА С УЧЕТОМ ПОРОГОВ СЛЕТА ---
+# --- ЛОГИКА PAYDAY ДЛЯ ОБЩЕГО ВИДА ---
 async def process_hourly_payday():
     async with data_lock:
         print(f"[{datetime.now(MSK_TZ).strftime('%Y-%m-%d %H:%M:%S')}] Списание PayDay для общего вида...")
@@ -219,7 +207,6 @@ async def process_hourly_payday():
                 decrement = 1 if h.get("status") == "insured" else 2
                 h["pd"] -= decrement
                 
-                # Проверяем лимит слета с учетом сервера и страховки
                 drop_limit = get_drop_limit(srv, "house", h.get("status", "insured"))
                 if h["pd"] >= drop_limit:
                     updated_houses.append(h)
@@ -471,7 +458,11 @@ async def get_paydays():
             res[srv] = {
                 "scans": scans,
                 "latestConfirmedScan": latest_confirmed,
-                "season": get_server_season_info(srv)
+                "season": get_server_season_info(srv),
+                "dropRules": SERVER_DROP_RULES.get(srv, {
+                    "house": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3},
+                    "biz": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}
+                })
             }
         return res
 
@@ -521,8 +512,15 @@ DASHBOARD_HTML = """
         th, td { padding: 6px 8px; text-align: left; border-bottom: 1px solid #2a2a2a; }
         th { background-color: #252525; color: #aaa; }
         .pd-badge { background-color: #e53935; color: #fff; padding: 2px 6px; border-radius: 4px; font-weight: bold; }
+        .pd-badge-drop { background-color: #d32f2f; color: #ffeb3b; padding: 2px 6px; border-radius: 4px; font-weight: bold; animation: pulse 1.5s infinite; }
         .pd-badge-fixed { background-color: #37474f; color: #81d4fa; border: 1px solid #00838f; padding: 2px 6px; border-radius: 4px; font-weight: bold; }
         
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.6; }
+            100% { opacity: 1; }
+        }
+
         .btn-group { display: flex; gap: 3px; }
         .btn-opt { background-color: #2a2a2a; color: #888; border: 1px solid #444; padding: 3px 6px; font-size: 0.75em; border-radius: 4px; cursor: pointer; transition: 0.2s; }
         .btn-opt.active-insured { background-color: #2e7d32; color: #fff; border-color: #4caf50; }
@@ -538,6 +536,7 @@ DASHBOARD_HTML = """
         .btn-del { background-color: transparent; color: #ef5350; border: 1px solid #ef5350; padding: 2px 6px; font-size: 0.8em; border-radius: 4px; cursor: pointer; transition: 0.2s; }
         .btn-del:hover { background-color: #ef5350; color: #fff; }
         .empty { color: #666; font-style: italic; font-size: 0.85em; }
+        .empty-center { text-align: center; color: #888; font-style: italic; padding: 20px; background-color: #1e1e1e; border-radius: 8px; border: 1px solid #333; }
     </style>
     <script>
         const ALL_SERVERS = [
@@ -558,6 +557,9 @@ DASHBOARD_HTML = """
             if (tabName === 'manage') {
                 document.getElementById('btn-tab-manage').classList.add('active');
                 document.getElementById('tab-manage').classList.add('active');
+            } else if (tabName === 'upcoming') {
+                document.getElementById('btn-tab-upcoming').classList.add('active');
+                document.getElementById('tab-upcoming').classList.add('active');
             } else {
                 document.getElementById('btn-tab-view').classList.add('active');
                 document.getElementById('tab-view').classList.add('active');
@@ -638,7 +640,7 @@ DASHBOARD_HTML = """
             } catch(e) { console.error(e); }
         }
 
-        function renderTable(items, server, scanId, type, interactive = true) {
+        function renderTable(items, server, scanId, type, interactive = true, isDropTab = false) {
             if (!items || items.length === 0) return '<span class="empty">Нет данных</span>';
             
             let html = '<table><tr><th>№</th><th>ID</th><th>PD</th><th>Статус</th>' + (interactive ? '<th></th>' : '') + '</tr>';
@@ -647,7 +649,7 @@ DASHBOARD_HTML = """
                 const st = item.status || 'insured';
                 const isPending = item.isPendingPair;
                 const displayPd = interactive ? (item.basePd !== undefined ? item.basePd : item.pd) : item.pd;
-                const badgeClass = interactive ? 'pd-badge-fixed' : 'pd-badge';
+                const badgeClass = interactive ? 'pd-badge-fixed' : (isDropTab ? 'pd-badge-drop' : 'pd-badge');
 
                 let statusControl = '';
                 if (interactive) {
@@ -679,59 +681,121 @@ DASHBOARD_HTML = """
             return html + '</table>';
         }
 
+        // Проверка: должен ли объект слететь в следующий PayDay с учетом правил сервера
+        function willDropNextPayday(item, serverRules, propType) {
+            if (!item || item.isPendingPair) return false;
+            
+            const st = item.status || 'insured';
+            const rules = serverRules[propType] || { insured: 2, uninsured_min: 2, uninsured_max: 3 };
+            
+            let decrement = 1;
+            let dropLimit = rules.insured;
+
+            if (st === 'uninsured') {
+                decrement = (propType === 'house') ? 2 : 2;
+                dropLimit = rules.uninsured_min;
+            } else if (st === 'no_activity') {
+                decrement = 4;
+                dropLimit = rules.uninsured_min;
+            }
+
+            const pdAfterPayday = item.pd - decrement;
+            return pdAfterPayday < dropLimit;
+        }
+
         async function loadData() {
             try {
                 const res = await fetch('/api/paydays');
                 const data = await res.json();
                 
-                for (const [server, info] of Object.entries(data)) {
-                    document.querySelectorAll(`.season-badge-${server}`).forEach(elem => {
+                const containerUpcoming = document.getElementById('servers-upcoming');
+                containerUpcoming.innerHTML = '';
+                let hasUpcomingDrops = false;
+
+                for (const srv of ALL_SERVERS) {
+                    const info = data[srv];
+                    if (!info) continue;
+
+                    document.querySelectorAll(`.season-badge-${srv}`).forEach(elem => {
                         if (info.season) elem.innerText = `Сезон: ${info.season.display}`;
                     });
 
                     const scans = info.scans || [];
-                    const manageTabsElem = document.getElementById(`scan-tabs-${server}`);
-                    const delScanBtnElem = document.getElementById(`btn-del-scan-${server}`);
+                    const manageTabsElem = document.getElementById(`scan-tabs-${srv}`);
+                    const delScanBtnElem = document.getElementById(`btn-del-scan-${srv}`);
                     
                     if (scans.length === 0) {
                         if (manageTabsElem) manageTabsElem.innerHTML = '<span class="empty">Сканирований нет</span>';
                         if (delScanBtnElem) delScanBtnElem.style.display = 'none';
-                        document.getElementById(`houses-manage-${server}`).innerHTML = '<span class="empty">Нет данных</span>';
-                        document.getElementById(`biz-manage-${server}`).innerHTML = '<span class="empty">Нет данных</span>';
-                        document.getElementById(`houses-view-${server}`).innerHTML = '<span class="empty">Нет данных</span>';
-                        document.getElementById(`biz-view-${server}`).innerHTML = '<span class="empty">Нет данных</span>';
+                        document.getElementById(`houses-manage-${srv}`).innerHTML = '<span class="empty">Нет данных</span>';
+                        document.getElementById(`biz-manage-${srv}`).innerHTML = '<span class="empty">Нет данных</span>';
+                        document.getElementById(`houses-view-${srv}`).innerHTML = '<span class="empty">Нет данных</span>';
+                        document.getElementById(`biz-view-${srv}`).innerHTML = '<span class="empty">Нет данных</span>';
                         continue;
                     }
 
                     if (delScanBtnElem) delScanBtnElem.style.display = 'inline-block';
 
-                    if (!activeServerScans[server] || !scans.some(s => s.scanId === activeServerScans[server])) {
-                        activeServerScans[server] = scans[scans.length - 1].scanId;
+                    if (!activeServerScans[srv] || !scans.some(s => s.scanId === activeServerScans[srv])) {
+                        activeServerScans[srv] = scans[scans.length - 1].scanId;
                     }
 
-                    const activeScanId = activeServerScans[server];
+                    const activeScanId = activeServerScans[srv];
 
                     if (manageTabsElem) {
                         manageTabsElem.innerHTML = scans.map(s => `
                             <button class="scan-subtab ${s.scanId === activeScanId ? 'active' : ''} ${!s.hasPair ? 'single' : ''}" 
-                                    onclick="selectScanTab('${server}', '${s.scanId}')">
+                                    onclick="selectScanTab('${srv}', '${s.scanId}')">
                                 ${s.hourLabel} ${!s.hasPair ? '⚠️' : ''}
                             </button>
                         `).join('');
                     }
 
                     const curScan = scans.find(s => s.scanId === activeScanId) || scans[scans.length - 1];
-                    document.getElementById(`houses-manage-${server}`).innerHTML = renderTable(curScan.houses, server, curScan.scanId, 'house', true);
-                    document.getElementById(`biz-manage-${server}`).innerHTML = renderTable(curScan.businesses, server, curScan.scanId, 'biz', true);
+                    document.getElementById(`houses-manage-${srv}`).innerHTML = renderTable(curScan.houses, srv, curScan.scanId, 'house', true);
+                    document.getElementById(`biz-manage-${srv}`).innerHTML = renderTable(curScan.businesses, srv, curScan.scanId, 'biz', true);
 
                     const latestConfirmed = info.latestConfirmedScan;
                     if (latestConfirmed) {
-                        document.getElementById(`houses-view-${server}`).innerHTML = renderTable(latestConfirmed.houses, server, latestConfirmed.scanId, 'house', false);
-                        document.getElementById(`biz-view-${server}`).innerHTML = renderTable(latestConfirmed.businesses, server, latestConfirmed.scanId, 'biz', false);
+                        document.getElementById(`houses-view-${srv}`).innerHTML = renderTable(latestConfirmed.houses, srv, latestConfirmed.scanId, 'house', false);
+                        document.getElementById(`biz-view-${srv}`).innerHTML = renderTable(latestConfirmed.businesses, srv, latestConfirmed.scanId, 'biz', false);
+
+                        // Логика фильтрации для вкладки "Ближайшие слеты"
+                        const serverRules = info.dropRules || {};
+                        const droppingHouses = (latestConfirmed.houses || []).filter(h => willDropNextPayday(h, serverRules, 'house'));
+                        const droppingBiz = (latestConfirmed.businesses || []).filter(b => willDropNextPayday(b, serverRules, 'biz'));
+
+                        if (droppingHouses.length > 0 || droppingBiz.length > 0) {
+                            hasUpcomingDrops = true;
+                            const cardUpcoming = `
+                                <div class="server-card">
+                                    <div class="server-header">
+                                        <div class="server-title">
+                                            <span>${srv}</span>
+                                            <span class="season-badge">${info.season ? info.season.display : ''}</span>
+                                        </div>
+                                    </div>
+                                    <div class="tables-grid">
+                                        <div>
+                                            <div class="section-title">Слетающие дома в PD</div>
+                                            ${renderTable(droppingHouses, srv, latestConfirmed.scanId, 'house', false, true)}
+                                        </div>
+                                        <div>
+                                            <div class="section-title">Слетающие бизнесы в PD</div>
+                                            ${renderTable(droppingBiz, srv, latestConfirmed.scanId, 'biz', false, true)}
+                                        </div>
+                                    </div>
+                                </div>`;
+                            containerUpcoming.insertAdjacentHTML('beforeend', cardUpcoming);
+                        }
                     } else {
-                        document.getElementById(`houses-view-${server}`).innerHTML = '<span class="empty">Ожидание 2-й точки</span>';
-                        document.getElementById(`biz-view-${server}`).innerHTML = '<span class="empty">Ожидание 2-й точки</span>';
+                        document.getElementById(`houses-view-${srv}`).innerHTML = '<span class="empty">Ожидание 2-й точки</span>';
+                        document.getElementById(`biz-view-${srv}`).innerHTML = '<span class="empty">Ожидание 2-й точки</span>';
                     }
+                }
+
+                if (!hasUpcomingDrops) {
+                    containerUpcoming.innerHTML = '<div class="empty-center">В ближайший PayDay слётов имущества не ожидается</div>';
                 }
             } catch(e) { console.error(e); }
         }
@@ -806,11 +870,16 @@ DASHBOARD_HTML = """
     
     <div class="tabs">
         <button id="btn-tab-view" class="tab-btn active" onclick="switchTab('view')">Общий вид</button>
+        <button id="btn-tab-upcoming" class="tab-btn" onclick="switchTab('upcoming')">🔥 Ближайшие слёты</button>
         <button id="btn-tab-manage" class="tab-btn" onclick="switchTab('manage')">Управление сканами</button>
     </div>
 
     <div id="tab-view" class="tab-content active">
         <div class="servers-container" id="servers-view"></div>
+    </div>
+
+    <div id="tab-upcoming" class="tab-content">
+        <div class="servers-container" id="servers-upcoming"></div>
     </div>
 
     <div id="tab-manage" class="tab-content">
