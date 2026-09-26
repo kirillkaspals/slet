@@ -4,7 +4,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import asyncio
 import contextlib
 
 SECRET_KEY = "usefguIHSFUSDFGUjhjfk88448"
@@ -25,24 +25,22 @@ server_data = {
     srv: {"houses": [], "businesses": []} for srv in ALL_SERVERS
 }
 
-# Автоматическое списание PayDay каждый час в 00 минут
+# Функция списания PayDay
 def process_hourly_payday():
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Выполнение списания PayDay...")
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Списание PayDay...")
     for srv, data in server_data.items():
-        # Дома
+        # Дома (1 - страхован, 2 - не страхован)
         updated_houses = []
         for h in data["houses"]:
-            # insured (1), uninsured (2)
             decrement = 1 if h.get("status") == "insured" else 2
             h["pd"] -= decrement
             if h["pd"] > 0:
                 updated_houses.append(h)
         data["houses"] = sorted(updated_houses, key=lambda x: x["pd"])
 
-        # Бизнесы
+        # Бизнесы (1 - страхован, 2 - не страхован, 4 - нет занятости)
         updated_biz = []
         for b in data["businesses"]:
-            # insured (1), uninsured (2), no_activity (4)
             st = b.get("status", "insured")
             if st == "insured":
                 decrement = 1
@@ -56,15 +54,24 @@ def process_hourly_payday():
                 updated_biz.append(b)
         data["businesses"] = sorted(updated_biz, key=lambda x: x["pd"])
 
-scheduler = AsyncIOScheduler()
+# Фоновое измерение времени с ровным срабатыванием в 00 минут каждого часа
+async def hourly_loop():
+    while True:
+        now = datetime.now()
+        # Вычисляем секунды до следующего часа (минута 00, секунда 00)
+        seconds_until_next_hour = (60 - now.minute - 1) * 60 + (60 - now.second)
+        if seconds_until_next_hour <= 0:
+            seconds_until_next_hour = 3600
+        
+        await asyncio.sleep(seconds_until_next_hour)
+        process_hourly_payday()
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Запуск планировщика в 00 минут каждого часа
-    scheduler.add_job(process_hourly_payday, 'cron', minute=0)
-    scheduler.start()
+    # Запускаем асинхронную фоновую задачу при старте сервера
+    task = asyncio.create_task(hourly_loop())
     yield
-    scheduler.shutdown()
+    task.cancel()
 
 app = FastAPI(title="Arizona Property Tracker API", lifespan=lifespan)
 
@@ -89,9 +96,9 @@ class Payload(BaseModel):
 
 class UpdateStatusModel(BaseModel):
     server: str
-    propType: str  # house или biz
+    propType: str
     pos: int
-    status: str    # insured, uninsured, no_activity
+    status: str
 
 @app.post("/api/paydays")
 async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header(None)):
@@ -113,7 +120,7 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
             "pd": item.pd,
             "propId": item.propId,
             "pos": item.pos,
-            "status": "insured", # По умолчанию страхован
+            "status": "insured",
             "updatedAt": datetime.utcnow().strftime("%H:%M:%S")
         }
         if item.propType == "house":
