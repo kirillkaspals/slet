@@ -47,7 +47,7 @@ BASE_SERVER_SEASONS = {
     "Love": 2, "Mirage": 2, "Drake": 2, "Space": 5, "Home": 1
 }
 
-# --- ПРАВИЛА СЛЕТА ИМУЩЕСТВА (минимальный порог PD для слёта) ---
+# --- ПРАВИЛА СЛЕТА ИМУЩЕСТВА ---
 SERVER_DROP_RULES = {
     "Phoenix":     {"house": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}, "biz": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}},
     "Tucson":      {"house": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}, "biz": {"insured": 2, "uninsured_min": 1, "uninsured_max": 2}},
@@ -90,7 +90,7 @@ def get_drop_limit(server: str, prop_type: str, status: str) -> int:
         "biz": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}
     })
     rules = srv_rules.get(prop_type, {"insured": 2, "uninsured_min": 2, "uninsured_max": 3})
-    if status == "uninsured":
+    if status in ["uninsured", "frozen"]:
         return rules.get("uninsured_min", 2)
     return rules.get("insured", 2)
 
@@ -184,6 +184,61 @@ def get_latest_confirmed_scan(scans: List[dict]) -> Optional[dict]:
         return dependent_scans[-1]
     return scans[-1] if scans else None
 
+# --- АЛГОРИТМ УМНОГО СОПОСТАВЛЕНИЯ ПРИ СМЕЩЕНИИ ПОЗИЦИЙ И ЗАМОРОЗКЕ ---
+def find_pairs_with_offset(prev_items: List[dict], curr_entries: List[PropertyEntry], prop_type: str):
+    """
+    Сопоставляет объекты с прошлым сканированием с учетом оффсета.
+    diff == 0  -> Заморожен
+    diff == 1  -> Застрахован
+    diff == 2  -> Без страховки
+    diff == 4  -> Без занятости (только для биз)
+    """
+    valid_diffs = {0, 1, 2} if prop_type == "house" else {0, 1, 2, 4}
+    matches = {} # {idx_curr: (prev_item, status)}
+    used_prev_indices = set()
+
+    def determine_status(diff: int, p_type: str) -> str:
+        if diff == 0:
+            return "frozen"
+        if p_type == "house":
+            return "uninsured" if diff >= 2 else "insured"
+        return "no_activity" if diff >= 4 else ("uninsured" if diff >= 2 else "insured")
+
+    # 1. Сначала пытаемся сопоставить по прямому совпадению propId (если передан)
+    for c_idx, curr in enumerate(curr_entries):
+        if curr.propId is not None:
+            for p_idx, prev in enumerate(prev_items):
+                if p_idx in used_prev_indices:
+                    continue
+                if prev.get("propId") == curr.propId:
+                    base_pd = prev.get("basePd", prev["pd"])
+                    diff = base_pd - curr.pd
+                    if diff in valid_diffs:
+                        auto_status = determine_status(diff, prop_type)
+                        matches[c_idx] = (prev, auto_status)
+                        used_prev_indices.add(p_idx)
+                        break
+
+    # 2. Сопоставление по порядку следования и валидной разнице PD
+    for c_idx, curr in enumerate(curr_entries):
+        if c_idx in matches:
+            continue
+
+        for p_idx, prev in enumerate(prev_items):
+            if p_idx in used_prev_indices:
+                continue
+
+            base_pd = prev.get("basePd", prev["pd"])
+            diff = base_pd - curr.pd
+
+            if diff in valid_diffs:
+                auto_status = determine_status(diff, prop_type)
+                matches[c_idx] = (prev, auto_status)
+                used_prev_indices.add(p_idx)
+                break
+
+    return matches
+
 # --- ЛОГИКА PAYDAY ДЛЯ ОБЩЕГО ВИДА ---
 async def process_hourly_payday():
     async with data_lock:
@@ -204,14 +259,16 @@ async def process_hourly_payday():
                     updated_houses.append(h)
                     continue
 
-                decrement = 1 if h.get("status") == "insured" else 2
-                h["pd"] -= decrement
+                st = h.get("status", "insured")
+                if st != "frozen":
+                    decrement = 1 if st == "insured" else 2
+                    h["pd"] -= decrement
                 
-                drop_limit = get_drop_limit(srv, "house", h.get("status", "insured"))
+                drop_limit = get_drop_limit(srv, "house", st)
                 if h["pd"] >= drop_limit:
                     updated_houses.append(h)
 
-            latest_scan["houses"] = sorted(updated_houses, key=lambda x: x["pd"])
+            latest_scan["houses"] = sorted(updated_houses, key=lambda x: x["pos"])
 
             # ОБРАБОТКА БИЗНЕСОВ
             updated_biz = []
@@ -221,14 +278,15 @@ async def process_hourly_payday():
                     continue
 
                 st = b.get("status", "insured")
-                decrement = 1 if st == "insured" else (2 if st == "uninsured" else 4)
-                b["pd"] -= decrement
+                if st != "frozen":
+                    decrement = 1 if st == "insured" else (2 if st == "uninsured" else 4)
+                    b["pd"] -= decrement
                 
                 drop_limit = get_drop_limit(srv, "biz", st)
                 if b["pd"] >= drop_limit:
                     updated_biz.append(b)
 
-            latest_scan["businesses"] = sorted(updated_biz, key=lambda x: x["pd"])
+            latest_scan["businesses"] = sorted(updated_biz, key=lambda x: x["pos"])
 
         await save_data_to_file_async()
 
@@ -291,76 +349,80 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
         if len(scans) > 0:
             prev_scan = scans[-1] if scans[-1]["scanId"] != scan_id else (scans[-2] if len(scans) > 1 else None)
 
-        def find_item_in_scan(scan_obj, prop_type: str, prop_id: Optional[int], pos: int):
-            if not scan_obj:
-                return None
-            items = scan_obj["houses"] if prop_type == "house" else scan_obj["businesses"]
-            if prop_id is not None:
-                for it in items:
-                    if it.get("propId") == prop_id:
-                        return it
-            for it in items:
-                if it.get("pos") == pos:
-                    return it
-            return None
+        house_entries = [e for e in payload.entries if e.propType == "house"]
+        biz_entries = [e for e in payload.entries if e.propType != "house"]
+
+        prev_houses = prev_scan.get("houses", []) if prev_scan else []
+        prev_biz = prev_scan.get("businesses", []) if prev_scan else []
+
+        # Поиск пар с учетом смещения и возможной заморозки
+        house_matches = find_pairs_with_offset(prev_houses, house_entries, "house") if prev_scan else {}
+        biz_matches = find_pairs_with_offset(prev_biz, biz_entries, "biz") if prev_scan else {}
 
         houses = []
+        for idx, item in enumerate(house_entries):
+            if idx in house_matches:
+                prev_item, auto_status = house_matches[idx]
+                prev_item["isPendingPair"] = False
+                record = {
+                    "basePd": item.pd,
+                    "pd": item.pd,
+                    "propId": item.propId,
+                    "pos": item.pos,
+                    "status": auto_status,
+                    "isPendingPair": False,
+                    "updatedAt": now_msk.strftime("%H:%M:%S")
+                }
+            else:
+                record = {
+                    "basePd": item.pd,
+                    "pd": item.pd,
+                    "propId": item.propId,
+                    "pos": item.pos,
+                    "status": "insured",
+                    "isPendingPair": True,
+                    "updatedAt": now_msk.strftime("%H:%M:%S")
+                }
+            houses.append(record)
+
         businesses = []
-        is_pair_found = prev_scan is not None
-
-        for item in payload.entries:
-            prev_item = find_item_in_scan(prev_scan, item.propType, item.propId, item.pos)
-            
-            auto_status = "insured"
-            is_pending = False
-
-            if prev_item is not None:
-                base_pd = prev_item.get("basePd", prev_item["pd"])
-                diff = base_pd - item.pd
-
-                if item.propType == "house":
-                    auto_status = "uninsured" if diff >= 2 else "insured"
-                else:
-                    if diff >= 4:
-                        auto_status = "no_activity"
-                    elif diff >= 2:
-                        auto_status = "uninsured"
-                    else:
-                        auto_status = "insured"
+        for idx, item in enumerate(biz_entries):
+            if idx in biz_matches:
+                prev_item, auto_status = biz_matches[idx]
+                prev_item["isPendingPair"] = False
+                record = {
+                    "basePd": item.pd,
+                    "pd": item.pd,
+                    "propId": item.propId,
+                    "pos": item.pos,
+                    "status": auto_status,
+                    "isPendingPair": False,
+                    "updatedAt": now_msk.strftime("%H:%M:%S")
+                }
             else:
-                is_pending = True
+                record = {
+                    "basePd": item.pd,
+                    "pd": item.pd,
+                    "propId": item.propId,
+                    "pos": item.pos,
+                    "status": "insured",
+                    "isPendingPair": True,
+                    "updatedAt": now_msk.strftime("%H:%M:%S")
+                }
+            businesses.append(record)
 
-            record = {
-                "basePd": item.pd,
-                "pd": item.pd,
-                "propId": item.propId,
-                "pos": item.pos,
-                "status": auto_status,
-                "isPendingPair": is_pending,
-                "updatedAt": now_msk.strftime("%H:%M:%S")
-            }
-            if item.propType == "house":
-                houses.append(record)
-            else:
-                businesses.append(record)
+        houses = sorted(houses, key=lambda x: x["pos"])
+        businesses = sorted(businesses, key=lambda x: x["pos"])
 
-        houses = sorted(houses, key=lambda x: x["pd"])
-        businesses = sorted(businesses, key=lambda x: x["pd"])
+        is_pair_found = (len(house_matches) > 0 or len(biz_matches) > 0)
 
         if is_pair_found and prev_scan:
             prev_scan["isConfirmed"] = True
             prev_scan["hasPair"] = True
 
-            for target_key in ["houses", "businesses"]:
-                prop_type = "house" if target_key == "houses" else "biz"
-                for prev_it in prev_scan.get(target_key, []):
-                    curr_it = find_item_in_scan({"houses": houses, "businesses": businesses}, prop_type, prev_it.get("propId"), prev_it["pos"])
-                    if curr_it:
-                        prev_it["isPendingPair"] = False
-
         existing_scan = next((s for s in scans if s["scanId"] == scan_id), None)
-        has_houses_in_payload = any(item.propType == "house" for item in payload.entries)
-        has_biz_in_payload = any(item.propType != "house" for item in payload.entries)
+        has_houses_in_payload = len(house_entries) > 0
+        has_biz_in_payload = len(biz_entries) > 0
 
         if existing_scan:
             if has_houses_in_payload:
@@ -368,8 +430,8 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
             if has_biz_in_payload:
                 existing_scan["businesses"] = businesses
             existing_scan["scanTime"] = now_msk.strftime("%Y-%m-%d %H:%M:%S")
-            existing_scan["isConfirmed"] = is_pair_found
-            existing_scan["hasPair"] = is_pair_found
+            existing_scan["isConfirmed"] = existing_scan.get("isConfirmed", False) or is_pair_found
+            existing_scan["hasPair"] = existing_scan.get("hasPair", False) or is_pair_found
         else:
             scans.append({
                 "scanId": scan_id,
@@ -448,7 +510,7 @@ async def add_item(data: AddItemModel):
                     }
                     
                     scan[target_key].append(new_record)
-                    scan[target_key] = sorted(scan[target_key], key=lambda x: x["pd"])
+                    scan[target_key] = sorted(scan[target_key], key=lambda x: x["pos"])
                     await save_data_to_file_async()
                     return {"status": "success"}
     raise HTTPException(status_code=404, detail="Server or Scan not found")
@@ -526,16 +588,18 @@ DASHBOARD_HTML = """
             100% { opacity: 1; }
         }
 
-        .btn-group { display: flex; gap: 3px; }
+        .btn-group { display: flex; gap: 3px; flex-wrap: wrap; }
         .btn-opt { background-color: #2a2a2a; color: #888; border: 1px solid #444; padding: 3px 6px; font-size: 0.75em; border-radius: 4px; cursor: pointer; transition: 0.2s; }
         .btn-opt.active-insured { background-color: #2e7d32; color: #fff; border-color: #4caf50; }
         .btn-opt.active-uninsured { background-color: #c62828; color: #fff; border-color: #ef5350; }
         .btn-opt.active-noact { background-color: #b71c1c; color: #fff; border-color: #ff1744; font-weight: bold; }
+        .btn-opt.active-frozen { background-color: #1565c0; color: #fff; border-color: #42a5f5; font-weight: bold; }
         
         .status-text { font-weight: bold; font-size: 0.85em; padding: 2px 6px; border-radius: 4px; display: inline-block; }
         .status-insured { color: #81c784; }
         .status-uninsured { color: #e57373; }
         .status-noact { color: #ff5252; }
+        .status-frozen { color: #64b5f6; }
         .status-pending { color: #ffb74d; font-style: italic; }
 
         .btn-del { background-color: transparent; color: #ef5350; border: 1px solid #ef5350; padding: 2px 6px; font-size: 0.8em; border-radius: 4px; cursor: pointer; transition: 0.2s; }
@@ -650,7 +714,7 @@ DASHBOARD_HTML = """
             
             let html = '<table><tr><th>№</th><th>ID</th><th>PD</th><th>Статус</th>' + (interactive ? '<th></th>' : '') + '</tr>';
             
-            items.forEach((item, idx) => {
+            items.forEach((item) => {
                 const st = item.status || 'insured';
                 const isPending = item.isPendingPair;
                 const displayPd = interactive ? (item.basePd !== undefined ? item.basePd : item.pd) : item.pd;
@@ -663,20 +727,26 @@ DASHBOARD_HTML = """
                             <button class="btn-opt ${st === 'insured' && !isPending ? 'active-insured' : ''}" onclick="setStatus('${server}', '${scanId}', '${type}', ${item.pos}, 'insured')">Страх.</button>
                             <button class="btn-opt ${st === 'uninsured' && !isPending ? 'active-uninsured' : ''}" onclick="setStatus('${server}', '${scanId}', '${type}', ${item.pos}, 'uninsured')">Не страх.</button>
                             ${type === 'biz' ? `<button class="btn-opt ${st === 'no_activity' && !isPending ? 'active-noact' : ''}" onclick="setStatus('${server}', '${scanId}', 'biz',${item.pos}, 'no_activity')">Без зан.</button>` : ''}
+                            <button class="btn-opt ${st === 'frozen' && !isPending ? 'active-frozen' : ''}" onclick="setStatus('${server}', '${scanId}', '${type}', ${item.pos}, 'frozen')">Заморожен</button>
                         </div>
-                        ${isPending ? '<span class="status-pending">⏳ Ждет 2-ю точку</span>' : ''}`;
+                        ${isPending ? '<span class="status-pending">⏳ Новый (без пары)</span>' : ''}`;
                 } else {
                     if (isPending) {
-                        statusControl = `<span class="status-pending">⏳ Ожидание сравнения</span>`;
+                        statusControl = `<span class="status-pending">⏳ Новый (без пары)</span>`;
                     } else {
-                        let label = st === 'insured' ? 'Страховка' : (st === 'uninsured' ? 'Без страховки' : 'Без занятости');
-                        let classNm = st === 'insured' ? 'status-insured' : (st === 'uninsured' ? 'status-uninsured' : 'status-noact');
+                        let label = 'Страховка';
+                        let classNm = 'status-insured';
+                        
+                        if (st === 'uninsured') { label = 'Без страховки'; classNm = 'status-uninsured'; }
+                        else if (st === 'no_activity') { label = 'Без занятости'; classNm = 'status-noact'; }
+                        else if (st === 'frozen') { label = '❄️ Заморожен'; classNm = 'status-frozen'; }
+
                         statusControl = `<span class="status-text ${classNm}">${label}</span>`;
                     }
                 }
 
                 html += `<tr>
-                    <td>${idx + 1}</td>
+                    <td>${item.pos}</td>
                     <td>${item.propId ? '№' + item.propId : '—'}</td>
                     <td><span class="${badgeClass}">${displayPd} pd</span></td>
                     <td>${statusControl}</td>
@@ -690,13 +760,15 @@ DASHBOARD_HTML = """
             if (!item || item.isPendingPair) return false;
             
             const st = item.status || 'insured';
+            if (st === 'frozen') return false; // Замороженные объекты не слетают
+            
             const rules = serverRules[propType] || { insured: 2, uninsured_min: 2, uninsured_max: 3 };
             
             let decrement = 1;
             let dropLimit = rules.insured;
 
             if (st === 'uninsured') {
-                decrement = (propType === 'house') ? 2 : 2;
+                decrement = 2;
                 dropLimit = rules.uninsured_min;
             } else if (st === 'no_activity') {
                 decrement = 4;
