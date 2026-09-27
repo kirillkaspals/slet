@@ -3,3 +3,5 @@ uvicorn
 pydantic
 asyncpg
 passlib[bcrypt]
+bcrypt
+python-multipart
