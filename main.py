@@ -56,7 +56,6 @@ BASE_SERVER_SEASONS = {
     "Love": 2, "Mirage": 2, "Drake": 2, "Space": 5, "Home": 1
 }
 
-# --- ПРАВИЛА СЛЕТА ИМУЩЕСТВА ---
 SERVER_DROP_RULES = {
     "Phoenix":     {"house": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}, "biz": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}},
     "Tucson":      {"house": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}, "biz": {"insured": 2, "uninsured_min": 1, "uninsured_max": 2}},
@@ -152,6 +151,14 @@ class ToggleAccessModel(BaseModel):
 class CreateUserModel(BaseModel):
     username: str
     password: str
+    role: Optional[str] = "user"
+
+class DeleteUserModel(BaseModel):
+    user_id: int
+
+class UpdateRoleModel(BaseModel):
+    user_id: int
+    role: str
 
 # --- РАБОТА С БД POSTGRESQL И АВТОРИЗАЦИЕЙ ---
 async def init_db():
@@ -167,8 +174,7 @@ async def init_db():
             );
         """)
         
-        # Создаем администратора по умолчанию (Логин: admin, Пароль: admin123)
-        hashed_pw = pwd_context.hash("admin123")
+        hashed_pw = pwd_context.hash("hpsdjfk123safl!")
         await conn.execute("""
             INSERT INTO users (username, password_hash, role, is_allowed)
             VALUES ('admin', $1, 'admin', TRUE)
@@ -188,7 +194,7 @@ async def check_user_access(username: str) -> bool:
     return True
 
 async def verify_auth(request: Request) -> str:
-    """Проверяет, авторизован ли пользователь и разрешен ли ему доступ."""
+    """Проверяет, авторизован ли пользователь."""
     token = request.cookies.get("session_token")
     if not token or token not in active_sessions:
         raise HTTPException(status_code=401, detail="Необходима авторизация")
@@ -201,10 +207,17 @@ async def verify_auth(request: Request) -> str:
     return username
 
 async def verify_admin(username: str = Depends(verify_auth)) -> str:
-    """Зависимость, пропускающая только пользователей с ролью admin."""
+    """Пропускает только пользователей с ролью admin."""
     user = await get_user_by_username(username)
     if not user or user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Отказано в доступе: требуется роль администратора")
+    return username
+
+async def verify_editor(username: str = Depends(verify_auth)) -> str:
+    """Пропускает пользователей с ролью admin или support."""
+    user = await get_user_by_username(username)
+    if not user or user["role"] not in ["admin", "support"]:
+        raise HTTPException(status_code=403, detail="Отказано в доступе: требуется роль admin или support")
     return username
 
 # --- РАБОТА С ФАЙЛАМИ И ДАННЫМИ ---
@@ -448,20 +461,54 @@ async def get_users(username: str = Depends(verify_admin)):
 async def toggle_access(data: ToggleAccessModel, username: str = Depends(verify_admin)):
     async with db_pool.acquire() as conn:
         await conn.execute("UPDATE users SET is_allowed = $1 WHERE id = $2", data.is_allowed, data.user_id)
-    
     return {"status": "success"}
 
 @app.post("/api/admin/create_user")
 async def create_user(data: CreateUserModel, username: str = Depends(verify_admin)):
+    role = data.role if data.role in ["user", "support", "admin"] else "user"
     hashed_pw = pwd_context.hash(data.password)
     async with db_pool.acquire() as conn:
         try:
             await conn.execute(
-                "INSERT INTO users (username, password_hash, role, is_allowed) VALUES ($1, $2, 'user', TRUE)",
-                data.username, hashed_pw
+                "INSERT INTO users (username, password_hash, role, is_allowed) VALUES ($1, $2, $3, TRUE)",
+                data.username, hashed_pw, role
             )
         except asyncpg.UniqueViolationError:
             raise HTTPException(status_code=400, detail="Пользователь уже существует")
+
+    return {"status": "success"}
+
+@app.post("/api/admin/delete_user")
+async def delete_user(data: DeleteUserModel, current_admin: str = Depends(verify_admin)):
+    async with db_pool.acquire() as conn:
+        target = await conn.fetchrow("SELECT username FROM users WHERE id = $1", data.user_id)
+        if not target:
+            raise HTTPException(status_code=404, detail="Пользователь не найден")
+        if target["username"] == current_admin:
+            raise HTTPException(status_code=400, detail="Нельзя удалить собственный аккаунт")
+        
+        await conn.execute("DELETE FROM users WHERE id = $1", data.user_id)
+        
+        # Завершаем сессию удаленного пользователя, если он активен
+        tokens_to_remove = [t for t, u in active_sessions.items() if u == target["username"]]
+        for t in tokens_to_remove:
+            del active_sessions[t]
+
+    return {"status": "success"}
+
+@app.post("/api/admin/update_role")
+async def update_role(data: UpdateRoleModel, current_admin: str = Depends(verify_admin)):
+    if data.role not in ["user", "support", "admin"]:
+        raise HTTPException(status_code=400, detail="Недопустимая роль")
+        
+    async with db_pool.acquire() as conn:
+        target = await conn.fetchrow("SELECT username FROM users WHERE id = $1", data.user_id)
+        if not target:
+            raise HTTPException(status_code=404, detail="Пользователь не найден")
+        if target["username"] == current_admin:
+            raise HTTPException(status_code=400, detail="Нельзя изменить роль самому себе")
+
+        await conn.execute("UPDATE users SET role = $1 WHERE id = $2", data.role, data.user_id)
 
     return {"status": "success"}
 
@@ -594,7 +641,7 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
     return {"status": "ok", "scanId": scan_id, "count": len(payload.entries)}
 
 @app.post("/api/update_status")
-async def update_status(data: UpdateStatusModel, username: str = Depends(verify_admin)):
+async def update_status(data: UpdateStatusModel, username: str = Depends(verify_editor)):
     srv = data.server
     async with data_lock:
         if srv in server_data:
@@ -610,7 +657,7 @@ async def update_status(data: UpdateStatusModel, username: str = Depends(verify_
     raise HTTPException(status_code=404, detail="Scan or Item not found")
 
 @app.post("/api/delete_item")
-async def delete_item(data: DeleteItemModel, username: str = Depends(verify_admin)):
+async def delete_item(data: DeleteItemModel, username: str = Depends(verify_editor)):
     srv = data.server
     async with data_lock:
         if srv in server_data:
@@ -623,7 +670,7 @@ async def delete_item(data: DeleteItemModel, username: str = Depends(verify_admi
     raise HTTPException(status_code=404, detail="Server or Scan not found")
 
 @app.post("/api/delete_scan")
-async def delete_scan(data: DeleteScanModel, username: str = Depends(verify_admin)):
+async def delete_scan(data: DeleteScanModel, username: str = Depends(verify_editor)):
     srv = data.server
     async with data_lock:
         if srv in server_data and "scans" in server_data[srv]:
@@ -635,7 +682,7 @@ async def delete_scan(data: DeleteScanModel, username: str = Depends(verify_admi
     raise HTTPException(status_code=404, detail="Scan not found")
 
 @app.post("/api/add_item")
-async def add_item(data: AddItemModel, username: str = Depends(verify_admin)):
+async def add_item(data: AddItemModel, username: str = Depends(verify_editor)):
     srv = data.server
     async with data_lock:
         if srv in server_data:
@@ -760,6 +807,11 @@ DASHBOARD_HTML = """
 
         .btn-del { background-color: transparent; color: #ef5350; border: 1px solid #ef5350; padding: 2px 6px; font-size: 0.8em; border-radius: 4px; cursor: pointer; transition: 0.2s; }
         .btn-del:hover { background-color: #ef5350; color: #fff; }
+        .btn-user-del { background-color: #c62828; color: #fff; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 0.8em; }
+        .btn-user-del:hover { background-color: #e53935; }
+        
+        .select-role { background: #2a2a2a; color: #fff; border: 1px solid #444; padding: 4px; border-radius: 4px; font-size: 0.85em; }
+        
         .empty { color: #666; font-style: italic; font-size: 0.85em; }
         .empty-center { text-align: center; color: #888; font-style: italic; padding: 20px; background-color: #1e1e1e; border-radius: 8px; border: 1px solid #333; }
     </style>
@@ -785,13 +837,12 @@ DASHBOARD_HTML = """
                 document.getElementById('main-dashboard').style.display = 'block';
                 document.getElementById('user-info').innerText = `Вы вошли как: ${data.username} (${data.role})`;
                 
-                if (data.role === 'admin') {
-                    document.getElementById('btn-tab-admin').style.display = 'inline-block';
-                    document.getElementById('btn-tab-manage').style.display = 'inline-block';
-                } else {
-                    document.getElementById('btn-tab-admin').style.display = 'none';
-                    document.getElementById('btn-tab-manage').style.display = 'none';
-                }
+                // Настройка отображения вкладок в зависимости от роли
+                const canManage = data.role === 'admin' || data.role === 'support';
+                const isAdmin = data.role === 'admin';
+
+                document.getElementById('btn-tab-manage').style.display = canManage ? 'inline-block' : 'none';
+                document.getElementById('btn-tab-admin').style.display = isAdmin ? 'inline-block' : 'none';
                 
                 initDashboard();
             } else {
@@ -822,7 +873,14 @@ DASHBOARD_HTML = """
         }
 
         function switchTab(tabName) {
-            if ((tabName === 'admin' || tabName === 'manage') && (!currentUser || currentUser.role !== 'admin')) {
+            const canManage = currentUser && (currentUser.role === 'admin' || currentUser.role === 'support');
+            const isAdmin = currentUser && currentUser.role === 'admin';
+
+            if (tabName === 'manage' && !canManage) {
+                alert('Недостаточно прав доступа');
+                return;
+            }
+            if (tabName === 'admin' && !isAdmin) {
                 alert('Недостаточно прав доступа');
                 return;
             }
@@ -851,16 +909,30 @@ DASHBOARD_HTML = """
             if (!res.ok) return;
             const users = await res.json();
             
-            let html = `<table><tr><th>ID</th><th>Логин</th><th>Роль</th><th>Доступ</th><th>Действие</th></tr>`;
+            let html = `<table><tr><th>ID</th><th>Логин</th><th>Роль</th><th>Доступ</th><th>Действия</th></tr>`;
             users.forEach(u => {
-                const actionBtn = u.role !== 'admin' ? 
+                const isSelf = u.username === currentUser.username;
+                
+                const toggleAccessBtn = !isSelf ? 
                     `<button onclick="toggleUserAccess(${u.id}, ${u.is_allowed})">${u.is_allowed ? 'Заблокировать' : 'Разблокировать'}</button>` : '—';
+                
+                const deleteUserBtn = !isSelf ? 
+                    `<button class="btn-user-del" onclick="deleteUser(${u.id}, '${u.username}')">Удалить</button>` : '';
+
+                const roleSelect = !isSelf ? `
+                    <select class="select-role" onchange="changeUserRole(${u.id}, this.value)">
+                        <option value="user" ${u.role === 'user' ? 'selected' : ''}>User</option>
+                        <option value="support" ${u.role === 'support' ? 'selected' : ''}>Support</option>
+                        <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin</option>
+                    </select>
+                ` : `<b>${u.role}</b>`;
+
                 html += `<tr>
                     <td>${u.id}</td>
                     <td>${u.username}</td>
-                    <td>${u.role}</td>
+                    <td>${roleSelect}</td>
                     <td>${u.is_allowed ? '✅ Разрешен' : '❌ Заблокирован'}</td>
-                    <td>${actionBtn}</td>
+                    <td style="display: flex; gap: 5px; align-items: center;">${toggleAccessBtn} ${deleteUserBtn}</td>
                 </tr>`;
             });
             document.getElementById('admin-users-table').innerHTML = html + '</table>';
@@ -875,15 +947,48 @@ DASHBOARD_HTML = """
             loadAdminUsers();
         }
 
+        async function changeUserRole(userId, newRole) {
+            const res = await fetch('/api/admin/update_role', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user_id: userId, role: newRole })
+            });
+            if (!res.ok) {
+                const err = await res.json();
+                alert(err.detail || 'Ошибка обновления роли');
+            }
+            loadAdminUsers();
+        }
+
+        async function deleteUser(userId, username) {
+            if (!confirm(`Вы действительно хотите безвозвратно удалить аккаунт ${username}?`)) return;
+            
+            const res = await fetch('/api/admin/delete_user', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user_id: userId })
+            });
+
+            if (res.ok) {
+                alert('Пользователь успешно удален');
+                loadAdminUsers();
+            } else {
+                const err = await res.json();
+                alert(err.detail || 'Ошибка удаления');
+            }
+        }
+
         async function handleCreateUser() {
             const username = document.getElementById('new-username').value;
             const password = document.getElementById('new-password').value;
+            const role = document.getElementById('new-role').value;
+            
             if (!username || !password) return alert('Заполните все поля');
 
             const res = await fetch('/api/admin/create_user', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username, password })
+                body: JSON.stringify({ username, password, role })
             });
 
             if (res.ok) {
@@ -1119,6 +1224,8 @@ DASHBOARD_HTML = """
                 containerUpcoming.innerHTML = '';
                 let hasUpcomingDrops = false;
 
+                const canManage = currentUser && (currentUser.role === 'admin' || currentUser.role === 'support');
+
                 for (const srv of ALL_SERVERS) {
                     const info = data[srv];
 
@@ -1137,9 +1244,11 @@ DASHBOARD_HTML = """
                     if (scans.length === 0) {
                         if (manageTabsElem) manageTabsElem.innerHTML = '<span class="empty">Сканирований нет</span>';
                         if (delScanBtnElem) delScanBtnElem.style.display = 'none';
-                        if (currentUser && currentUser.role === 'admin') {
-                            document.getElementById(`houses-manage-${srv}`).innerHTML = '<span class="empty">Нет данных</span>';
-                            document.getElementById(`biz-manage-${srv}`).innerHTML = '<span class="empty">Нет данных</span>';
+                        if (canManage) {
+                            const hm = document.getElementById(`houses-manage-${srv}`);
+                            const bm = document.getElementById(`biz-manage-${srv}`);
+                            if (hm) hm.innerHTML = '<span class="empty">Нет данных</span>';
+                            if (bm) bm.innerHTML = '<span class="empty">Нет данных</span>';
                         }
                         document.getElementById(`houses-view-${srv}`).innerHTML = '<span class="empty">Нет данных</span>';
                         document.getElementById(`biz-view-${srv}`).innerHTML = '<span class="empty">Нет данных</span>';
@@ -1166,9 +1275,11 @@ DASHBOARD_HTML = """
                     const curScan = scans.find(s => s.scanId === activeScanId) || scans[scans.length - 1];
                     const serverRules = info.dropRules || {};
 
-                    if (currentUser && currentUser.role === 'admin') {
-                        document.getElementById(`houses-manage-${srv}`).innerHTML = renderTable(curScan.houses, srv, curScan.scanId, 'house', true, false, serverRules);
-                        document.getElementById(`biz-manage-${srv}`).innerHTML = renderTable(curScan.businesses, srv, curScan.scanId, 'biz', true, false, serverRules);
+                    if (canManage) {
+                        const hm = document.getElementById(`houses-manage-${srv}`);
+                        const bm = document.getElementById(`biz-manage-${srv}`);
+                        if (hm) hm.innerHTML = renderTable(curScan.houses, srv, curScan.scanId, 'house', true, false, serverRules);
+                        if (bm) bm.innerHTML = renderTable(curScan.businesses, srv, curScan.scanId, 'biz', true, false, serverRules);
                     }
 
                     const latestConfirmed = info.latestConfirmedScan;
@@ -1221,6 +1332,8 @@ DASHBOARD_HTML = """
             containerView.innerHTML = '';
             containerManage.innerHTML = '';
 
+            const canManage = currentUser && (currentUser.role === 'admin' || currentUser.role === 'support');
+
             ALL_SERVERS.forEach(srv => {
                 const cardView = `
                     <div class="server-card">
@@ -1243,7 +1356,7 @@ DASHBOARD_HTML = """
                     </div>`;
                 containerView.insertAdjacentHTML('beforeend', cardView);
 
-                if (currentUser && currentUser.role === 'admin') {
+                if (canManage) {
                     const cardManage = `
                         <div class="server-card">
                             <div class="server-header">
@@ -1327,6 +1440,11 @@ DASHBOARD_HTML = """
                 <h3>Создать нового пользователя</h3>
                 <input type="text" id="new-username" placeholder="Новый логин" style="padding: 6px; margin-right: 10px;">
                 <input type="password" id="new-password" placeholder="Новый пароль" style="padding: 6px; margin-right: 10px;">
+                <select id="new-role" class="select-role" style="padding: 6px; margin-right: 10px;">
+                    <option value="user">User</option>
+                    <option value="support">Support</option>
+                    <option value="admin">Admin</option>
+                </select>
                 <button class="btn-add" style="padding: 6px 12px;" onclick="handleCreateUser()">Создать аккаунт</button>
             </div>
 
