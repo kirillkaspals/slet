@@ -187,7 +187,8 @@ async def check_user_access(username: str) -> bool:
         return False
     return True
 
-async def verify_auth(request: Request):
+async def verify_auth(request: Request) -> str:
+    """Проверяет, авторизован ли пользователь и разрешен ли ему доступ."""
     token = request.cookies.get("session_token")
     if not token or token not in active_sessions:
         raise HTTPException(status_code=401, detail="Необходима авторизация")
@@ -197,6 +198,13 @@ async def verify_auth(request: Request):
     if not is_allowed:
         raise HTTPException(status_code=403, detail="Доступ заблокирован администратором")
     
+    return username
+
+async def verify_admin(username: str = Depends(verify_auth)) -> str:
+    """Зависимость, пропускающая только пользователей с ролью admin."""
+    user = await get_user_by_username(username)
+    if not user or user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Отказано в доступе: требуется роль администратора")
     return username
 
 # --- РАБОТА С ФАЙЛАМИ И ДАННЫМИ ---
@@ -431,32 +439,20 @@ async def get_me(request: Request):
     }
 
 @app.get("/api/admin/users")
-async def get_users(username: str = Depends(verify_auth)):
-    user = await get_user_by_username(username)
-    if user["role"] != "admin":
-        raise HTTPException(status_code=403, detail="Отказано в доступе")
-    
+async def get_users(username: str = Depends(verify_admin)):
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT id, username, role, is_allowed, created_at FROM users ORDER BY id ASC")
         return [dict(row) for row in rows]
 
 @app.post("/api/admin/toggle_access")
-async def toggle_access(data: ToggleAccessModel, username: str = Depends(verify_auth)):
-    user = await get_user_by_username(username)
-    if user["role"] != "admin":
-        raise HTTPException(status_code=403, detail="Отказано в доступе")
-
+async def toggle_access(data: ToggleAccessModel, username: str = Depends(verify_admin)):
     async with db_pool.acquire() as conn:
         await conn.execute("UPDATE users SET is_allowed = $1 WHERE id = $2", data.is_allowed, data.user_id)
     
     return {"status": "success"}
 
 @app.post("/api/admin/create_user")
-async def create_user(data: CreateUserModel, username: str = Depends(verify_auth)):
-    user = await get_user_by_username(username)
-    if user["role"] != "admin":
-        raise HTTPException(status_code=403, detail="Отказано в доступе")
-
+async def create_user(data: CreateUserModel, username: str = Depends(verify_admin)):
     hashed_pw = pwd_context.hash(data.password)
     async with db_pool.acquire() as conn:
         try:
@@ -598,7 +594,7 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
     return {"status": "ok", "scanId": scan_id, "count": len(payload.entries)}
 
 @app.post("/api/update_status")
-async def update_status(data: UpdateStatusModel, username: str = Depends(verify_auth)):
+async def update_status(data: UpdateStatusModel, username: str = Depends(verify_admin)):
     srv = data.server
     async with data_lock:
         if srv in server_data:
@@ -614,7 +610,7 @@ async def update_status(data: UpdateStatusModel, username: str = Depends(verify_
     raise HTTPException(status_code=404, detail="Scan or Item not found")
 
 @app.post("/api/delete_item")
-async def delete_item(data: DeleteItemModel, username: str = Depends(verify_auth)):
+async def delete_item(data: DeleteItemModel, username: str = Depends(verify_admin)):
     srv = data.server
     async with data_lock:
         if srv in server_data:
@@ -627,7 +623,7 @@ async def delete_item(data: DeleteItemModel, username: str = Depends(verify_auth
     raise HTTPException(status_code=404, detail="Server or Scan not found")
 
 @app.post("/api/delete_scan")
-async def delete_scan(data: DeleteScanModel, username: str = Depends(verify_auth)):
+async def delete_scan(data: DeleteScanModel, username: str = Depends(verify_admin)):
     srv = data.server
     async with data_lock:
         if srv in server_data and "scans" in server_data[srv]:
@@ -639,7 +635,7 @@ async def delete_scan(data: DeleteScanModel, username: str = Depends(verify_auth
     raise HTTPException(status_code=404, detail="Scan not found")
 
 @app.post("/api/add_item")
-async def add_item(data: AddItemModel, username: str = Depends(verify_auth)):
+async def add_item(data: AddItemModel, username: str = Depends(verify_admin)):
     srv = data.server
     async with data_lock:
         if srv in server_data:
@@ -791,6 +787,10 @@ DASHBOARD_HTML = """
                 
                 if (data.role === 'admin') {
                     document.getElementById('btn-tab-admin').style.display = 'inline-block';
+                    document.getElementById('btn-tab-manage').style.display = 'inline-block';
+                } else {
+                    document.getElementById('btn-tab-admin').style.display = 'none';
+                    document.getElementById('btn-tab-manage').style.display = 'none';
                 }
                 
                 initDashboard();
@@ -822,6 +822,11 @@ DASHBOARD_HTML = """
         }
 
         function switchTab(tabName) {
+            if ((tabName === 'admin' || tabName === 'manage') && (!currentUser || currentUser.role !== 'admin')) {
+                alert('Недостаточно прав доступа');
+                return;
+            }
+
             document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
             
@@ -1132,8 +1137,10 @@ DASHBOARD_HTML = """
                     if (scans.length === 0) {
                         if (manageTabsElem) manageTabsElem.innerHTML = '<span class="empty">Сканирований нет</span>';
                         if (delScanBtnElem) delScanBtnElem.style.display = 'none';
-                        document.getElementById(`houses-manage-${srv}`).innerHTML = '<span class="empty">Нет данных</span>';
-                        document.getElementById(`biz-manage-${srv}`).innerHTML = '<span class="empty">Нет данных</span>';
+                        if (currentUser && currentUser.role === 'admin') {
+                            document.getElementById(`houses-manage-${srv}`).innerHTML = '<span class="empty">Нет данных</span>';
+                            document.getElementById(`biz-manage-${srv}`).innerHTML = '<span class="empty">Нет данных</span>';
+                        }
                         document.getElementById(`houses-view-${srv}`).innerHTML = '<span class="empty">Нет данных</span>';
                         document.getElementById(`biz-view-${srv}`).innerHTML = '<span class="empty">Нет данных</span>';
                         continue;
@@ -1159,8 +1166,10 @@ DASHBOARD_HTML = """
                     const curScan = scans.find(s => s.scanId === activeScanId) || scans[scans.length - 1];
                     const serverRules = info.dropRules || {};
 
-                    document.getElementById(`houses-manage-${srv}`).innerHTML = renderTable(curScan.houses, srv, curScan.scanId, 'house', true, false, serverRules);
-                    document.getElementById(`biz-manage-${srv}`).innerHTML = renderTable(curScan.businesses, srv, curScan.scanId, 'biz', true, false, serverRules);
+                    if (currentUser && currentUser.role === 'admin') {
+                        document.getElementById(`houses-manage-${srv}`).innerHTML = renderTable(curScan.houses, srv, curScan.scanId, 'house', true, false, serverRules);
+                        document.getElementById(`biz-manage-${srv}`).innerHTML = renderTable(curScan.businesses, srv, curScan.scanId, 'biz', true, false, serverRules);
+                    }
 
                     const latestConfirmed = info.latestConfirmedScan;
                     if (latestConfirmed) {
@@ -1234,36 +1243,38 @@ DASHBOARD_HTML = """
                     </div>`;
                 containerView.insertAdjacentHTML('beforeend', cardView);
 
-                const cardManage = `
-                    <div class="server-card">
-                        <div class="server-header">
-                            <div class="server-title">
-                                <span>${srv}</span>
-                                <span class="season-badge season-badge-${srv}">Загрузка...</span>
-                            </div>
-                        </div>
-                        <div class="scan-tabs-bar">
-                            <div class="scan-tabs-container" id="scan-tabs-${srv}"></div>
-                            <button class="btn-delete-scan" id="btn-del-scan-${srv}" onclick="deleteWholeScan('${srv}')">Удалить скан</button>
-                        </div>
-                        <div class="tables-grid">
-                            <div>
-                                <div class="section-header">
-                                    <span class="section-title">Дома</span>
-                                    <button class="btn-add" onclick="addItemPrompt('${srv}', 'house')">+ Дом</button>
+                if (currentUser && currentUser.role === 'admin') {
+                    const cardManage = `
+                        <div class="server-card">
+                            <div class="server-header">
+                                <div class="server-title">
+                                    <span>${srv}</span>
+                                    <span class="season-badge season-badge-${srv}">Загрузка...</span>
                                 </div>
-                                <div id="houses-manage-${srv}"></div>
                             </div>
-                            <div>
-                                <div class="section-header">
-                                    <span class="section-title">Бизнесы</span>
-                                    <button class="btn-add" onclick="addItemPrompt('${srv}', 'biz')">+ Бизнес</button>
+                            <div class="scan-tabs-bar">
+                                <div class="scan-tabs-container" id="scan-tabs-${srv}"></div>
+                                <button class="btn-delete-scan" id="btn-del-scan-${srv}" onclick="deleteWholeScan('${srv}')">Удалить скан</button>
+                            </div>
+                            <div class="tables-grid">
+                                <div>
+                                    <div class="section-header">
+                                        <span class="section-title">Дома</span>
+                                        <button class="btn-add" onclick="addItemPrompt('${srv}', 'house')">+ Дом</button>
+                                    </div>
+                                    <div id="houses-manage-${srv}"></div>
                                 </div>
-                                <div id="biz-manage-${srv}"></div>
+                                <div>
+                                    <div class="section-header">
+                                        <span class="section-title">Бизнесы</span>
+                                        <button class="btn-add" onclick="addItemPrompt('${srv}', 'biz')">+ Бизнес</button>
+                                    </div>
+                                    <div id="biz-manage-${srv}"></div>
+                                </div>
                             </div>
-                        </div>
-                    </div>`;
-                containerManage.insertAdjacentHTML('beforeend', cardManage);
+                        </div>`;
+                    containerManage.insertAdjacentHTML('beforeend', cardManage);
+                }
             });
 
             loadData();
@@ -1294,7 +1305,7 @@ DASHBOARD_HTML = """
         <div class="tabs">
             <button id="btn-tab-view" class="tab-btn active" onclick="switchTab('view')">Общий вид</button>
             <button id="btn-tab-upcoming" class="tab-btn" onclick="switchTab('upcoming')">🔥 Ближайшие слёты</button>
-            <button id="btn-tab-manage" class="tab-btn" onclick="switchTab('manage')">Управление сканами</button>
+            <button id="btn-tab-manage" class="tab-btn" style="display: none;" onclick="switchTab('manage')">Управление сканами</button>
             <button id="btn-tab-admin" class="tab-btn" style="display: none;" onclick="switchTab('admin')">👑 Админ-панель</button>
         </div>
 
@@ -1331,4 +1342,4 @@ DASHBOARD_HTML = """
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main_6:app", host="0.0.0.0", port=8000, reload=True)
