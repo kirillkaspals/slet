@@ -6,17 +6,26 @@ import zoneinfo
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
-from fastapi import FastAPI, Header, HTTPException, status
+import asyncpg
+from fastapi import FastAPI, Header, HTTPException, Request, Response, status, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+from passlib.context import CryptContext
 from pydantic import BaseModel
 
 # --- КОНФИГУРАЦИЯ ---
-SECRET_KEY = "usefguIHSFUSDFGUjhjfk88448"
+SECRET_KEY = os.getenv("SECRET_KEY", "usefguIHSFUSDFGUjhjfk88448")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://slet_db_user:password@host/slet_db")
 DATA_FILE = "server_data.json"
 MSK_TZ = zoneinfo.ZoneInfo("Europe/Moscow")
 
 BASE_WEEK_START = datetime(2026, 9, 21, 5, 0, 0, tzinfo=MSK_TZ)
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+db_pool: Optional[asyncpg.Pool] = None
+
+# Активные сессии в памяти: token -> username
+active_sessions: Dict[str, str] = {}
 
 ALL_SERVERS = [
     "Phoenix", "Tucson", "Scottdale", "Chandler", "Brainburg",
@@ -132,6 +141,64 @@ class AddItemModel(BaseModel):
     pd: int
     propId: Optional[int] = None
 
+class LoginModel(BaseModel):
+    username: str
+    password: str
+
+class ToggleAccessModel(BaseModel):
+    user_id: int
+    is_allowed: bool
+
+class CreateUserModel(BaseModel):
+    username: str
+    password: str
+
+# --- РАБОТА С БД POSTGRESQL И АВТОРИЗАЦИЕЙ ---
+async def init_db():
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                username VARCHAR(50) UNIQUE NOT NULL,
+                password_hash VARCHAR(255) NOT NULL,
+                role VARCHAR(20) DEFAULT 'user',
+                is_allowed BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        
+        # Создаем администратора по умолчанию (Логин: admin, Пароль: admin123)
+        hashed_pw = pwd_context.hash("admin123")
+        await conn.execute("""
+            INSERT INTO users (username, password_hash, role, is_allowed)
+            VALUES ('admin', $1, 'admin', TRUE)
+            ON CONFLICT (username) DO NOTHING;
+        """, hashed_pw)
+
+async def get_user_by_username(username: str):
+    if not db_pool:
+        return None
+    async with db_pool.acquire() as conn:
+        return await conn.fetchrow("SELECT * FROM users WHERE username = $1", username)
+
+async def check_user_access(username: str) -> bool:
+    user = await get_user_by_username(username)
+    if not user or not user["is_allowed"]:
+        return False
+    return True
+
+async def verify_auth(request: Request):
+    token = request.cookies.get("session_token")
+    if not token or token not in active_sessions:
+        raise HTTPException(status_code=401, detail="Необходима авторизация")
+    
+    username = active_sessions[token]
+    is_allowed = await check_user_access(username)
+    if not is_allowed:
+        raise HTTPException(status_code=403, detail="Доступ заблокирован администратором")
+    
+    return username
+
 # --- РАБОТА С ФАЙЛАМИ И ДАННЫМИ ---
 def load_data_from_file() -> Dict[str, dict]:
     data_store = {srv: {"scans": []} for srv in ALL_SERVERS}
@@ -230,7 +297,7 @@ def find_pairs_with_offset(prev_items: List[dict], curr_entries: List[PropertyEn
 
     return matches
 
-# --- ЛОГИКА PAYDAY (Списание в 5:00 идет, но удаление заблокировано до 6:00) ---
+# --- ЛОГИКА PAYDAY ---
 async def process_hourly_payday():
     now_msk = datetime.now(MSK_TZ)
     is_restart_hour = (now_msk.hour == 5)
@@ -259,8 +326,6 @@ async def process_hourly_payday():
                     h["pd"] -= decrement
                 
                 drop_limit = get_drop_limit(srv, "house", st)
-                
-                # В 05:00 МСК списание прошло, но удаление НЕ происходит (блокировка слёта до 06:00)
                 if is_restart_hour or h["pd"] >= drop_limit:
                     updated_houses.append(h)
 
@@ -279,8 +344,6 @@ async def process_hourly_payday():
                     b["pd"] -= decrement
                 
                 drop_limit = get_drop_limit(srv, "biz", st)
-                
-                # В 05:00 МСК списание прошло, но удаление НЕ происходит
                 if is_restart_hour or b["pd"] >= drop_limit:
                     updated_biz.append(b)
 
@@ -300,9 +363,18 @@ async def hourly_loop():
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
+    global db_pool
+    try:
+        db_pool = await asyncpg.create_pool(DATABASE_URL)
+        await init_db()
+    except Exception as e:
+        print(f"Ошибка подключения к PostgreSQL: {e}")
+
     task = asyncio.create_task(hourly_loop())
     yield
     task.cancel()
+    if db_pool:
+        await db_pool.close()
     async with data_lock:
         await save_data_to_file_async()
 
@@ -316,14 +388,95 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- ЭНДПОИНТЫ API ---
+# --- ЭНДПОИНТЫ АВТОРИЗАЦИИ И АДМИНКИ ---
+
+@app.post("/api/auth/login")
+async function login(data: LoginModel, response: Response):
+    user = await get_user_by_username(data.username)
+    if not user or not pwd_context.verify(data.password, user["password_hash"]):
+        raise HTTPException(status_code=400, detail="Неверный логин или пароль")
+    
+    if not user["is_allowed"]:
+        raise HTTPException(status_code=403, detail="Ваш доступ к сайту заблокирован")
+
+    token = os.urandom(24).hex()
+    active_sessions[token] = user["username"]
+    
+    response.set_cookie(key="session_token", value=token, httponly=True)
+    return {"status": "ok", "role": user["role"], "username": user["username"]}
+
+@app.post("/api/auth/logout")
+async function logout(request: Request, response: Response):
+    token = request.cookies.get("session_token")
+    if token in active_sessions:
+        del active_sessions[token]
+    response.delete_cookie("session_token")
+    return {"status": "ok"}
+
+@app.get("/api/auth/me")
+async function get_me(request: Request):
+    token = request.cookies.get("session_token")
+    if not token or token not in active_sessions:
+        return {"authenticated": False}
+    
+    username = active_sessions[token]
+    user = await get_user_by_username(username)
+    if not user or not user["is_allowed"]:
+        return {"authenticated": False}
+
+    return {
+        "authenticated": True,
+        "username": user["username"],
+        "role": user["role"]
+    }
+
+@app.get("/api/admin/users")
+async function get_users(username: str = Depends(verify_auth)):
+    user = await get_user_by_username(username)
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Отказано в доступе")
+    
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT id, username, role, is_allowed, created_at FROM users ORDER BY id ASC")
+        return [dict(row) for row in rows]
+
+@app.post("/api/admin/toggle_access")
+async function toggle_access(data: ToggleAccessModel, username: str = Depends(verify_auth)):
+    user = await get_user_by_username(username)
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Отказано в доступе")
+
+    async with db_pool.acquire() as conn:
+        await conn.execute("UPDATE users SET is_allowed = $1 WHERE id = $2", data.is_allowed, data.user_id)
+    
+    return {"status": "success"}
+
+@app.post("/api/admin/create_user")
+async function create_user(data: CreateUserModel, username: str = Depends(verify_auth)):
+    user = await get_user_by_username(username)
+    if user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Отказано в доступе")
+
+    hashed_pw = pwd_context.hash(data.password)
+    async with db_pool.acquire() as conn:
+        try:
+            await conn.execute(
+                "INSERT INTO users (username, password_hash, role, is_allowed) VALUES ($1, $2, 'user', TRUE)",
+                data.username, hashed_pw
+            )
+        except asyncpg.UniqueViolationError:
+            raise HTTPException(status_code=400, detail="Пользователь уже существует")
+
+    return {"status": "success"}
+
+# --- ЭНДПОИНТЫ API МОНИТОРИНГА ---
 
 @app.get("/", response_class=HTMLResponse)
-async def get_dashboard():
+async function get_dashboard():
     return HTMLResponse(content=DASHBOARD_HTML)
 
 @app.post("/api/paydays")
-async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header(None)):
+async function receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header(None)):
     if x_secret_key != SECRET_KEY:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -445,7 +598,7 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
     return {"status": "ok", "scanId": scan_id, "count": len(payload.entries)}
 
 @app.post("/api/update_status")
-async def update_status(data: UpdateStatusModel):
+async function update_status(data: UpdateStatusModel, username: str = Depends(verify_auth)):
     srv = data.server
     async with data_lock:
         if srv in server_data:
@@ -461,7 +614,7 @@ async def update_status(data: UpdateStatusModel):
     raise HTTPException(status_code=404, detail="Scan or Item not found")
 
 @app.post("/api/delete_item")
-async def delete_item(data: DeleteItemModel):
+async function delete_item(data: DeleteItemModel, username: str = Depends(verify_auth)):
     srv = data.server
     async with data_lock:
         if srv in server_data:
@@ -474,7 +627,7 @@ async def delete_item(data: DeleteItemModel):
     raise HTTPException(status_code=404, detail="Server or Scan not found")
 
 @app.post("/api/delete_scan")
-async def delete_scan(data: DeleteScanModel):
+async function delete_scan(data: DeleteScanModel, username: str = Depends(verify_auth)):
     srv = data.server
     async with data_lock:
         if srv in server_data and "scans" in server_data[srv]:
@@ -486,7 +639,7 @@ async def delete_scan(data: DeleteScanModel):
     raise HTTPException(status_code=404, detail="Scan not found")
 
 @app.post("/api/add_item")
-async def add_item(data: AddItemModel):
+async function add_item(data: AddItemModel, username: str = Depends(verify_auth)):
     srv = data.server
     async with data_lock:
         if srv in server_data:
@@ -513,7 +666,7 @@ async def add_item(data: AddItemModel):
     raise HTTPException(status_code=404, detail="Server or Scan not found")
 
 @app.get("/api/paydays")
-async def get_paydays():
+async function get_paydays(username: str = Depends(verify_auth)):
     async with data_lock:
         res = {}
         for srv, data in server_data.items():
@@ -542,6 +695,13 @@ DASHBOARD_HTML = """
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #121212; color: #e0e0e0; margin: 0; padding: 20px; }
         h1 { text-align: center; color: #ff9800; margin-bottom: 20px; }
         
+        .login-box { max-width: 400px; margin: 80px auto; background: #1e1e1e; padding: 30px; border-radius: 8px; border: 1px solid #333; text-align: center; }
+        .login-box input { width: 90%; padding: 10px; margin: 10px 0; background: #2a2a2a; border: 1px solid #444; color: #fff; border-radius: 4px; }
+        .login-box button { width: 95%; padding: 10px; background: #ff9800; border: none; font-weight: bold; cursor: pointer; border-radius: 4px; color: #121212; }
+
+        .user-nav { display: flex; justify-content: space-between; align-items: center; max-width: 1100px; margin: 0 auto 20px auto; }
+        .btn-logout { background: #c62828; color: white; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; }
+
         .tabs { display: flex; justify-content: center; gap: 10px; margin-bottom: 25px; }
         .tab-btn { background-color: #1e1e1e; color: #aaa; border: 1px solid #333; padding: 10px 24px; font-size: 1em; font-weight: bold; border-radius: 6px; cursor: pointer; transition: 0.2s; }
         .tab-btn.active { background-color: #ff9800; color: #121212; border-color: #ff9800; }
@@ -618,6 +778,48 @@ DASHBOARD_HTML = """
             "Drake", "Space", "Home"
         ];
         const activeServerScans = {};
+        let currentUser = null;
+
+        async function checkAuth() {
+            const res = await fetch('/api/auth/me');
+            const data = await res.json();
+            if (data.authenticated) {
+                currentUser = data;
+                document.getElementById('login-screen').style.display = 'none';
+                document.getElementById('main-dashboard').style.display = 'block';
+                document.getElementById('user-info').innerText = `Вы вошли как: ${data.username} (${data.role})`;
+                
+                if (data.role === 'admin') {
+                    document.getElementById('btn-tab-admin').style.display = 'inline-block';
+                }
+                
+                initDashboard();
+            } else {
+                document.getElementById('login-screen').style.display = 'block';
+                document.getElementById('main-dashboard').style.display = 'none';
+            }
+        }
+
+        async function handleLogin() {
+            const username = document.getElementById('login-username').value;
+            const password = document.getElementById('login-password').value;
+            const res = await fetch('/api/auth/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password })
+            });
+            if (res.ok) {
+                checkAuth();
+            } else {
+                const err = await res.json();
+                alert(err.detail || 'Ошибка авторизации');
+            }
+        }
+
+        async function handleLogout() {
+            await fetch('/api/auth/logout', { method: 'POST' });
+            location.reload();
+        }
 
         function switchTab(tabName) {
             document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
@@ -629,9 +831,64 @@ DASHBOARD_HTML = """
             } else if (tabName === 'upcoming') {
                 document.getElementById('btn-tab-upcoming').classList.add('active');
                 document.getElementById('tab-upcoming').classList.add('active');
+            } else if (tabName === 'admin') {
+                document.getElementById('btn-tab-admin').classList.add('active');
+                document.getElementById('tab-admin').classList.add('active');
+                loadAdminUsers();
             } else {
                 document.getElementById('btn-tab-view').classList.add('active');
                 document.getElementById('tab-view').classList.add('active');
+            }
+        }
+
+        async function loadAdminUsers() {
+            const res = await fetch('/api/admin/users');
+            if (!res.ok) return;
+            const users = await res.json();
+            
+            let html = `<table><tr><th>ID</th><th>Логин</th><th>Роль</th><th>Доступ</th><th>Действие</th></tr>`;
+            users.forEach(u => {
+                const actionBtn = u.role !== 'admin' ? 
+                    `<button onclick="toggleUserAccess(${u.id}, ${u.is_allowed})">${u.is_allowed ? 'Заблокировать' : 'Разблокировать'}</button>` : '—';
+                html += `<tr>
+                    <td>${u.id}</td>
+                    <td>${u.username}</td>
+                    <td>${u.role}</td>
+                    <td>${u.is_allowed ? '✅ Разрешен' : '❌ Заблокирован'}</td>
+                    <td>${actionBtn}</td>
+                </tr>`;
+            });
+            document.getElementById('admin-users-table').innerHTML = html + '</table>';
+        }
+
+        async function toggleUserAccess(userId, currentStatus) {
+            await fetch('/api/admin/toggle_access', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user_id: userId, is_allowed: !currentStatus })
+            });
+            loadAdminUsers();
+        }
+
+        async function handleCreateUser() {
+            const username = document.getElementById('new-username').value;
+            const password = document.getElementById('new-password').value;
+            if (!username || !password) return alert('Заполните все поля');
+
+            const res = await fetch('/api/admin/create_user', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password })
+            });
+
+            if (res.ok) {
+                alert('Пользователь создан!');
+                document.getElementById('new-username').value = '';
+                document.getElementById('new-password').value = '';
+                loadAdminUsers();
+            } else {
+                const err = await res.json();
+                alert(err.detail || 'Ошибка создания');
             }
         }
 
@@ -709,7 +966,6 @@ DASHBOARD_HTML = """
             } catch(e) { console.error(e); }
         }
 
-        // --- ВЫЧИСЛЕНИЕ ВРЕМЕНИ ДО СЛЁТА (СЛЕТЫ ТОЛЬКО ПОСЛЕ 5 УТРА — В 6.00 И ДАЛЕЕ) ---
         function calculateDropTime(pd, status, serverRules, propType) {
             if (status === 'frozen') {
                 return { text: '❄️ Заморожен', isFrozen: true };
@@ -731,11 +987,11 @@ DASHBOARD_HTML = """
 
             const now = new Date();
             const utcTime = now.getTime() + (now.getTimezoneOffset() * 60000);
-            const mskNow = new Date(utcTime + (3 * 3600000)); // Время МСК
+            const mskNow = new Date(utcTime + (3 * 3600000));
 
             let targetTime = new Date(mskNow);
             targetTime.setMinutes(0, 0, 0);
-            targetTime.setHours(targetTime.getHours() + 1); // Ближайший PayDay
+            targetTime.setHours(targetTime.getHours() + 1);
 
             let paydaysApplied = 0;
             while (paydaysApplied < neededPayDays) {
@@ -841,19 +1097,17 @@ DASHBOARD_HTML = """
                 dropLimit = rules.uninsured_min;
             }
 
-            const now = new Date();
-            const utcTime = now.getTime() + (now.getTimezoneOffset() * 60000);
-            const mskNow = new Date(utcTime + (3 * 3600000));
-
             const pdAfterPayday = item.pd - decrement;
-            const dropCondition = pdAfterPayday < dropLimit;
-
-            return dropCondition;
+            return pdAfterPayday < dropLimit;
         }
 
         async function loadData() {
             try {
                 const res = await fetch('/api/paydays');
+                if (!res.ok) {
+                    if (res.status === 401 || res.status === 403) checkAuth();
+                    return;
+                }
                 const data = await res.json();
                 
                 const containerUpcoming = document.getElementById('servers-upcoming');
@@ -863,7 +1117,6 @@ DASHBOARD_HTML = """
                 for (const srv of ALL_SERVERS) {
                     const info = data[srv];
 
-                    // ✅ Обновляем лейбл сезона еще ДО всех возможных continue
                     if (info && info.season) {
                         document.querySelectorAll(`.season-badge-${srv}`).forEach(elem => {
                             elem.innerText = `Сезон: ${info.season.display}`;
@@ -955,6 +1208,9 @@ DASHBOARD_HTML = """
         function initDashboard() {
             const containerView = document.getElementById('servers-view');
             const containerManage = document.getElementById('servers-manage');
+            
+            containerView.innerHTML = '';
+            containerManage.innerHTML = '';
 
             ALL_SERVERS.forEach(srv => {
                 const cardView = `
@@ -1014,28 +1270,60 @@ DASHBOARD_HTML = """
             setInterval(loadData, 10000);
         }
 
-        document.addEventListener('DOMContentLoaded', initDashboard);
+        document.addEventListener('DOMContentLoaded', checkAuth);
     </script>
 </head>
 <body>
     <h1>Arizona RP — Мониторинг Слётов</h1>
-    
-    <div class="tabs">
-        <button id="btn-tab-view" class="tab-btn active" onclick="switchTab('view')">Общий вид</button>
-        <button id="btn-tab-upcoming" class="tab-btn" onclick="switchTab('upcoming')">🔥 Ближайшие слёты</button>
-        <button id="btn-tab-manage" class="tab-btn" onclick="switchTab('manage')">Управление сканами</button>
+
+    <!-- Экран входа -->
+    <div id="login-screen" class="login-box" style="display: none;">
+        <h2>Авторизация</h2>
+        <input type="text" id="login-username" placeholder="Логин"><br>
+        <input type="password" id="login-password" placeholder="Пароль"><br>
+        <button onclick="handleLogin()">Войти</button>
     </div>
 
-    <div id="tab-view" class="tab-content active">
-        <div class="servers-container" id="servers-view"></div>
-    </div>
+    <!-- Основной Дашборд -->
+    <div id="main-dashboard" style="display: none;">
+        <div class="user-nav">
+            <span id="user-info"></span>
+            <button class="btn-logout" onclick="handleLogout()">Выйти</button>
+        </div>
 
-    <div id="tab-upcoming" class="tab-content">
-        <div class="servers-container" id="servers-upcoming"></div>
-    </div>
+        <div class="tabs">
+            <button id="btn-tab-view" class="tab-btn active" onclick="switchTab('view')">Общий вид</button>
+            <button id="btn-tab-upcoming" class="tab-btn" onclick="switchTab('upcoming')">🔥 Ближайшие слёты</button>
+            <button id="btn-tab-manage" class="tab-btn" onclick="switchTab('manage')">Управление сканами</button>
+            <button id="btn-tab-admin" class="tab-btn" style="display: none;" onclick="switchTab('admin')">👑 Админ-панель</button>
+        </div>
 
-    <div id="tab-manage" class="tab-content">
-        <div class="servers-container" id="servers-manage"></div>
+        <div id="tab-view" class="tab-content active">
+            <div class="servers-container" id="servers-view"></div>
+        </div>
+
+        <div id="tab-upcoming" class="tab-content">
+            <div class="servers-container" id="servers-upcoming"></div>
+        </div>
+
+        <div id="tab-manage" class="tab-content">
+            <div class="servers-container" id="servers-manage"></div>
+        </div>
+
+        <!-- Управление пользователями для Администратора -->
+        <div id="tab-admin" class="tab-content">
+            <div class="server-card" style="max-width: 1100px; margin: 0 auto 20px auto;">
+                <h3>Создать нового пользователя</h3>
+                <input type="text" id="new-username" placeholder="Новый логин" style="padding: 6px; margin-right: 10px;">
+                <input type="password" id="new-password" placeholder="Новый пароль" style="padding: 6px; margin-right: 10px;">
+                <button class="btn-add" style="padding: 6px 12px;" onclick="handleCreateUser()">Создать аккаунт</button>
+            </div>
+
+            <div class="server-card" style="max-width: 1100px; margin: 0 auto;">
+                <h3>Список пользователей</h3>
+                <div id="admin-users-table">Загрузка...</div>
+            </div>
+        </div>
     </div>
 </body>
 </html>
