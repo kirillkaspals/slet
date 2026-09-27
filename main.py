@@ -391,7 +391,7 @@ app.add_middleware(
 # --- ЭНДПОИНТЫ АВТОРИЗАЦИИ И АДМИНКИ ---
 
 @app.post("/api/auth/login")
-async function login(data: LoginModel, response: Response):
+async def login(data: LoginModel, response: Response):
     user = await get_user_by_username(data.username)
     if not user or not pwd_context.verify(data.password, user["password_hash"]):
         raise HTTPException(status_code=400, detail="Неверный логин или пароль")
@@ -406,7 +406,7 @@ async function login(data: LoginModel, response: Response):
     return {"status": "ok", "role": user["role"], "username": user["username"]}
 
 @app.post("/api/auth/logout")
-async function logout(request: Request, response: Response):
+async def logout(request: Request, response: Response):
     token = request.cookies.get("session_token")
     if token in active_sessions:
         del active_sessions[token]
@@ -414,7 +414,7 @@ async function logout(request: Request, response: Response):
     return {"status": "ok"}
 
 @app.get("/api/auth/me")
-async function get_me(request: Request):
+async def get_me(request: Request):
     token = request.cookies.get("session_token")
     if not token or token not in active_sessions:
         return {"authenticated": False}
@@ -431,7 +431,7 @@ async function get_me(request: Request):
     }
 
 @app.get("/api/admin/users")
-async function get_users(username: str = Depends(verify_auth)):
+async def get_users(username: str = Depends(verify_auth)):
     user = await get_user_by_username(username)
     if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Отказано в доступе")
@@ -441,7 +441,7 @@ async function get_users(username: str = Depends(verify_auth)):
         return [dict(row) for row in rows]
 
 @app.post("/api/admin/toggle_access")
-async function toggle_access(data: ToggleAccessModel, username: str = Depends(verify_auth)):
+async def toggle_access(data: ToggleAccessModel, username: str = Depends(verify_auth)):
     user = await get_user_by_username(username)
     if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Отказано в доступе")
@@ -452,7 +452,7 @@ async function toggle_access(data: ToggleAccessModel, username: str = Depends(ve
     return {"status": "success"}
 
 @app.post("/api/admin/create_user")
-async function create_user(data: CreateUserModel, username: str = Depends(verify_auth)):
+async def create_user(data: CreateUserModel, username: str = Depends(verify_auth)):
     user = await get_user_by_username(username)
     if user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Отказано в доступе")
@@ -472,11 +472,11 @@ async function create_user(data: CreateUserModel, username: str = Depends(verify
 # --- ЭНДПОИНТЫ API МОНИТОРИНГА ---
 
 @app.get("/", response_class=HTMLResponse)
-async function get_dashboard():
+async def get_dashboard():
     return HTMLResponse(content=DASHBOARD_HTML)
 
 @app.post("/api/paydays")
-async function receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header(None)):
+async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header(None)):
     if x_secret_key != SECRET_KEY:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -598,7 +598,7 @@ async function receive_paydays(payload: Payload, x_secret_key: Optional[str] = H
     return {"status": "ok", "scanId": scan_id, "count": len(payload.entries)}
 
 @app.post("/api/update_status")
-async function update_status(data: UpdateStatusModel, username: str = Depends(verify_auth)):
+async def update_status(data: UpdateStatusModel, username: str = Depends(verify_auth)):
     srv = data.server
     async with data_lock:
         if srv in server_data:
@@ -614,7 +614,7 @@ async function update_status(data: UpdateStatusModel, username: str = Depends(ve
     raise HTTPException(status_code=404, detail="Scan or Item not found")
 
 @app.post("/api/delete_item")
-async function delete_item(data: DeleteItemModel, username: str = Depends(verify_auth)):
+async def delete_item(data: DeleteItemModel, username: str = Depends(verify_auth)):
     srv = data.server
     async with data_lock:
         if srv in server_data:
@@ -627,7 +627,7 @@ async function delete_item(data: DeleteItemModel, username: str = Depends(verify
     raise HTTPException(status_code=404, detail="Server or Scan not found")
 
 @app.post("/api/delete_scan")
-async function delete_scan(data: DeleteScanModel, username: str = Depends(verify_auth)):
+async def delete_scan(data: DeleteScanModel, username: str = Depends(verify_auth)):
     srv = data.server
     async with data_lock:
         if srv in server_data and "scans" in server_data[srv]:
@@ -639,7 +639,7 @@ async function delete_scan(data: DeleteScanModel, username: str = Depends(verify
     raise HTTPException(status_code=404, detail="Scan not found")
 
 @app.post("/api/add_item")
-async function add_item(data: AddItemModel, username: str = Depends(verify_auth)):
+async def add_item(data: AddItemModel, username: str = Depends(verify_auth)):
     srv = data.server
     async with data_lock:
         if srv in server_data:
@@ -666,7 +666,7 @@ async function add_item(data: AddItemModel, username: str = Depends(verify_auth)
     raise HTTPException(status_code=404, detail="Server or Scan not found")
 
 @app.get("/api/paydays")
-async function get_paydays(username: str = Depends(verify_auth)):
+async def get_paydays(username: str = Depends(verify_auth)):
     async with data_lock:
         res = {}
         for srv, data in server_data.items():
