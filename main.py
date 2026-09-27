@@ -160,6 +160,10 @@ class UpdateRoleModel(BaseModel):
     user_id: int
     role: str
 
+class ChangePasswordModel(BaseModel):
+    user_id: int
+    new_password: str
+
 # --- РАБОТА С БД POSTGRESQL И АВТОРИЗАЦИЕЙ ---
 async def init_db():
     async with db_pool.acquire() as conn:
@@ -509,6 +513,22 @@ async def update_role(data: UpdateRoleModel, current_admin: str = Depends(verify
             raise HTTPException(status_code=400, detail="Нельзя изменить роль самому себе")
 
         await conn.execute("UPDATE users SET role = $1 WHERE id = $2", data.role, data.user_id)
+
+    return {"status": "success"}
+
+@app.post("/api/admin/change_password")
+async def change_password(data: ChangePasswordModel, current_admin: str = Depends(verify_admin)):
+    if not data.new_password or len(data.new_password.strip()) < 4:
+        raise HTTPException(status_code=400, detail="Пароль слишком короткий (минимум 4 символа)")
+
+    hashed_pw = pwd_context.hash(data.new_password)
+    
+    async with db_pool.acquire() as conn:
+        target = await conn.fetchrow("SELECT username FROM users WHERE id = $1", data.user_id)
+        if not target:
+            raise HTTPException(status_code=404, detail="Пользователь не найден")
+        
+        await conn.execute("UPDATE users SET password_hash = $1 WHERE id = $2", hashed_pw, data.user_id)
 
     return {"status": "success"}
 
@@ -919,6 +939,8 @@ DASHBOARD_HTML = """
                 const deleteUserBtn = !isSelf ? 
                     `<button class="btn-user-del" onclick="deleteUser(${u.id}, '${u.username}')">Удалить</button>` : '';
 
+                const changePwBtn = `<button class="btn-add" style="background-color: #f57c00;" onclick="changeUserPassword(${u.id}, '${u.username}')">🔑 Пароль</button>`;
+
                 const roleSelect = !isSelf ? `
                     <select class="select-role" onchange="changeUserRole(${u.id}, this.value)">
                         <option value="user" ${u.role === 'user' ? 'selected' : ''}>User</option>
@@ -932,10 +954,36 @@ DASHBOARD_HTML = """
                     <td>${u.username}</td>
                     <td>${roleSelect}</td>
                     <td>${u.is_allowed ? '✅ Разрешен' : '❌ Заблокирован'}</td>
-                    <td style="display: flex; gap: 5px; align-items: center;">${toggleAccessBtn} ${deleteUserBtn}</td>
+                    <td style="display: flex; gap: 5px; align-items: center; flex-wrap: wrap;">
+                        ${changePwBtn}
+                        ${toggleAccessBtn} 
+                        ${deleteUserBtn}
+                    </td>
                 </tr>`;
             });
             document.getElementById('admin-users-table').innerHTML = html + '</table>';
+        }
+
+        async function changeUserPassword(userId, username) {
+            const newPassword = prompt(`Введите новый пароль для пользователя ${username}:`);
+            if (!newPassword) return;
+            if (newPassword.trim().length < 4) {
+                alert('Пароль слишком короткий (минимум 4 символа)');
+                return;
+            }
+
+            const res = await fetch('/api/admin/change_password', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user_id: userId, new_password: newPassword })
+            });
+
+            if (res.ok) {
+                alert(`Пароль для ${username} успешно изменен!`);
+            } else {
+                const err = await res.json();
+                alert(err.detail || 'Ошибка смены пароля');
+            }
         }
 
         async function toggleUserAccess(userId, currentStatus) {
@@ -1460,4 +1508,4 @@ DASHBOARD_HTML = """
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main_7:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main_9:app", host="0.0.0.0", port=8000, reload=True)
