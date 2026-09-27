@@ -2,6 +2,6 @@ fastapi
 uvicorn
 pydantic
 asyncpg
+bcrypt==4.0.1
 passlib[bcrypt]
-bcrypt
 python-multipart
