@@ -773,6 +773,47 @@ DASHBOARD_HTML = """
         .tab-content { display: none; }
         .tab-content.active { display: block; }
 
+        /* Панель фильтров */
+        .filter-panel {
+            background: #1e1e1e;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            align-items: center;
+        }
+        .filter-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        .filter-group label {
+            font-size: 0.85em;
+            color: #ff9800;
+            font-weight: bold;
+        }
+        .filter-select {
+            background: #2a2a2a;
+            color: #fff;
+            border: 1px solid #444;
+            padding: 6px 10px;
+            border-radius: 4px;
+            font-size: 0.9em;
+        }
+        .fav-btn {
+            cursor: pointer;
+            font-size: 1.1em;
+            user-select: none;
+            margin-right: 6px;
+            transition: transform 0.1s;
+        }
+        .fav-btn:hover {
+            transform: scale(1.2);
+        }
+
         .servers-container { display: flex; flex-direction: column; gap: 15px; max-width: 1100px; margin: 0 auto; }
         .server-card { background-color: #1e1e1e; border: 1px solid #333; border-radius: 8px; padding: 15px 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
         .server-header { border-bottom: 1px solid #333; padding-bottom: 8px; margin-bottom: 12px; }
@@ -847,6 +888,48 @@ DASHBOARD_HTML = """
         ];
         const activeServerScans = {};
         let currentUser = null;
+        let favoriteServers = JSON.parse(localStorage.getItem('fav_servers') || '[]');
+        let globalServerData = {};
+
+        function toggleFavorite(srv) {
+            if (favoriteServers.includes(srv)) {
+                favoriteServers = favoriteServers.filter(s => s !== srv);
+            } else {
+                favoriteServers.push(srv);
+            }
+            localStorage.setItem('fav_servers', JSON.stringify(favoriteServers));
+            renderViewTab();
+        }
+
+        function getMinMinutesToDrop(info) {
+            if (!info || !info.latestConfirmedScan) return Infinity;
+            
+            const scan = info.latestConfirmedScan;
+            const rules = info.dropRules || {};
+            let minMinutes = Infinity;
+
+            const allProps = [
+                ...(scan.houses || []).map(h => ({ ...h, type: 'house' })),
+                ...(scan.businesses || []).map(b => ({ ...b, type: 'biz' }))
+            ];
+
+            allProps.forEach(item => {
+                if (item.isPendingPair || item.status === 'frozen') return;
+                const timeInfo = calculateDropTime(item.pd, item.status || 'insured', rules, item.type);
+                if (timeInfo && !timeInfo.isFrozen) {
+                    let mins = 0;
+                    const matchHours = timeInfo.text.match(/(\\d+)\\s*ч/);
+                    const matchMins = timeInfo.text.match(/(\\d+)\\s*мин/);
+                    if (matchHours) mins += parseInt(matchHours[1]) * 60;
+                    if (matchMins) mins += parseInt(matchMins[1]);
+                    if (timeInfo.text.includes('< 1 мин')) mins = 0;
+                    
+                    if (mins < minMinutes) minMinutes = mins;
+                }
+            });
+
+            return minMinutes;
+        }
 
         async function checkAuth() {
             const res = await fetch('/api/auth/me');
@@ -1236,6 +1319,111 @@ DASHBOARD_HTML = """
             return html + '</table>';
         }
 
+        function renderViewTab() {
+            const containerView = document.getElementById('servers-view');
+            if (!containerView) return;
+
+            const seasonFilter = document.getElementById('filter-season').value;
+            const sortFilter = document.getElementById('filter-sort').value;
+            const favFilter = document.getElementById('filter-fav').value;
+
+            // 1. Фильтрация
+            let filteredServers = ALL_SERVERS.filter(srv => {
+                const info = globalServerData[srv];
+                if (!info) return true;
+
+                if (seasonFilter !== 'all') {
+                    if (!info.season || String(info.season.id) !== seasonFilter) {
+                        return false;
+                    }
+                }
+
+                if (favFilter === 'fav_only') {
+                    if (!favoriteServers.includes(srv)) {
+                        return false;
+                    }
+                }
+
+                return true;
+            });
+
+            // 2. Сортировка по времени слёта
+            if (sortFilter === 'nearest') {
+                filteredServers.sort((a, b) => {
+                    const minA = getMinMinutesToDrop(globalServerData[a]);
+                    const minB = getMinMinutesToDrop(globalServerData[b]);
+                    return minA - minB;
+                });
+            }
+
+            // 3. Вывод карт
+            containerView.innerHTML = '';
+
+            if (filteredServers.length === 0) {
+                containerView.innerHTML = '<div class="empty-center">Нет серверов, соответствующих выбранным фильтрам</div>';
+                return;
+            }
+
+            filteredServers.forEach(srv => {
+                const isFav = favoriteServers.includes(srv);
+                const starIcon = isFav ? '⭐' : '☆';
+
+                const cardView = `
+                    <div class="server-card">
+                        <div class="server-header">
+                            <div class="server-title">
+                                <span>
+                                    <span class="fav-btn" title="Добавить в избранное" onclick="toggleFavorite('${srv}')">${starIcon}</span>
+                                    ${srv}
+                                </span>
+                                <span class="season-badge season-badge-${srv}">Загрузка...</span>
+                            </div>
+                        </div>
+                        <div class="tables-grid">
+                            <div>
+                                <div class="section-title">Дома</div>
+                                <div id="houses-view-${srv}"></div>
+                            </div>
+                            <div>
+                                <div class="section-title">Бизнесы</div>
+                                <div id="biz-view-${srv}"></div>
+                            </div>
+                        </div>
+                    </div>`;
+                containerView.insertAdjacentHTML('beforeend', cardView);
+            });
+
+            updateViewTables();
+        }
+
+        function updateViewTables() {
+            for (const srv of ALL_SERVERS) {
+                const info = globalServerData[srv];
+                if (!info) continue;
+
+                if (info.season) {
+                    document.querySelectorAll(`.season-badge-${srv}`).forEach(elem => {
+                        elem.innerText = `Сезон: ${info.season.display}`;
+                    });
+                }
+
+                const elemHouse = document.getElementById(`houses-view-${srv}`);
+                const elemBiz = document.getElementById(`biz-view-${srv}`);
+                if (!elemHouse || !elemBiz) continue;
+
+                const latestConfirmed = info.latestConfirmedScan;
+                const serverRules = info.dropRules || {};
+
+                if (latestConfirmed) {
+                    elemHouse.innerHTML = renderTable(latestConfirmed.houses, srv, latestConfirmed.scanId, 'house', false, false, serverRules);
+                    elemBiz.innerHTML = renderTable(latestConfirmed.businesses, srv, latestConfirmed.scanId, 'biz', false, false, serverRules);
+                } else {
+                    elemHouse.innerHTML = '<span class="empty">Ожидание 2-й точки</span>';
+                    elemBiz.innerHTML = '<span class="empty">Ожидание 2-й точки</span>';
+                }
+            }
+        }
+
         function willDropNextPayday(item, serverRules, propType) {
             if (!item || item.isPendingPair) return false;
             
@@ -1267,7 +1455,10 @@ DASHBOARD_HTML = """
                     return;
                 }
                 const data = await res.json();
+                globalServerData = data;
                 
+                renderViewTab();
+
                 const containerUpcoming = document.getElementById('servers-upcoming');
                 containerUpcoming.innerHTML = '';
                 let hasUpcomingDrops = false;
@@ -1276,13 +1467,6 @@ DASHBOARD_HTML = """
 
                 for (const srv of ALL_SERVERS) {
                     const info = data[srv];
-
-                    if (info && info.season) {
-                        document.querySelectorAll(`.season-badge-${srv}`).forEach(elem => {
-                            elem.innerText = `Сезон: ${info.season.display}`;
-                        });
-                    }
-
                     if (!info) continue;
 
                     const scans = info.scans || [];
@@ -1298,8 +1482,6 @@ DASHBOARD_HTML = """
                             if (hm) hm.innerHTML = '<span class="empty">Нет данных</span>';
                             if (bm) bm.innerHTML = '<span class="empty">Нет данных</span>';
                         }
-                        document.getElementById(`houses-view-${srv}`).innerHTML = '<span class="empty">Нет данных</span>';
-                        document.getElementById(`biz-view-${srv}`).innerHTML = '<span class="empty">Нет данных</span>';
                         continue;
                     }
 
@@ -1332,9 +1514,6 @@ DASHBOARD_HTML = """
 
                     const latestConfirmed = info.latestConfirmedScan;
                     if (latestConfirmed) {
-                        document.getElementById(`houses-view-${srv}`).innerHTML = renderTable(latestConfirmed.houses, srv, latestConfirmed.scanId, 'house', false, false, serverRules);
-                        document.getElementById(`biz-view-${srv}`).innerHTML = renderTable(latestConfirmed.businesses, srv, latestConfirmed.scanId, 'biz', false, false, serverRules);
-
                         const droppingHouses = (latestConfirmed.houses || []).filter(h => willDropNextPayday(h, serverRules, 'house'));
                         const droppingBiz = (latestConfirmed.businesses || []).filter(b => willDropNextPayday(b, serverRules, 'biz'));
 
@@ -1361,9 +1540,6 @@ DASHBOARD_HTML = """
                                 </div>`;
                             containerUpcoming.insertAdjacentHTML('beforeend', cardUpcoming);
                         }
-                    } else {
-                        document.getElementById(`houses-view-${srv}`).innerHTML = '<span class="empty">Ожидание 2-й точки</span>';
-                        document.getElementById(`biz-view-${srv}`).innerHTML = '<span class="empty">Ожидание 2-й точки</span>';
                     }
                 }
 
@@ -1374,37 +1550,13 @@ DASHBOARD_HTML = """
         }
 
         function initDashboard() {
-            const containerView = document.getElementById('servers-view');
             const containerManage = document.getElementById('servers-manage');
-            
-            containerView.innerHTML = '';
             containerManage.innerHTML = '';
 
             const canManage = currentUser && (currentUser.role === 'admin' || currentUser.role === 'support');
 
-            ALL_SERVERS.forEach(srv => {
-                const cardView = `
-                    <div class="server-card">
-                        <div class="server-header">
-                            <div class="server-title">
-                                <span>${srv}</span>
-                                <span class="season-badge season-badge-${srv}">Загрузка...</span>
-                            </div>
-                        </div>
-                        <div class="tables-grid">
-                            <div>
-                                <div class="section-title">Дома</div>
-                                <div id="houses-view-${srv}"></div>
-                            </div>
-                            <div>
-                                <div class="section-title">Бизнесы</div>
-                                <div id="biz-view-${srv}"></div>
-                            </div>
-                        </div>
-                    </div>`;
-                containerView.insertAdjacentHTML('beforeend', cardView);
-
-                if (canManage) {
+            if (canManage) {
+                ALL_SERVERS.forEach(srv => {
                     const cardManage = `
                         <div class="server-card">
                             <div class="server-header">
@@ -1435,9 +1587,10 @@ DASHBOARD_HTML = """
                             </div>
                         </div>`;
                     containerManage.insertAdjacentHTML('beforeend', cardManage);
-                }
-            });
+                });
+            }
 
+            renderViewTab();
             loadData();
             setInterval(loadData, 10000);
         }
@@ -1471,6 +1624,37 @@ DASHBOARD_HTML = """
         </div>
 
         <div id="tab-view" class="tab-content active">
+            <!-- Панель фильтрации -->
+            <div class="filter-panel">
+                <div class="filter-group">
+                    <label for="filter-season">Сезон слётов:</label>
+                    <select id="filter-season" class="filter-select" onchange="renderViewTab()">
+                        <option value="all">Все сезоны</option>
+                        <option value="1">1 — По инфе</option>
+                        <option value="2">2 — Скорострелы</option>
+                        <option value="3">3 — Автогонки</option>
+                        <option value="4">4 — По новому</option>
+                        <option value="5">5 — Мотогонки</option>
+                    </select>
+                </div>
+
+                <div class="filter-group">
+                    <label for="filter-sort">Сортировка по времени слёта:</label>
+                    <select id="filter-sort" class="filter-select" onchange="renderViewTab()">
+                        <option value="default">По умолчанию (список серверов)</option>
+                        <option value="nearest">Сначала ближайшие слёты</option>
+                    </select>
+                </div>
+
+                <div class="filter-group">
+                    <label for="filter-fav">Серверы:</label>
+                    <select id="filter-fav" class="filter-select" onchange="renderViewTab()">
+                        <option value="all">Все серверы</option>
+                        <option value="fav_only">Только избранные ⭐</option>
+                    </select>
+                </div>
+            </div>
+
             <div class="servers-container" id="servers-view"></div>
         </div>
 
@@ -1508,4 +1692,4 @@ DASHBOARD_HTML = """
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main_9:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main_10:app", host="0.0.0.0", port=8000, reload=True)
