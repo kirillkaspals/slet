@@ -891,6 +891,12 @@ DASHBOARD_HTML = """
         let favoriteServers = JSON.parse(localStorage.getItem('fav_servers') || '[]');
         let globalServerData = {};
 
+        function getPropRules(info, type) {
+            const defaultRules = { insured: 2, uninsured_min: 2, uninsured_max: 3 };
+            if (!info || !info.dropRules) return defaultRules;
+            return info.dropRules[type] || defaultRules;
+        }
+
         function toggleFavorite(srv) {
             if (favoriteServers.includes(srv)) {
                 favoriteServers = favoriteServers.filter(s => s !== srv);
@@ -905,7 +911,6 @@ DASHBOARD_HTML = """
             if (!info || !info.latestConfirmedScan) return Infinity;
             
             const scan = info.latestConfirmedScan;
-            const rules = info.dropRules || {};
             let minMinutes = Infinity;
 
             const allProps = [
@@ -915,6 +920,7 @@ DASHBOARD_HTML = """
 
             allProps.forEach(item => {
                 if (item.isPendingPair || item.status === 'frozen') return;
+                const rules = getPropRules(info, item.type);
                 const timeInfo = calculateDropTime(item.pd, item.status || 'insured', rules, item.type);
                 if (timeInfo && !timeInfo.isFrozen) {
                     let mins = 0;
@@ -1207,12 +1213,12 @@ DASHBOARD_HTML = """
             } catch(e) { console.error(e); }
         }
 
-        function calculateDropTime(pd, status, serverRules, propType) {
+        function calculateDropTime(pd, status, typeRules, propType) {
             if (status === 'frozen') {
                 return { text: '❄️ Заморожен', isFrozen: true };
             }
 
-            const rules = serverRules[propType] || { insured: 2, uninsured_min: 2, uninsured_max: 3 };
+            const rules = typeRules || { insured: 2, uninsured_min: 2, uninsured_max: 3 };
             let decrement = 1;
             let dropLimit = rules.insured;
 
@@ -1258,7 +1264,7 @@ DASHBOARD_HTML = """
             return { text: timeStr, isFrozen: false };
         }
 
-        function renderTable(items, server, scanId, type, interactive = true, isDropTab = false, serverRules = {}) {
+        function renderTable(items, server, scanId, type, interactive = true, isDropTab = false, info = {}) {
             if (!items || items.length === 0) return '<span class="empty">Нет данных</span>';
             
             let html = '<table><tr><th>№</th><th>ID</th><th>PD</th><th>Статус</th>' + 
@@ -1301,7 +1307,8 @@ DASHBOARD_HTML = """
                     if (isPending) {
                         dropTimeTd = '<td><span class="empty">—</span></td>';
                     } else {
-                        const dropInfo = calculateDropTime(item.pd, st, serverRules, type);
+                        const typeRules = getPropRules(info, type);
+                        const dropInfo = calculateDropTime(item.pd, st, typeRules, type);
                         const badgeStyle = dropInfo.isFrozen ? 'time-left-frozen' : 'time-left-badge';
                         dropTimeTd = `<td><span class="${badgeStyle}">${dropInfo.text}</span></td>`;
                     }
@@ -1412,11 +1419,10 @@ DASHBOARD_HTML = """
                 if (!elemHouse || !elemBiz) continue;
 
                 const latestConfirmed = info.latestConfirmedScan;
-                const serverRules = info.dropRules || {};
 
                 if (latestConfirmed) {
-                    elemHouse.innerHTML = renderTable(latestConfirmed.houses, srv, latestConfirmed.scanId, 'house', false, false, serverRules);
-                    elemBiz.innerHTML = renderTable(latestConfirmed.businesses, srv, latestConfirmed.scanId, 'biz', false, false, serverRules);
+                    elemHouse.innerHTML = renderTable(latestConfirmed.houses, srv, latestConfirmed.scanId, 'house', false, false, info);
+                    elemBiz.innerHTML = renderTable(latestConfirmed.businesses, srv, latestConfirmed.scanId, 'biz', false, false, info);
                 } else {
                     elemHouse.innerHTML = '<span class="empty">Ожидание 2-й точки</span>';
                     elemBiz.innerHTML = '<span class="empty">Ожидание 2-й точки</span>';
@@ -1424,13 +1430,13 @@ DASHBOARD_HTML = """
             }
         }
 
-        function willDropNextPayday(item, serverRules, propType) {
+        function willDropNextPayday(item, typeRules, propType) {
             if (!item || item.isPendingPair) return false;
             
             const st = item.status || 'insured';
             if (st === 'frozen') return false;
             
-            const rules = serverRules[propType] || { insured: 2, uninsured_min: 2, uninsured_max: 3 };
+            const rules = typeRules || { insured: 2, uninsured_min: 2, uninsured_max: 3 };
             
             let decrement = 1;
             let dropLimit = rules.insured;
@@ -1503,19 +1509,21 @@ DASHBOARD_HTML = """
                     }
 
                     const curScan = scans.find(s => s.scanId === activeScanId) || scans[scans.length - 1];
-                    const serverRules = info.dropRules || {};
 
                     if (canManage) {
                         const hm = document.getElementById(`houses-manage-${srv}`);
                         const bm = document.getElementById(`biz-manage-${srv}`);
-                        if (hm) hm.innerHTML = renderTable(curScan.houses, srv, curScan.scanId, 'house', true, false, serverRules);
-                        if (bm) bm.innerHTML = renderTable(curScan.businesses, srv, curScan.scanId, 'biz', true, false, serverRules);
+                        if (hm) hm.innerHTML = renderTable(curScan.houses, srv, curScan.scanId, 'house', true, false, info);
+                        if (bm) bm.innerHTML = renderTable(curScan.businesses, srv, curScan.scanId, 'biz', true, false, info);
                     }
 
                     const latestConfirmed = info.latestConfirmedScan;
                     if (latestConfirmed) {
-                        const droppingHouses = (latestConfirmed.houses || []).filter(h => willDropNextPayday(h, serverRules, 'house'));
-                        const droppingBiz = (latestConfirmed.businesses || []).filter(b => willDropNextPayday(b, serverRules, 'biz'));
+                        const houseRules = getPropRules(info, 'house');
+                        const bizRules = getPropRules(info, 'biz');
+
+                        const droppingHouses = (latestConfirmed.houses || []).filter(h => willDropNextPayday(h, houseRules, 'house'));
+                        const droppingBiz = (latestConfirmed.businesses || []).filter(b => willDropNextPayday(b, bizRules, 'biz'));
 
                         if (droppingHouses.length > 0 || droppingBiz.length > 0) {
                             hasUpcomingDrops = true;
@@ -1530,11 +1538,11 @@ DASHBOARD_HTML = """
                                     <div class="tables-grid">
                                         <div>
                                             <div class="section-title">Слетающие дома в PD</div>
-                                            ${renderTable(droppingHouses, srv, latestConfirmed.scanId, 'house', false, true, serverRules)}
+                                            ${renderTable(droppingHouses, srv, latestConfirmed.scanId, 'house', false, true, info)}
                                         </div>
                                         <div>
                                             <div class="section-title">Слетающие бизнесы в PD</div>
-                                            ${renderTable(droppingBiz, srv, latestConfirmed.scanId, 'biz', false, true, serverRules)}
+                                            ${renderTable(droppingBiz, srv, latestConfirmed.scanId, 'biz', false, true, info)}
                                         </div>
                                     </div>
                                 </div>`;
