@@ -178,6 +178,16 @@ async def init_db():
             );
         """)
         
+        # Таблица для хранения логов сканирования
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS scan_logs (
+                id SERIAL PRIMARY KEY,
+                server VARCHAR(50) NOT NULL,
+                scanner VARCHAR(100) NOT NULL,
+                created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL
+            );
+        """)
+        
         hashed_pw = pwd_context.hash("hpsdjfk123safl!")
         await conn.execute("""
             INSERT INTO users (username, password_hash, role, is_allowed)
@@ -327,6 +337,15 @@ async def process_hourly_payday():
     now_msk = datetime.now(MSK_TZ)
     is_restart_hour = (now_msk.hour == 5)
 
+    # Очистка логов сканирования каждый день в 00:00 МСК
+    if now_msk.hour == 0 and db_pool:
+        try:
+            async with db_pool.acquire() as conn:
+                await conn.execute("TRUNCATE TABLE scan_logs;")
+                print(f"[{now_msk.strftime('%Y-%m-%d %H:%M:%S')}] Логи сканов успешно очищены (00:00 МСК).")
+        except Exception as e:
+            print(f"Ошибка очистки логов сканирования: {e}")
+
     async with data_lock:
         print(f"[{now_msk.strftime('%Y-%m-%d %H:%M:%S')}] Выполнение списания PayDay (Рестарт: {is_restart_hour})...")
         for srv, data in server_data.items():
@@ -461,6 +480,26 @@ async def get_users(username: str = Depends(verify_admin)):
         rows = await conn.fetch("SELECT id, username, role, is_allowed, created_at FROM users ORDER BY id ASC")
         return [dict(row) for row in rows]
 
+@app.get("/api/admin/scan_logs")
+async def get_scan_logs(username: str = Depends(verify_admin)):
+    """Возвращает логи сканирования за текущие сутки."""
+    if not db_pool:
+        return []
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT id, server, scanner, created_at 
+            FROM scan_logs 
+            ORDER BY created_at DESC 
+            LIMIT 200
+        """)
+        result = []
+        for row in rows:
+            r = dict(row)
+            if r["created_at"]:
+                r["created_at"] = r["created_at"].strftime("%H:%M:%S")
+            result.append(r)
+        return result
+
 @app.post("/api/admin/toggle_access")
 async def toggle_access(data: ToggleAccessModel, username: str = Depends(verify_admin)):
     async with db_pool.acquire() as conn:
@@ -547,9 +586,21 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
         )
 
     srv = payload.server
+    scanner_name = payload.scanner or "unknown"
     now_msk = datetime.now(MSK_TZ)
     hour_label = now_msk.strftime("%H:00")
     scan_id = f"{now_msk.strftime('%Y-%m-%d')} {hour_label}"
+
+    # Запись события сканирования в базу данных
+    if db_pool:
+        try:
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO scan_logs (server, scanner, created_at) VALUES ($1, $2, $3)",
+                    srv, scanner_name, now_msk.replace(tzinfo=None)
+                )
+        except Exception as e:
+            print(f"Ошибка сохранения лога сканирования в БД: {e}")
 
     async with data_lock:
         if srv not in server_data:
@@ -587,12 +638,22 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
                     "updatedAt": now_msk.strftime("%H:%M:%S")
                 }
             else:
+                saved_status = "insured"
+                if prev_scan:
+                    matched_prev = None
+                    if item.propId is not None:
+                        matched_prev = next((ph for ph in prev_houses if ph.get("propId") == item.propId), None)
+                    if not matched_prev and idx < len(prev_houses):
+                        matched_prev = prev_houses[idx]
+                    if matched_prev and "status" in matched_prev:
+                        saved_status = matched_prev["status"]
+
                 record = {
                     "basePd": item.pd,
                     "pd": item.pd,
                     "propId": item.propId,
                     "pos": item.pos,
-                    "status": "insured",
+                    "status": saved_status,
                     "isPendingPair": True,
                     "updatedAt": now_msk.strftime("%H:%M:%S")
                 }
@@ -613,12 +674,22 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
                     "updatedAt": now_msk.strftime("%H:%M:%S")
                 }
             else:
+                saved_status = "insured"
+                if prev_scan:
+                    matched_prev = None
+                    if item.propId is not None:
+                        matched_prev = next((pb for pb in prev_biz if pb.get("propId") == item.propId), None)
+                    if not matched_prev and idx < len(prev_biz):
+                        matched_prev = prev_biz[idx]
+                    if matched_prev and "status" in matched_prev:
+                        saved_status = matched_prev["status"]
+
                 record = {
                     "basePd": item.pd,
                     "pd": item.pd,
                     "propId": item.propId,
                     "pos": item.pos,
-                    "status": "insured",
+                    "status": saved_status,
                     "isPendingPair": True,
                     "updatedAt": now_msk.strftime("%H:%M:%S")
                 }
@@ -655,6 +726,9 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
                 "isConfirmed": is_pair_found,
                 "hasPair": is_pair_found
             })
+
+        if is_pair_found and len(scans) > 2:
+            server_data[srv]["scans"] = scans[-2:]
 
         await save_data_to_file_async()
 
@@ -946,7 +1020,6 @@ DASHBOARD_HTML = """
                 document.getElementById('main-dashboard').style.display = 'block';
                 document.getElementById('user-info').innerText = `Вы вошли как: ${data.username} (${data.role})`;
                 
-                // Настройка отображения вкладок в зависимости от роли
                 const canManage = data.role === 'admin' || data.role === 'support';
                 const isAdmin = data.role === 'admin';
 
@@ -1007,6 +1080,7 @@ DASHBOARD_HTML = """
                 document.getElementById('btn-tab-admin').classList.add('active');
                 document.getElementById('tab-admin').classList.add('active');
                 loadAdminUsers();
+                loadScanLogs();
             } else {
                 document.getElementById('btn-tab-view').classList.add('active');
                 document.getElementById('tab-view').classList.add('active');
@@ -1051,6 +1125,27 @@ DASHBOARD_HTML = """
                 </tr>`;
             });
             document.getElementById('admin-users-table').innerHTML = html + '</table>';
+        }
+
+        async function loadScanLogs() {
+            const res = await fetch('/api/admin/scan_logs');
+            if (!res.ok) return;
+            const logs = await res.json();
+            
+            if (logs.length === 0) {
+                document.getElementById('admin-scan-logs-table').innerHTML = '<span class="empty">За сегодня сканов еще не зафиксировано</span>';
+                return;
+            }
+
+            let html = `<table><tr><th>Время (МСК)</th><th>Сервер</th><th>Отправитель</th></tr>`;
+            logs.forEach(l => {
+                html += `<tr>
+                    <td><b>${l.created_at}</b></td>
+                    <td><span style="color: #00bcd4;">${l.server}</span></td>
+                    <td><span style="color: #ffb74d;">${l.scanner}</span></td>
+                </tr>`;
+            });
+            document.getElementById('admin-scan-logs-table').innerHTML = html + '</table>';
         }
 
         async function changeUserPassword(userId, username) {
@@ -1334,7 +1429,6 @@ DASHBOARD_HTML = """
             const sortFilter = document.getElementById('filter-sort').value;
             const favFilter = document.getElementById('filter-fav').value;
 
-            // 1. Фильтрация
             let filteredServers = ALL_SERVERS.filter(srv => {
                 const info = globalServerData[srv];
                 if (!info) return true;
@@ -1354,7 +1448,6 @@ DASHBOARD_HTML = """
                 return true;
             });
 
-            // 2. Сортировка по времени слёта
             if (sortFilter === 'nearest') {
                 filteredServers.sort((a, b) => {
                     const minA = getMinMinutesToDrop(globalServerData[a]);
@@ -1363,7 +1456,6 @@ DASHBOARD_HTML = """
                 });
             }
 
-            // 3. Вывод карт
             containerView.innerHTML = '';
 
             if (filteredServers.length === 0) {
@@ -1674,7 +1766,7 @@ DASHBOARD_HTML = """
             <div class="servers-container" id="servers-manage"></div>
         </div>
 
-        <!-- Управление пользователями для Администратора -->
+        <!-- Управление пользователями и Логи сканирования для Администратора -->
         <div id="tab-admin" class="tab-content">
             <div class="server-card" style="max-width: 1100px; margin: 0 auto 20px auto;">
                 <h3>Создать нового пользователя</h3>
@@ -1688,9 +1780,17 @@ DASHBOARD_HTML = """
                 <button class="btn-add" style="padding: 6px 12px;" onclick="handleCreateUser()">Создать аккаунт</button>
             </div>
 
-            <div class="server-card" style="max-width: 1100px; margin: 0 auto;">
+            <div class="server-card" style="max-width: 1100px; margin: 0 auto 20px auto;">
                 <h3>Список пользователей</h3>
                 <div id="admin-users-table">Загрузка...</div>
+            </div>
+
+            <div class="server-card" style="max-width: 1100px; margin: 0 auto;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                    <h3 style="margin: 0;">📜 Логи сканирования (за сегодня)</h3>
+                    <button class="btn-add" onclick="loadScanLogs()">Обновить</button>
+                </div>
+                <div id="admin-scan-logs-table">Загрузка логов...</div>
             </div>
         </div>
     </div>
@@ -1700,4 +1800,4 @@ DASHBOARD_HTML = """
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main_8:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main_7:app", host="0.0.0.0", port=8000, reload=True)
