@@ -190,6 +190,14 @@ async def init_db():
             );
         """)
 
+        # Таблица для постоянного хранения данных сканирований серверов
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS server_scans_data (
+                server VARCHAR(50) PRIMARY KEY,
+                data JSONB NOT NULL
+            );
+        """)
+
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS user_sessions (
                 token VARCHAR(64) PRIMARY KEY,
@@ -266,8 +274,29 @@ async def verify_editor(username: str = Depends(verify_auth)) -> str:
     return username
 
 # --- РАБОТА С ФАЙЛАМИ И ДАННЫМИ ---
-def load_data_from_file() -> Dict[str, dict]:
+async def load_data_from_db() -> Dict[str, dict]:
     data_store = {srv: {"scans": []} for srv in ALL_SERVERS}
+    
+    # 1. Пробуем загрузить данные из PostgreSQL
+    if db_pool:
+        try:
+            async with db_pool.acquire() as conn:
+                rows = await conn.fetch("SELECT server, data FROM server_scans_data;")
+                if rows:
+                    for row in rows:
+                        srv = row["server"]
+                        if srv in data_store:
+                            raw_data = row["data"]
+                            if isinstance(raw_data, str):
+                                data_store[srv] = json.loads(raw_data)
+                            elif isinstance(raw_data, dict):
+                                data_store[srv] = raw_data
+                    print("Данные сканирований успешно загружены из PostgreSQL.")
+                    return data_store
+        except Exception as e:
+            print(f"Ошибка загрузки сканов из PostgreSQL: {e}")
+
+    # 2. Фолбэк на локальный JSON-файл (если БД недоступна)
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
@@ -275,20 +304,36 @@ def load_data_from_file() -> Dict[str, dict]:
                 for srv in ALL_SERVERS:
                     if srv in loaded and "scans" in loaded[srv]:
                         data_store[srv] = loaded[srv]
-            print("Данные успешно загружены из файла.")
+            print("Данные успешно загружены из локального JSON-файла.")
         except Exception as e:
             print(f"Ошибка чтения JSON-файла: {e}")
+
     return data_store
 
-server_data = load_data_from_file()
+server_data = {srv: {"scans": []} for srv in ALL_SERVERS}
 
 async def save_data_to_file_async():
+    # 1. Сохранение в PostgreSQL
+    if db_pool:
+        try:
+            async with db_pool.acquire() as conn:
+                for srv, data in server_data.items():
+                    data_json = json.dumps(data, ensure_ascii=False)
+                    await conn.execute("""
+                        INSERT INTO server_scans_data (server, data)
+                        VALUES ($1, $2::jsonb)
+                        ON CONFLICT (server) DO UPDATE SET data = EXCLUDED.data;
+                    """, srv, data_json)
+        except Exception as e:
+            print(f"Ошибка сохранения данных в PostgreSQL: {e}")
+
+    # 2. Дублирование в локальный файл
     def _save():
         try:
             with open(DATA_FILE, "w", encoding="utf-8") as f:
                 json.dump(server_data, f, ensure_ascii=False, indent=4)
         except Exception as e:
-            print(f"Ошибка сохранения данных: {e}")
+            print(f"Ошибка сохранения данных в файл: {e}")
 
     await asyncio.to_thread(_save)
 
@@ -435,10 +480,13 @@ async def hourly_loop():
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
-    global db_pool
+    global db_pool, server_data
     try:
         db_pool = await asyncpg.create_pool(DATABASE_URL)
         await init_db()
+        # Восстанавливаем сохраненные сканы серверов из PostgreSQL
+        loaded_db_data = await load_data_from_db()
+        server_data.update(loaded_db_data)
     except Exception as e:
         print(f"Ошибка подключения к PostgreSQL: {e}")
 
