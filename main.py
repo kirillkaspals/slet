@@ -18,6 +18,7 @@ SECRET_KEY = os.getenv("SECRET_KEY", "usefguIHSFUSDFGUjhjfk88448")
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://slet_db_user:password@host/slet_db")
 DATA_FILE = "server_data.json"
 MSK_TZ = zoneinfo.ZoneInfo("Europe/Moscow")
+SESSION_EXPIRE_DAYS = 30  # Срок действия авторизации ("Запомнить устройство")
 
 BASE_WEEK_START = datetime(2026, 9, 21, 5, 0, 0, tzinfo=MSK_TZ)
 
@@ -186,6 +187,16 @@ async def init_db():
                 created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL
             );
         """)
+
+        # Таблица для сохранения авторизационных сессий
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_sessions (
+                token VARCHAR(64) PRIMARY KEY,
+                username VARCHAR(50) NOT NULL REFERENCES users(username) ON DELETE CASCADE,
+                expires_at TIMESTAMP WITHOUT TIME ZONE NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
         
         hashed_pw = pwd_context.hash("hpsdjfk123safl!")
         await conn.execute("""
@@ -206,12 +217,36 @@ async def check_user_access(username: str) -> bool:
         return False
     return True
 
+async def get_username_by_token(token: str) -> Optional[str]:
+    """Получить имя пользователя по токену из памяти или БД"""
+    if token in active_sessions:
+        return active_sessions[token]
+    
+    if not db_pool:
+        return None
+
+    async with db_pool.acquire() as conn:
+        session = await conn.fetchrow(
+            "SELECT username, expires_at FROM user_sessions WHERE token = $1", token
+        )
+        if session:
+            if session["expires_at"] > datetime.utcnow():
+                active_sessions[token] = session["username"]
+                return session["username"]
+            else:
+                # Удаляем истёкшую сессию
+                await conn.execute("DELETE FROM user_sessions WHERE token = $1", token)
+    return None
+
 async def verify_auth(request: Request) -> str:
     token = request.cookies.get("session_token")
-    if not token or token not in active_sessions:
+    if not token:
         raise HTTPException(status_code=401, detail="Необходима авторизация")
     
-    username = active_sessions[token]
+    username = await get_username_by_token(token)
+    if not username:
+        raise HTTPException(status_code=401, detail="Сессия истекла или недействительна")
+    
     is_allowed = await check_user_access(username)
     if not is_allowed:
         raise HTTPException(status_code=403, detail="Доступ заблокирован администратором")
@@ -438,25 +473,50 @@ async def login(data: LoginModel, response: Response):
 
     token = os.urandom(24).hex()
     active_sessions[token] = user["username"]
+
+    expires_at = datetime.utcnow() + timedelta(days=SESSION_EXPIRE_DAYS)
+
+    if db_pool:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO user_sessions (token, username, expires_at) VALUES ($1, $2, $3)",
+                token, user["username"], expires_at
+            )
     
-    response.set_cookie(key="session_token", value=token, httponly=True)
+    max_age = SESSION_EXPIRE_DAYS * 24 * 3600
+    response.set_cookie(
+        key="session_token",
+        value=token,
+        max_age=max_age,
+        expires=expires_at,
+        httponly=True,
+        samesite="lax"
+    )
     return {"status": "ok", "role": user["role"], "username": user["username"]}
 
 @app.post("/api/auth/logout")
 async def logout(request: Request, response: Response):
     token = request.cookies.get("session_token")
-    if token in active_sessions:
-        del active_sessions[token]
+    if token:
+        if token in active_sessions:
+            del active_sessions[token]
+        if db_pool:
+            async with db_pool.acquire() as conn:
+                await conn.execute("DELETE FROM user_sessions WHERE token = $1", token)
+
     response.delete_cookie("session_token")
     return {"status": "ok"}
 
 @app.get("/api/auth/me")
 async def get_me(request: Request):
     token = request.cookies.get("session_token")
-    if not token or token not in active_sessions:
+    if not token:
         return {"authenticated": False}
     
-    username = active_sessions[token]
+    username = await get_username_by_token(token)
+    if not username:
+        return {"authenticated": False}
+
     user = await get_user_by_username(username)
     if not user or not user["is_allowed"]:
         return {"authenticated": False}
@@ -523,6 +583,7 @@ async def delete_user(data: DeleteUserModel, current_admin: str = Depends(verify
             raise HTTPException(status_code=400, detail="Нельзя удалить собственный аккаунт")
         
         await conn.execute("DELETE FROM users WHERE id = $1", data.user_id)
+        await conn.execute("DELETE FROM user_sessions WHERE username = $1", target["username"])
         
         tokens_to_remove = [t for t, u in active_sessions.items() if u == target["username"]]
         for t in tokens_to_remove:
