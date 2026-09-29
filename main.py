@@ -1109,6 +1109,33 @@ DASHBOARD_HTML = """
             loadData();
         }
 
+        async function handleCreateUser() {
+            const username = document.getElementById('new-username').value;
+            const password = document.getElementById('new-password').value;
+            const role = document.getElementById('new-role').value;
+
+            if (!username || !password) {
+                alert('Заполните логин и пароль!');
+                return;
+            }
+
+            const res = await fetch('/api/admin/create_user', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password, role })
+            });
+
+            if (res.ok) {
+                alert('Пользователь успешно создан');
+                document.getElementById('new-username').value = '';
+                document.getElementById('new-password').value = '';
+                loadAdminUsers();
+            } else {
+                const err = await res.json();
+                alert(err.detail || 'Ошибка создания пользователя');
+            }
+        }
+
         async function loadAdminUsers() {
             const res = await fetch('/api/admin/users');
             if (!res.ok) return;
