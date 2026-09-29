@@ -190,7 +190,6 @@ async def init_db():
             );
         """)
 
-        # Таблица для постоянного хранения данных сканирований серверов
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS server_scans_data (
                 server VARCHAR(50) PRIMARY KEY,
@@ -277,7 +276,6 @@ async def verify_editor(username: str = Depends(verify_auth)) -> str:
 async def load_data_from_db() -> Dict[str, dict]:
     data_store = {srv: {"scans": []} for srv in ALL_SERVERS}
     
-    # 1. Пробуем загрузить данные из PostgreSQL
     if db_pool:
         try:
             async with db_pool.acquire() as conn:
@@ -296,7 +294,6 @@ async def load_data_from_db() -> Dict[str, dict]:
         except Exception as e:
             print(f"Ошибка загрузки сканов из PostgreSQL: {e}")
 
-    # 2. Фолбэк на локальный JSON-файл (если БД недоступна)
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
@@ -313,7 +310,6 @@ async def load_data_from_db() -> Dict[str, dict]:
 server_data = {srv: {"scans": []} for srv in ALL_SERVERS}
 
 async def save_data_to_file_async():
-    # 1. Сохранение в PostgreSQL
     if db_pool:
         try:
             async with db_pool.acquire() as conn:
@@ -327,7 +323,6 @@ async def save_data_to_file_async():
         except Exception as e:
             print(f"Ошибка сохранения данных в PostgreSQL: {e}")
 
-    # 2. Дублирование в локальный файл
     def _save():
         try:
             with open(DATA_FILE, "w", encoding="utf-8") as f:
@@ -354,13 +349,19 @@ def get_server_season_info(server: str) -> dict:
     }
 
 def get_latest_confirmed_scan(scans: List[dict]) -> Optional[dict]:
-    confirmed_scans = [s for s in scans if s.get("isConfirmed", False)]
+    if not scans:
+        return None
+    # Приоритет: последний скан из АКТУАЛЬНОЙ (зеленой) пары
+    current_pair_scans = [s for s in scans if s.get("isCurrentPair", False) and s.get("hasPair", False)]
+    if current_pair_scans:
+        return current_pair_scans[-1]
+    
+    # Фолбэк: любой скан, входящий в подтвержденную пару
+    confirmed_scans = [s for s in scans if s.get("hasPair", False) or s.get("isConfirmed", False)]
     if confirmed_scans:
         return confirmed_scans[-1]
-    dependent_scans = [s for s in scans if s.get("hasPair", False)]
-    if dependent_scans:
-        return dependent_scans[-1]
-    return scans[-1] if scans else None
+        
+    return scans[-1]
 
 # --- АЛГОРИТМ УМНОГО СОПОСТАВЛЕНИЯ ---
 def find_pairs_with_offset(prev_items: List[dict], curr_entries: List[PropertyEntry], prop_type: str):
@@ -484,7 +485,6 @@ async def lifespan(app: FastAPI):
     try:
         db_pool = await asyncpg.create_pool(DATABASE_URL)
         await init_db()
-        # Восстанавливаем сохраненные сканы серверов из PostgreSQL
         loaded_db_data = await load_data_from_db()
         server_data.update(loaded_db_data)
     except Exception as e:
@@ -727,9 +727,15 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
 
         scans = server_data[srv]["scans"]
         
+        # Находим предыдущий скан, который ЕЩЁ НЕ имеет пары (изолируем пару 1-2 от скана 3)
+        other_scans = [s for s in scans if s["scanId"] != scan_id]
+        
         prev_scan = None
-        if len(scans) > 0:
-            prev_scan = scans[-1] if scans[-1]["scanId"] != scan_id else (scans[-2] if len(scans) > 1 else None)
+        if other_scans:
+            last_s = other_scans[-1]
+            # Новая пара формируется только если предыдущий скан был НЕПАРНЫМ!
+            if not last_s.get("hasPair", False):
+                prev_scan = last_s
 
         house_entries = [e for e in payload.entries if e.propType == "house"]
         biz_entries = [e for e in payload.entries if e.propType != "house"]
@@ -817,11 +823,20 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
         houses = sorted(houses, key=lambda x: x["pos"])
         businesses = sorted(businesses, key=lambda x: x["pos"])
 
-        is_pair_found = (len(house_matches) > 0 or len(biz_matches) > 0)
+        # Пара считается сформированной, только если есть непарный предыдущий скан
+        is_pair_found = (prev_scan is not None)
 
         if is_pair_found and prev_scan:
-            prev_scan["isConfirmed"] = True
+            # Сформирована новая актуальная пара!
+            # Все предыдущие сканы помечаем как устаревшие (isCurrentPair = False, isOutdated = True)
+            for s in scans:
+                s["isCurrentPair"] = False
+                s["isOutdated"] = True
+
             prev_scan["hasPair"] = True
+            prev_scan["isConfirmed"] = True
+            prev_scan["isCurrentPair"] = True
+            prev_scan["isOutdated"] = False
 
         existing_scan = next((s for s in scans if s["scanId"] == scan_id), None)
         has_houses_in_payload = len(house_entries) > 0
@@ -833,21 +848,29 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
             if has_biz_in_payload:
                 existing_scan["businesses"] = businesses
             existing_scan["scanTime"] = now_msk.strftime("%Y-%m-%d %H:%M:%S")
-            existing_scan["isConfirmed"] = existing_scan.get("isConfirmed", False) or is_pair_found
-            existing_scan["hasPair"] = existing_scan.get("hasPair", False) or is_pair_found
+            if is_pair_found and prev_scan:
+                existing_scan["isConfirmed"] = True
+                existing_scan["hasPair"] = True
+                existing_scan["isCurrentPair"] = True
+                existing_scan["isOutdated"] = False
+            else:
+                existing_scan["isConfirmed"] = existing_scan.get("isConfirmed", False)
+                existing_scan["hasPair"] = existing_scan.get("hasPair", False)
+                existing_scan["isCurrentPair"] = existing_scan.get("isCurrentPair", False)
+                existing_scan["isOutdated"] = existing_scan.get("isOutdated", False)
         else:
-            scans.append({
+            new_scan = {
                 "scanId": scan_id,
                 "hourLabel": hour_label,
                 "scanTime": now_msk.strftime("%Y-%m-%d %H:%M:%S"),
                 "houses": houses,
                 "businesses": businesses,
-                "isConfirmed": is_pair_found,
-                "hasPair": is_pair_found
-            })
-
-        if is_pair_found and len(scans) > 2:
-            server_data[srv]["scans"] = scans[-2:]
+                "isConfirmed": is_pair_found and (prev_scan is not None),
+                "hasPair": is_pair_found and (prev_scan is not None),
+                "isCurrentPair": is_pair_found and (prev_scan is not None),
+                "isOutdated": False
+            }
+            scans.append(new_scan)
 
         await save_data_to_file_async()
 
@@ -1234,26 +1257,64 @@ DASHBOARD_HTML = """
             padding-bottom: 6px; 
             gap: 8px;
         }
-        .scan-tabs-container { display: flex; gap: 4px; overflow-x: auto; padding-bottom: 2px; }
+        .scan-tabs-container { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
         .scan-subtab { 
             background-color: #0f121a; 
             color: var(--text-muted); 
             border: 1px solid #232b3c; 
-            padding: 3px 8px; 
+            padding: 4px 8px; 
             font-size: 0.75rem; 
             border-radius: 4px; 
             cursor: pointer; 
             white-space: nowrap; 
             transition: 0.2s; 
             font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
         }
-        .scan-subtab.active { 
-            background-color: #0288d1; 
-            color: #fff; 
-            border-color: #29b6f6; 
+
+        /* Стили подсветок сканов согласно заданию */
+        /* Зеленый цвет: Актуальная заменяющая пара (например 3 и 4) */
+        .scan-subtab.current-pair { 
+            background-color: rgba(46, 125, 50, 0.2); 
+            color: #81c784; 
+            border-color: #4caf50; 
         }
-        .scan-subtab.single { border-color: var(--accent-orange); color: #ffb74d; }
-        .scan-subtab:hover:not(.active) { background-color: #1f2736; color: #fff; }
+        .scan-subtab.current-pair.active { 
+            background-color: #2e7d32; 
+            color: #ffffff; 
+            border-color: #66bb6a; 
+            box-shadow: 0 0 8px rgba(76, 175, 80, 0.4);
+        }
+
+        /* Серый цвет: Старые ушедшие из актуальности сканы (например 1 и 2) */
+        .scan-subtab.old-pair { 
+            background-color: rgba(55, 71, 79, 0.25); 
+            color: #78909c; 
+            border-color: #37474f; 
+            opacity: 0.75;
+        }
+        .scan-subtab.old-pair.active { 
+            background-color: #37474f; 
+            color: #cfd8dc; 
+            border-color: #546e7a; 
+            opacity: 1;
+        }
+
+        /* Оранжевый цвет: Одиночный скан в ожидании пары */
+        .scan-subtab.single { 
+            background-color: rgba(255, 152, 0, 0.15); 
+            color: #ffb74d; 
+            border-color: #ff9800; 
+        }
+        .scan-subtab.single.active { 
+            background-color: #f57c00; 
+            color: #ffffff; 
+            border-color: #ffb74d; 
+        }
+
+        .scan-subtab:hover:not(.active) { opacity: 1; filter: brightness(1.2); }
 
         .btn-delete-scan { 
             background-color: rgba(183, 28, 28, 0.2); 
@@ -2000,12 +2061,33 @@ DASHBOARD_HTML = """
                     const activeScanId = activeServerScans[srv];
 
                     if (manageTabsElem) {
-                        manageTabsElem.innerHTML = scans.map(s => `
-                            <button class="scan-subtab ${s.scanId === activeScanId ? 'active' : ''} ${!s.hasPair ? 'single' : ''}" 
-                                    onclick="selectScanTab('${srv}', '${s.scanId}')">
-                                ${s.hourLabel} ${!s.hasPair ? '⚠️' : ''}
-                            </button>
-                        `).join('');
+                        manageTabsElem.innerHTML = scans.map(s => {
+                            let typeClass = 'single';
+                            let statusIcon = '⏳';
+                            let titleHint = 'Ожидает пару';
+
+                            if (s.hasPair) {
+                                if (s.isCurrentPair) {
+                                    typeClass = 'current-pair'; // Зеленый цвет для актуальной заменяющей пары (3 и 4)
+                                    statusIcon = '🟢';
+                                    titleHint = 'Актуальная пара';
+                                } else {
+                                    typeClass = 'old-pair';     // Серый цвет для устаревших пар (1 и 2)
+                                    statusIcon = '⚪';
+                                    titleHint = 'Старый скан (устарел)';
+                                }
+                            }
+
+                            const isActive = s.scanId === activeScanId ? 'active' : '';
+
+                            return `
+                                <button class="scan-subtab ${typeClass} ${isActive}" 
+                                        title="${s.scanId} — ${titleHint}"
+                                        onclick="selectScanTab('${srv}', '${s.scanId}')">
+                                    <span>${statusIcon}</span> ${s.hourLabel}
+                                </button>
+                            `;
+                        }).join('');
                     }
 
                     const curScan = scans.find(s => s.scanId === activeScanId) || scans[scans.length - 1];
