@@ -3,7 +3,7 @@ import contextlib
 import json
 import os
 import zoneinfo
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 import asyncpg
@@ -230,7 +230,8 @@ async def get_username_by_token(token: str) -> Optional[str]:
             "SELECT username, expires_at FROM user_sessions WHERE token = $1", token
         )
         if session:
-            if session["expires_at"] > datetime.utcnow():
+            now_naive = datetime.now(timezone.utc).replace(tzinfo=None)
+            if session["expires_at"] > now_naive:
                 active_sessions[token] = session["username"]
                 return session["username"]
             else:
@@ -479,12 +480,13 @@ async def login(data: LoginModel, response: Response):
     token = os.urandom(24).hex()
     active_sessions[token] = user["username"]
 
-    expires_at = datetime.utcnow() + timedelta(days=SESSION_EXPIRE_DAYS)
+    expires_at_utc = datetime.now(timezone.utc) + timedelta(days=SESSION_EXPIRE_DAYS)
+    expires_at_db = expires_at_utc.replace(tzinfo=None)
 
     async with db_pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO user_sessions (token, username, expires_at) VALUES ($1, $2, $3)",
-            token, user["username"], expires_at
+            token, user["username"], expires_at_db
         )
     
     max_age = SESSION_EXPIRE_DAYS * 24 * 3600
@@ -492,7 +494,7 @@ async def login(data: LoginModel, response: Response):
         key="session_token",
         value=token,
         max_age=max_age,
-        expires=expires_at,
+        expires=expires_at_utc,
         httponly=True,
         samesite="lax"
     )
