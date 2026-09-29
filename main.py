@@ -307,9 +307,13 @@ def get_server_season_info(server: str) -> dict:
     }
 
 def get_latest_confirmed_scan(scans: List[dict]) -> Optional[dict]:
+    # Сначала ищем последний сопоставленный скан
     confirmed_scans = [s for s in scans if s.get("isConfirmed", False)]
     if confirmed_scans:
         return confirmed_scans[-1]
+    # Если пары еще нет, но есть 1-й скан — возвращаем его для отображения ожидания в Общем виде
+    if scans:
+        return scans[-1]
     return None
 
 # --- АЛГОРИТМ УМНОГО СОПОСТАВЛЕНИЯ ---
@@ -384,7 +388,7 @@ async def process_hourly_payday():
                 scan_dt = datetime.strptime(s["scanTime"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=MSK_TZ)
                 time_diff = (now_msk - scan_dt).total_seconds() / 3600.0
 
-                # Если скан был одиночным без пары и пролежал более 1.1 часа — удаляем его
+                # Если скан был одиночным без пары и не дождался следующего часа (>1.1 ч) — удаляем его
                 if not s.get("hasPair", False) and time_diff >= 1.1:
                     print(f"[{srv}] Удален одиночный устаревший скан {s['scanId']}")
                     continue
@@ -394,7 +398,7 @@ async def process_hourly_payday():
             scans = valid_scans
 
             latest_scan = get_latest_confirmed_scan(scans)
-            if not latest_scan:
+            if not latest_scan or not latest_scan.get("isConfirmed", False):
                 continue
 
             updated_houses = []
@@ -680,7 +684,7 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
             last_scan_dt = datetime.strptime(last_scan["scanTime"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=MSK_TZ)
             time_diff_sec = (now_msk - last_scan_dt).total_seconds()
             
-            # Проверяем, был ли предыдущий скан ровно 1 час назад (с небольшим запасом от 50 до 70 минут)
+            # Проверяем, был ли предыдущий скан ровно 1 час назад (от 50 до 70 минут)
             if 3000 <= time_diff_sec <= 4200:
                 prev_scan = last_scan
                 is_consecutive_hour = True
@@ -715,7 +719,7 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
                     "propId": item.propId,
                     "pos": item.pos,
                     "status": "insured",
-                    "isPendingPair": True,
+                    "isPendingPair": not is_consecutive_hour,
                     "updatedAt": now_msk.strftime("%H:%M:%S")
                 }
             houses.append(record)
@@ -741,7 +745,7 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
                     "propId": item.propId,
                     "pos": item.pos,
                     "status": "insured",
-                    "isPendingPair": True,
+                    "isPendingPair": not is_consecutive_hour,
                     "updatedAt": now_msk.strftime("%H:%M:%S")
                 }
             businesses.append(record)
@@ -779,11 +783,16 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
             existing_scan["hasPair"] = existing_scan.get("hasPair", False) or is_pair_found
         else:
             if is_consecutive_hour:
-                # Последовательный скан -> Добавляем в общую цепочку
+                # Входной скан последовательный -> добавляем в цепочку
                 scans.append(new_scan_obj)
+                # Если у нас уже были готовые пару сканов (например, 12.00 и 13.00),
+                # а теперь сопоставились 15.00 и 16.00, удаляем прошлые сканы (12.00 и 13.00),
+                # оставляя в истории только текущую пару сопоставленных сканов (15.00 и 16.00).
+                if len(scans) > 2:
+                    server_data[srv]["scans"] = scans[-2:]
             else:
-                # Произошел разрыв во времени (> 1 часа).
-                # Удаляем ВСЕ прошлые сканы и оставляем только текущий новый скан одиночкой.
+                # Произошел разрыв во времени (> 1 часа) либо это 1-й скан после отсутствия пары:
+                # Удаляем все предыдущие неактуальные/одиночные сканы и ставим текущий 1-й скан в ожидание 2-го скана.
                 server_data[srv]["scans"] = [new_scan_obj]
 
         await save_data_to_file_async()
@@ -1484,7 +1493,7 @@ DASHBOARD_HTML = """
                         ${isPending ? '<span class="status-pending">⏳ Ожидание пары</span>' : ''}`;
                 } else {
                     if (isPending) {
-                        statusControl = `<span class="status-pending">⏳ Ожидание пары</span>`;
+                        statusControl = `<span class="status-pending">⏳ Ожидание 2-го скана</span>`;
                     } else {
                         let label = 'Страховка';
                         let classNm = 'status-insured';
@@ -1608,8 +1617,8 @@ DASHBOARD_HTML = """
                     elemHouse.innerHTML = renderTable(latestConfirmed.houses, srv, latestConfirmed.scanId, 'house', false, false, info);
                     elemBiz.innerHTML = renderTable(latestConfirmed.businesses, srv, latestConfirmed.scanId, 'biz', false, false, info);
                 } else {
-                    elemHouse.innerHTML = '<span class="empty">Ожидание последовательного скана</span>';
-                    elemBiz.innerHTML = '<span class="empty">Ожидание последовательного скана</span>';
+                    elemHouse.innerHTML = '<span class="empty">Ожидание 2-го скана</span>';
+                    elemBiz.innerHTML = '<span class="empty">Ожидание 2-го скана</span>';
                 }
             }
         }
@@ -1685,7 +1694,7 @@ DASHBOARD_HTML = """
                     }
 
                     const latestConfirmed = info.latestConfirmedScan;
-                    if (latestConfirmed) {
+                    if (latestConfirmed && latestConfirmed.isConfirmed) {
                         const houseRules = getPropRules(info, 'house');
                         const bizRules = getPropRules(info, 'biz');
 
