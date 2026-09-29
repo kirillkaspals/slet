@@ -947,96 +947,404 @@ DASHBOARD_HTML = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Arizona RP — Мониторинг Слётов</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #121212; color: #e0e0e0; margin: 0; padding: 20px; }
-        h1 { text-align: center; color: #ff9800; margin-bottom: 20px; }
-        
-        .login-box { max-width: 400px; margin: 80px auto; background: #1e1e1e; padding: 30px; border-radius: 8px; border: 1px solid #333; text-align: center; }
-        .login-box input { width: 90%; padding: 10px; margin: 10px 0; background: #2a2a2a; border: 1px solid #444; color: #fff; border-radius: 4px; }
-        .login-box button { width: 95%; padding: 10px; background: #ff9800; border: none; font-weight: bold; cursor: pointer; border-radius: 4px; color: #121212; }
+        :root {
+            --bg-color: #0b0e14;
+            --card-bg: #141822;
+            --card-border: #202636;
+            --accent-orange: #ff9800;
+            --accent-orange-glow: rgba(255, 152, 0, 0.25);
+            --accent-blue: #00b0ff;
+            --accent-green: #00e676;
+            --accent-red: #ff3d00;
+            --text-main: #f0f4f8;
+            --text-muted: #8a99ad;
+            --table-header: #1a202c;
+            --table-row-hover: #1c2333;
+        }
 
-        .user-nav { display: flex; justify-content: space-between; align-items: center; max-width: 1100px; margin: 0 auto 20px auto; }
-        .btn-logout { background: #c62828; color: white; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; }
+        * { box-sizing: border-box; }
 
-        .tabs { display: flex; justify-content: center; gap: 10px; margin-bottom: 25px; }
-        .tab-btn { background-color: #1e1e1e; color: #aaa; border: 1px solid #333; padding: 10px 24px; font-size: 1em; font-weight: bold; border-radius: 6px; cursor: pointer; transition: 0.2s; }
-        .tab-btn.active { background-color: #ff9800; color: #121212; border-color: #ff9800; }
-        .tab-btn:hover:not(.active) { background-color: #2a2a2a; color: #fff; }
+        body { 
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+            background-color: var(--bg-color); 
+            color: var(--text-main); 
+            margin: 0; 
+            padding: 20px 15px; 
+            min-height: 100vh;
+        }
+
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: var(--bg-color); }
+        ::-webkit-scrollbar-thumb { background: #263043; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #3b4962; }
+
+        h1 { 
+            text-align: center; 
+            color: #ffffff; 
+            font-size: 1.8rem;
+            font-weight: 800;
+            letter-spacing: 0.5px;
+            margin: 10px 0 25px 0;
+            text-transform: uppercase;
+            background: linear-gradient(135deg, #fff 30%, var(--accent-orange));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        /* Auth Screen */
+        .login-box { 
+            max-width: 380px; 
+            margin: 80px auto; 
+            background: var(--card-bg); 
+            padding: 35px 30px; 
+            border-radius: 12px; 
+            border: 1px solid var(--card-border); 
+            text-align: center; 
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        }
+        .login-box h2 {
+            margin-top: 0;
+            margin-bottom: 20px;
+            color: var(--text-main);
+            font-size: 1.4rem;
+        }
+        .login-box input { 
+            width: 100%; 
+            padding: 12px; 
+            margin: 8px 0; 
+            background: #0f121a; 
+            border: 1px solid #263043; 
+            color: #fff; 
+            border-radius: 6px; 
+            font-size: 0.95rem;
+            outline: none;
+            transition: 0.2s;
+        }
+        .login-box input:focus {
+            border-color: var(--accent-orange);
+            box-shadow: 0 0 8px var(--accent-orange-glow);
+        }
+        .login-box button { 
+            width: 100%; 
+            padding: 12px; 
+            margin-top: 15px;
+            background: linear-gradient(135deg, #ff9800, #f57c00); 
+            border: none; 
+            font-weight: 700; 
+            cursor: pointer; 
+            border-radius: 6px; 
+            color: #121212; 
+            font-size: 1rem;
+            transition: transform 0.1s, box-shadow 0.2s;
+        }
+        .login-box button:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 15px var(--accent-orange-glow);
+        }
+
+        /* Top Navigation */
+        .user-nav { 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center; 
+            max-width: 1600px; 
+            margin: 0 auto 20px auto; 
+            background: var(--card-bg);
+            padding: 12px 20px;
+            border-radius: 10px;
+            border: 1px solid var(--card-border);
+        }
+        #user-info { font-weight: 600; font-size: 0.95rem; color: var(--text-muted); }
+        .btn-logout { 
+            background: rgba(229, 57, 53, 0.15); 
+            color: #ef5350; 
+            border: 1px solid rgba(229, 57, 53, 0.3); 
+            padding: 7px 16px; 
+            border-radius: 6px; 
+            cursor: pointer; 
+            font-weight: 600;
+            transition: 0.2s;
+        }
+        .btn-logout:hover {
+            background: #e53935;
+            color: #fff;
+        }
+
+        /* Tabs Navigation */
+        .tabs { 
+            display: flex; 
+            justify-content: center; 
+            gap: 10px; 
+            margin-bottom: 25px; 
+            flex-wrap: wrap;
+        }
+        .tab-btn { 
+            background-color: var(--card-bg); 
+            color: var(--text-muted); 
+            border: 1px solid var(--card-border); 
+            padding: 10px 22px; 
+            font-size: 0.95rem; 
+            font-weight: 700; 
+            border-radius: 8px; 
+            cursor: pointer; 
+            transition: all 0.2s ease; 
+        }
+        .tab-btn.active { 
+            background: linear-gradient(135deg, #ff9800, #f57c00); 
+            color: #121212; 
+            border-color: #ff9800; 
+            box-shadow: 0 4px 15px var(--accent-orange-glow);
+        }
+        .tab-btn:hover:not(.active) { 
+            background-color: #1c2333; 
+            color: #fff; 
+            border-color: #2e384e;
+        }
 
         .tab-content { display: none; }
         .tab-content.active { display: block; }
 
-        .upcoming-filters { display: flex; justify-content: center; gap: 12px; margin-bottom: 20px; }
-        .time-filter-btn { background-color: #1e1e1e; color: #aaa; border: 1px solid #333; padding: 8px 18px; font-size: 0.9em; font-weight: bold; border-radius: 20px; cursor: pointer; transition: 0.2s; }
-        .time-filter-btn.active { background-color: #e53935; color: #ffffff; border-color: #ef5350; box-shadow: 0 0 8px rgba(229, 57, 53, 0.4); }
+        /* Filter Controls */
+        .upcoming-filters { display: flex; justify-content: center; gap: 10px; margin-bottom: 20px; }
+        .time-filter-btn { 
+            background-color: var(--card-bg); 
+            color: var(--text-muted); 
+            border: 1px solid var(--card-border); 
+            padding: 8px 18px; 
+            font-size: 0.85rem; 
+            font-weight: 700; 
+            border-radius: 20px; 
+            cursor: pointer; 
+            transition: 0.2s; 
+        }
+        .time-filter-btn.active { 
+            background-color: #e53935; 
+            color: #ffffff; 
+            border-color: #ef5350; 
+            box-shadow: 0 0 12px rgba(229, 57, 53, 0.4); 
+        }
 
-        .filter-panel { background: #1e1e1e; border: 1px solid #333; border-radius: 8px; padding: 15px; margin-bottom: 20px; display: flex; flex-wrap: wrap; gap: 20px; align-items: center; justify-content: center; }
-        .filter-group { display: flex; flex-direction: column; gap: 5px; }
-        .filter-group label { font-size: 0.85em; color: #ff9800; font-weight: bold; }
-        .filter-select { background: #2a2a2a; color: #fff; border: 1px solid #444; padding: 6px 10px; border-radius: 4px; font-size: 0.9em; }
-        .fav-btn { cursor: pointer; font-size: 1.1em; user-select: none; margin-right: 6px; transition: transform 0.1s; }
-        .fav-btn:hover { transform: scale(1.2); }
+        .filter-panel { 
+            background: var(--card-bg); 
+            border: 1px solid var(--card-border); 
+            border-radius: 10px; 
+            padding: 14px 20px; 
+            margin: 0 auto 20px auto; 
+            max-width: 1600px;
+            display: flex; 
+            flex-wrap: wrap; 
+            gap: 20px; 
+            align-items: center; 
+            justify-content: center; 
+        }
+        .filter-group { display: flex; align-items: center; gap: 10px; }
+        .filter-group label { font-size: 0.85rem; color: var(--accent-orange); font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+        .filter-select { 
+            background: #0f121a; 
+            color: #fff; 
+            border: 1px solid #263043; 
+            padding: 7px 12px; 
+            border-radius: 6px; 
+            font-size: 0.85rem; 
+            font-weight: 600;
+            outline: none;
+            cursor: pointer;
+        }
+        .fav-btn { 
+            cursor: pointer; 
+            font-size: 1.1rem; 
+            user-select: none; 
+            margin-right: 6px; 
+            transition: transform 0.15s ease; 
+            display: inline-block;
+        }
+        .fav-btn:hover { transform: scale(1.3); }
 
-        .servers-container { display: flex; flex-direction: column; gap: 15px; max-width: 1100px; margin: 0 auto; }
-        .server-card { background-color: #1e1e1e; border: 1px solid #333; border-radius: 8px; padding: 15px 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
-        .server-header { border-bottom: 1px solid #333; padding-bottom: 8px; margin-bottom: 12px; }
-        .server-title { font-size: 1.3em; font-weight: bold; color: #4caf50; display: flex; justify-content: space-between; align-items: center; }
-        .season-badge { font-size: 0.75em; background-color: #332a12; color: #ffb74d; border: 1px solid #ff9800; padding: 3px 8px; border-radius: 12px; font-weight: normal; }
+        /* GRID FOR SERVERS (3-4 per row) */
+        .servers-container { 
+            display: grid; 
+            grid-template-columns: repeat(1, 1fr); 
+            gap: 16px; 
+            max-width: 1600px; 
+            margin: 0 auto; 
+        }
+
+        @media (min-width: 600px) {
+            .servers-container { grid-template-columns: repeat(2, 1fr); }
+        }
+        @media (min-width: 1100px) {
+            .servers-container { grid-template-columns: repeat(3, 1fr); }
+        }
+        @media (min-width: 1500px) {
+            .servers-container { grid-template-columns: repeat(4, 1fr); }
+        }
+
+        /* Server Card Styling */
+        .server-card { 
+            background-color: var(--card-bg); 
+            border: 1px solid var(--card-border); 
+            border-radius: 10px; 
+            padding: 14px; 
+            box-shadow: 0 4px 12px rgba(0,0,0,0.25); 
+            display: flex;
+            flex-direction: column;
+            transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+        }
+        .server-card:hover {
+            border-color: #2e384e;
+            box-shadow: 0 6px 18px rgba(0,0,0,0.4);
+        }
         
-        .scan-tabs-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid #2a2a2a; padding-bottom: 6px; }
-        .scan-tabs-container { display: flex; gap: 6px; overflow-x: auto; }
-        .scan-subtab { background-color: #252525; color: #888; border: 1px solid #3a3a3a; padding: 4px 12px; font-size: 0.85em; border-radius: 4px; cursor: pointer; white-space: nowrap; transition: 0.2s; }
-        .scan-subtab.active { background-color: #1e88e5; color: #fff; border-color: #64b5f6; font-weight: bold; }
-        .scan-subtab.single { border-color: #ff9800; color: #ffb74d; }
-        .scan-subtab:hover:not(.active) { background-color: #333; color: #ddd; }
+        .server-header { 
+            border-bottom: 1px solid #1f2736; 
+            padding-bottom: 8px; 
+            margin-bottom: 10px; 
+        }
+        .server-title { 
+            font-size: 1.05rem; 
+            font-weight: 700; 
+            color: #ffffff; 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center; 
+        }
+        .season-badge { 
+            font-size: 0.7rem; 
+            background: rgba(255, 152, 0, 0.12); 
+            color: #ffb74d; 
+            border: 1px solid rgba(255, 152, 0, 0.3); 
+            padding: 2px 8px; 
+            border-radius: 12px; 
+            font-weight: 600; 
+            white-space: nowrap;
+        }
+        
+        /* Scan Tabs Inside Card */
+        .scan-tabs-bar { 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center; 
+            margin-bottom: 10px; 
+            border-bottom: 1px solid #1f2736; 
+            padding-bottom: 6px; 
+            gap: 8px;
+        }
+        .scan-tabs-container { display: flex; gap: 4px; overflow-x: auto; padding-bottom: 2px; }
+        .scan-subtab { 
+            background-color: #0f121a; 
+            color: var(--text-muted); 
+            border: 1px solid #232b3c; 
+            padding: 3px 8px; 
+            font-size: 0.75rem; 
+            border-radius: 4px; 
+            cursor: pointer; 
+            white-space: nowrap; 
+            transition: 0.2s; 
+            font-weight: 600;
+        }
+        .scan-subtab.active { 
+            background-color: #0288d1; 
+            color: #fff; 
+            border-color: #29b6f6; 
+        }
+        .scan-subtab.single { border-color: var(--accent-orange); color: #ffb74d; }
+        .scan-subtab:hover:not(.active) { background-color: #1f2736; color: #fff; }
 
-        .btn-delete-scan { background-color: #b71c1c; color: #fff; border: none; padding: 4px 8px; border-radius: 4px; font-size: 0.75em; font-weight: bold; cursor: pointer; transition: 0.2s; }
-        .btn-delete-scan:hover { background-color: #d32f2f; }
+        .btn-delete-scan { 
+            background-color: rgba(183, 28, 28, 0.2); 
+            color: #ef5350; 
+            border: 1px solid rgba(239, 83, 80, 0.4); 
+            padding: 3px 6px; 
+            border-radius: 4px; 
+            font-size: 0.7rem; 
+            font-weight: 700; 
+            cursor: pointer; 
+            transition: 0.2s; 
+            white-space: nowrap;
+        }
+        .btn-delete-scan:hover { background-color: #d32f2f; color: #fff; }
 
-        .tables-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
-        @media (max-width: 850px) { .tables-grid { grid-template-columns: 1fr; } }
+        /* Tables Grid inside Card */
+        .tables-grid { 
+            display: grid; 
+            grid-template-columns: 1fr 1fr; 
+            gap: 10px; 
+            flex-grow: 1;
+        }
+        @media (max-width: 480px) { .tables-grid { grid-template-columns: 1fr; } }
+        
         .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
-        .section-title { font-size: 0.95em; font-weight: bold; color: #00bcd4; }
-        .btn-add { background-color: #008cba; color: white; border: none; border-radius: 4px; padding: 2px 8px; font-size: 0.85em; font-weight: bold; cursor: pointer; transition: 0.2s; }
-        .btn-add:hover { background-color: #005f73; }
-        table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
-        th, td { padding: 6px 8px; text-align: left; border-bottom: 1px solid #2a2a2a; }
-        th { background-color: #252525; color: #aaa; }
-        .pd-badge { background-color: #e53935; color: #fff; padding: 2px 6px; border-radius: 4px; font-weight: bold; }
-        .pd-badge-drop { background-color: #d32f2f; color: #ffeb3b; padding: 2px 6px; border-radius: 4px; font-weight: bold; animation: pulse 1.5s infinite; }
-        .pd-badge-fixed { background-color: #37474f; color: #81d4fa; border: 1px solid #00838f; padding: 2px 6px; border-radius: 4px; font-weight: bold; }
+        .section-title { font-size: 0.8rem; font-weight: 700; color: #00e5ff; text-transform: uppercase; letter-spacing: 0.5px; }
         
-        .time-left-badge { font-weight: bold; color: #ffb74d; font-size: 0.85em; background-color: #231b0c; padding: 2px 6px; border-radius: 4px; border: 1px solid #5d4037; }
-        .time-left-frozen { font-weight: bold; color: #64b5f6; font-size: 0.85em; }
+        .btn-add { 
+            background-color: #0288d1; 
+            color: white; 
+            border: none; 
+            border-radius: 4px; 
+            padding: 2px 6px; 
+            font-size: 0.75rem; 
+            font-weight: 700; 
+            cursor: pointer; 
+            transition: 0.2s; 
+        }
+        .btn-add:hover { background-color: #0277bd; }
+
+        /* Compact Modern Tables */
+        table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+        th, td { padding: 4px 6px; text-align: left; border-bottom: 1px solid #1a202c; }
+        th { background-color: var(--table-header); color: var(--text-muted); font-weight: 600; font-size: 0.72rem; }
+        tr:hover td { background-color: var(--table-row-hover); }
+
+        .pd-badge { background-color: #37474f; color: #eceff1; padding: 2px 5px; border-radius: 4px; font-weight: 700; font-size: 0.72rem; }
+        .pd-badge-drop { background-color: #b71c1c; color: #ffee58; padding: 2px 5px; border-radius: 4px; font-weight: 800; font-size: 0.72rem; animation: pulse 1.5s infinite; }
+        .pd-badge-fixed { background-color: #1a237e; color: #82b1ff; border: 1px solid #304ffe; padding: 2px 5px; border-radius: 4px; font-weight: 700; font-size: 0.72rem; }
+        
+        .time-left-badge { font-weight: 700; color: #ffb74d; font-size: 0.75rem; background-color: rgba(255, 152, 0, 0.1); padding: 2px 5px; border-radius: 4px; border: 1px solid rgba(255, 152, 0, 0.3); }
+        .time-left-frozen { font-weight: 700; color: #64b5f6; font-size: 0.75rem; }
 
         @keyframes pulse {
             0% { opacity: 1; }
-            50% { opacity: 0.6; }
+            50% { opacity: 0.5; }
             100% { opacity: 1; }
         }
 
-        .btn-group { display: flex; gap: 3px; flex-wrap: wrap; }
-        .btn-opt { background-color: #2a2a2a; color: #888; border: 1px solid #444; padding: 3px 6px; font-size: 0.75em; border-radius: 4px; cursor: pointer; transition: 0.2s; }
+        .btn-group { display: flex; gap: 2px; flex-wrap: wrap; }
+        .btn-opt { 
+            background-color: #0f121a; 
+            color: #78909c; 
+            border: 1px solid #232b3c; 
+            padding: 2px 5px; 
+            font-size: 0.68rem; 
+            border-radius: 3px; 
+            cursor: pointer; 
+            transition: 0.15s; 
+            font-weight: 600;
+        }
         .btn-opt.active-insured { background-color: #2e7d32; color: #fff; border-color: #4caf50; }
         .btn-opt.active-uninsured { background-color: #c62828; color: #fff; border-color: #ef5350; }
         .btn-opt.active-noact { background-color: #b71c1c; color: #fff; border-color: #ff1744; font-weight: bold; }
         .btn-opt.active-frozen { background-color: #1565c0; color: #fff; border-color: #42a5f5; font-weight: bold; }
         
-        .status-text { font-weight: bold; font-size: 0.85em; padding: 2px 6px; border-radius: 4px; display: inline-block; }
+        .status-text { font-weight: 700; font-size: 0.75rem; padding: 2px 4px; border-radius: 3px; display: inline-block; }
         .status-insured { color: #81c784; }
         .status-uninsured { color: #e57373; }
         .status-noact { color: #ff5252; }
         .status-frozen { color: #64b5f6; }
-        .status-pending { color: #ffb74d; font-style: italic; }
+        .status-pending { color: #ffb74d; font-style: italic; font-size: 0.72rem; }
 
-        .btn-del { background-color: transparent; color: #ef5350; border: 1px solid #ef5350; padding: 2px 6px; font-size: 0.8em; border-radius: 4px; cursor: pointer; transition: 0.2s; }
+        .btn-del { background-color: transparent; color: #ef5350; border: 1px solid rgba(239, 83, 80, 0.4); padding: 1px 5px; font-size: 0.75rem; border-radius: 3px; cursor: pointer; transition: 0.2s; }
         .btn-del:hover { background-color: #ef5350; color: #fff; }
         .btn-user-del { background-color: #c62828; color: #fff; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 0.8em; }
         .btn-user-del:hover { background-color: #e53935; }
         
-        .select-role { background: #2a2a2a; color: #fff; border: 1px solid #444; padding: 4px; border-radius: 4px; font-size: 0.85em; }
-        .empty { color: #666; font-style: italic; font-size: 0.85em; }
-        .empty-center { text-align: center; color: #888; font-style: italic; padding: 20px; background-color: #1e1e1e; border-radius: 8px; border: 1px solid #333; }
+        .select-role { background: #0f121a; color: #fff; border: 1px solid #263043; padding: 4px; border-radius: 4px; font-size: 0.85em; }
+        .empty { color: #546e7a; font-style: italic; font-size: 0.78rem; display: block; padding: 4px 0; }
+        .empty-center { text-align: center; color: var(--text-muted); font-style: italic; padding: 30px; background-color: var(--card-bg); border-radius: 10px; border: 1px solid var(--card-border); max-width: 600px; margin: 0 auto; grid-column: 1 / -1; }
     </style>
     <script>
         const ALL_SERVERS = [
@@ -1487,7 +1795,7 @@ DASHBOARD_HTML = """
             if (!items || items.length === 0) return '<span class="empty">Нет данных</span>';
             
             let html = '<table><tr><th>№</th><th>ID</th><th>PD</th><th>Статус</th>' + 
-                       (!interactive ? '<th>Слёт через</th>' : '') + 
+                       (!interactive ? '<th>Слёт</th>' : '') + 
                        (interactive ? '<th></th>' : '') + '</tr>';
             
             items.forEach((item) => {
@@ -1505,16 +1813,16 @@ DASHBOARD_HTML = """
                             ${type === 'biz' ? `<button class="btn-opt ${st === 'no_activity' && !isPending ? 'active-noact' : ''}" onclick="setStatus('${server}', '${scanId}', 'biz',${item.pos}, 'no_activity')">Без зан.</button>` : ''}
                             <button class="btn-opt ${st === 'frozen' && !isPending ? 'active-frozen' : ''}" onclick="setStatus('${server}', '${scanId}', '${type}', ${item.pos}, 'frozen')">Заморожен</button>
                         </div>
-                        ${isPending ? '<span class="status-pending">⏳ Новый (без пары)</span>' : ''}`;
+                        ${isPending ? '<span class="status-pending">⏳ Новый</span>' : ''}`;
                 } else {
                     if (isPending) {
-                        statusControl = `<span class="status-pending">⏳ Новый (без пары)</span>`;
+                        statusControl = `<span class="status-pending">⏳ Новый</span>`;
                     } else {
                         let label = 'Страховка';
                         let classNm = 'status-insured';
                         
-                        if (st === 'uninsured') { label = 'Без страховки'; classNm = 'status-uninsured'; }
-                        else if (st === 'no_activity') { label = 'Без занятости'; classNm = 'status-noact'; }
+                        if (st === 'uninsured') { label = 'Без страх.'; classNm = 'status-uninsured'; }
+                        else if (st === 'no_activity') { label = 'Без зан.'; classNm = 'status-noact'; }
                         else if (st === 'frozen') { label = '❄️ Заморожен'; classNm = 'status-frozen'; }
 
                         statusControl = `<span class="status-text ${classNm}">${label}</span>`;
@@ -1536,7 +1844,7 @@ DASHBOARD_HTML = """
                 html += `<tr>
                     <td>${item.pos}</td>
                     <td>${item.propId ? '№' + item.propId : '—'}</td>
-                    <td><span class="${badgeClass}">${displayPd} pd</span></td>
+                    <td><span class="${badgeClass}">${displayPd}</span></td>
                     <td>${statusControl}</td>
                     ${dropTimeTd}
                     ${interactive ? `<td><button class="btn-del" onclick="deleteItem('${server}', '${scanId}', '${type}',${item.pos})">✖</button></td>` : ''}
@@ -1618,7 +1926,7 @@ DASHBOARD_HTML = """
 
                 if (info.season) {
                     document.querySelectorAll(`.season-badge-${srv}`).forEach(elem => {
-                        elem.innerText = `Сезон: ${info.season.display}`;
+                        elem.innerText = `${info.season.display}`;
                     });
                 }
 
@@ -1736,11 +2044,11 @@ DASHBOARD_HTML = """
                                     </div>
                                     <div class="tables-grid">
                                         <div>
-                                            <div class="section-title">Слетающие дома (${hourTitleStr})</div>
+                                            <div class="section-title">Дома (${hourTitleStr})</div>
                                             ${renderTable(droppingHouses, srv, latestConfirmed.scanId, 'house', false, true, info)}
                                         </div>
                                         <div>
-                                            <div class="section-title">Слетающие бизнесы (${hourTitleStr})</div>
+                                            <div class="section-title">Бизнесы (${hourTitleStr})</div>
                                             ${renderTable(droppingBiz, srv, latestConfirmed.scanId, 'biz', false, true, info)}
                                         </div>
                                     </div>
@@ -1873,24 +2181,26 @@ DASHBOARD_HTML = """
         </div>
 
         <div id="tab-admin" class="tab-content">
-            <div class="server-card" style="max-width: 1100px; margin: 0 auto 20px auto;">
-                <h3>Создать нового пользователя</h3>
-                <input type="text" id="new-username" placeholder="Новый логин" style="padding: 6px; margin-right: 10px;">
-                <input type="password" id="new-password" placeholder="Новый пароль" style="padding: 6px; margin-right: 10px;">
-                <select id="new-role" class="select-role" style="padding: 6px; margin-right: 10px;">
-                    <option value="user">User</option>
-                    <option value="support">Support</option>
-                    <option value="admin">Admin</option>
-                </select>
-                <button class="btn-add" style="padding: 6px 12px;" onclick="handleCreateUser()">Создать аккаунт</button>
+            <div class="server-card" style="max-width: 1000px; margin: 0 auto 20px auto;">
+                <h3 style="margin-top:0;">Создать нового пользователя</h3>
+                <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                    <input type="text" id="new-username" placeholder="Новый логин" style="padding: 8px; background: #0f121a; border: 1px solid #263043; color: #fff; border-radius: 4px;">
+                    <input type="password" id="new-password" placeholder="Новый пароль" style="padding: 8px; background: #0f121a; border: 1px solid #263043; color: #fff; border-radius: 4px;">
+                    <select id="new-role" class="select-role" style="padding: 8px;">
+                        <option value="user">User</option>
+                        <option value="support">Support</option>
+                        <option value="admin">Admin</option>
+                    </select>
+                    <button class="btn-add" style="padding: 8px 16px; font-size: 0.85rem;" onclick="handleCreateUser()">Создать аккаунт</button>
+                </div>
             </div>
 
-            <div class="server-card" style="max-width: 1100px; margin: 0 auto 20px auto;">
-                <h3>Список пользователей</h3>
+            <div class="server-card" style="max-width: 1000px; margin: 0 auto 20px auto;">
+                <h3 style="margin-top:0;">Список пользователей</h3>
                 <div id="admin-users-table">Загрузка...</div>
             </div>
 
-            <div class="server-card" style="max-width: 1100px; margin: 0 auto;">
+            <div class="server-card" style="max-width: 1000px; margin: 0 auto;">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
                     <h3 style="margin: 0;">📜 Логи сканирования (за сегодня)</h3>
                     <button class="btn-add" onclick="loadScanLogs()">Обновить</button>
