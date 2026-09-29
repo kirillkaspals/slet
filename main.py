@@ -167,6 +167,8 @@ class ChangePasswordModel(BaseModel):
 
 # --- РАБОТА С БД POSTGRESQL И АВТОРИЗАЦИЕЙ ---
 async def init_db():
+    if not db_pool:
+        return
     async with db_pool.acquire() as conn:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -188,7 +190,6 @@ async def init_db():
             );
         """)
 
-        # Таблица для сохранения авторизационных сессий
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS user_sessions (
                 token VARCHAR(64) PRIMARY KEY,
@@ -218,7 +219,6 @@ async def check_user_access(username: str) -> bool:
     return True
 
 async def get_username_by_token(token: str) -> Optional[str]:
-    """Получить имя пользователя по токену из памяти или БД"""
     if token in active_sessions:
         return active_sessions[token]
     
@@ -234,7 +234,6 @@ async def get_username_by_token(token: str) -> Optional[str]:
                 active_sessions[token] = session["username"]
                 return session["username"]
             else:
-                # Удаляем истёкшую сессию
                 await conn.execute("DELETE FROM user_sessions WHERE token = $1", token)
     return None
 
@@ -464,6 +463,9 @@ app.add_middleware(
 
 @app.post("/api/auth/login")
 async def login(data: LoginModel, response: Response):
+    if not db_pool:
+        raise HTTPException(status_code=53, detail="База данных недоступна. Попробуйте позже.")
+
     user = await get_user_by_username(data.username)
     if not user or not pwd_context.verify(data.password, user["password_hash"]):
         raise HTTPException(status_code=400, detail="Неверный логин или пароль")
@@ -476,12 +478,11 @@ async def login(data: LoginModel, response: Response):
 
     expires_at = datetime.utcnow() + timedelta(days=SESSION_EXPIRE_DAYS)
 
-    if db_pool:
-        async with db_pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO user_sessions (token, username, expires_at) VALUES ($1, $2, $3)",
-                token, user["username"], expires_at
-            )
+    async with db_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO user_sessions (token, username, expires_at) VALUES ($1, $2, $3)",
+            token, user["username"], expires_at
+        )
     
     max_age = SESSION_EXPIRE_DAYS * 24 * 3600
     response.set_cookie(
@@ -898,71 +899,16 @@ DASHBOARD_HTML = """
         .tab-content { display: none; }
         .tab-content.active { display: block; }
 
-        /* Фильтры ближайших слётов */
-        .upcoming-filters {
-            display: flex;
-            justify-content: center;
-            gap: 12px;
-            margin-bottom: 20px;
-        }
-        .time-filter-btn {
-            background-color: #1e1e1e;
-            color: #aaa;
-            border: 1px solid #333;
-            padding: 8px 18px;
-            font-size: 0.9em;
-            font-weight: bold;
-            border-radius: 20px;
-            cursor: pointer;
-            transition: 0.2s;
-        }
-        .time-filter-btn.active {
-            background-color: #e53935;
-            color: #ffffff;
-            border-color: #ef5350;
-            box-shadow: 0 0 8px rgba(229, 57, 53, 0.4);
-        }
+        .upcoming-filters { display: flex; justify-content: center; gap: 12px; margin-bottom: 20px; }
+        .time-filter-btn { background-color: #1e1e1e; color: #aaa; border: 1px solid #333; padding: 8px 18px; font-size: 0.9em; font-weight: bold; border-radius: 20px; cursor: pointer; transition: 0.2s; }
+        .time-filter-btn.active { background-color: #e53935; color: #ffffff; border-color: #ef5350; box-shadow: 0 0 8px rgba(229, 57, 53, 0.4); }
 
-        .filter-panel {
-            background: #1e1e1e;
-            border: 1px solid #333;
-            border-radius: 8px;
-            padding: 15px;
-            margin-bottom: 20px;
-            display: flex;
-            flex-wrap: wrap;
-            gap: 20px;
-            align-items: center;
-            justify-content: center;
-        }
-        .filter-group {
-            display: flex;
-            flex-direction: column;
-            gap: 5px;
-        }
-        .filter-group label {
-            font-size: 0.85em;
-            color: #ff9800;
-            font-weight: bold;
-        }
-        .filter-select {
-            background: #2a2a2a;
-            color: #fff;
-            border: 1px solid #444;
-            padding: 6px 10px;
-            border-radius: 4px;
-            font-size: 0.9em;
-        }
-        .fav-btn {
-            cursor: pointer;
-            font-size: 1.1em;
-            user-select: none;
-            margin-right: 6px;
-            transition: transform 0.1s;
-        }
-        .fav-btn:hover {
-            transform: scale(1.2);
-        }
+        .filter-panel { background: #1e1e1e; border: 1px solid #333; border-radius: 8px; padding: 15px; margin-bottom: 20px; display: flex; flex-wrap: wrap; gap: 20px; align-items: center; justify-content: center; }
+        .filter-group { display: flex; flex-direction: column; gap: 5px; }
+        .filter-group label { font-size: 0.85em; color: #ff9800; font-weight: bold; }
+        .filter-select { background: #2a2a2a; color: #fff; border: 1px solid #444; padding: 6px 10px; border-radius: 4px; font-size: 0.9em; }
+        .fav-btn { cursor: pointer; font-size: 1.1em; user-select: none; margin-right: 6px; transition: transform 0.1s; }
+        .fav-btn:hover { transform: scale(1.2); }
 
         .servers-container { display: flex; flex-direction: column; gap: 15px; max-width: 1100px; margin: 0 auto; }
         .server-card { background-color: #1e1e1e; border: 1px solid #333; border-radius: 8px; padding: 15px 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
@@ -1022,7 +968,6 @@ DASHBOARD_HTML = """
         .btn-user-del:hover { background-color: #e53935; }
         
         .select-role { background: #2a2a2a; color: #fff; border: 1px solid #444; padding: 4px; border-radius: 4px; font-size: 0.85em; }
-        
         .empty { color: #666; font-style: italic; font-size: 0.85em; }
         .empty-center { text-align: center; color: #888; font-style: italic; padding: 20px; background-color: #1e1e1e; border-radius: 8px; border: 1px solid #333; }
     </style>
@@ -1075,40 +1020,69 @@ DASHBOARD_HTML = """
         }
 
         async function checkAuth() {
-            const res = await fetch('/api/auth/me');
-            const data = await res.json();
-            if (data.authenticated) {
-                currentUser = data;
-                document.getElementById('login-screen').style.display = 'none';
-                document.getElementById('main-dashboard').style.display = 'block';
-                document.getElementById('user-info').innerText = `Вы вошли как: ${data.username} (${data.role})`;
-                
-                const canManage = data.role === 'admin' || data.role === 'support';
-                const isAdmin = data.role === 'admin';
+            try {
+                const res = await fetch('/api/auth/me');
+                if (!res.ok) {
+                    document.getElementById('login-screen').style.display = 'block';
+                    document.getElementById('main-dashboard').style.display = 'none';
+                    return;
+                }
+                const data = await res.json();
+                if (data.authenticated) {
+                    currentUser = data;
+                    document.getElementById('login-screen').style.display = 'none';
+                    document.getElementById('main-dashboard').style.display = 'block';
+                    document.getElementById('user-info').innerText = `Вы вошли как: ${data.username} (${data.role})`;
+                    
+                    const canManage = data.role === 'admin' || data.role === 'support';
+                    const isAdmin = data.role === 'admin';
 
-                document.getElementById('btn-tab-manage').style.display = canManage ? 'inline-block' : 'none';
-                document.getElementById('btn-tab-admin').style.display = isAdmin ? 'inline-block' : 'none';
-                
-                initDashboard();
-            } else {
+                    document.getElementById('btn-tab-manage').style.display = canManage ? 'inline-block' : 'none';
+                    document.getElementById('btn-tab-admin').style.display = isAdmin ? 'inline-block' : 'none';
+                    
+                    initDashboard();
+                } else {
+                    document.getElementById('login-screen').style.display = 'block';
+                    document.getElementById('main-dashboard').style.display = 'none';
+                }
+            } catch (e) {
                 document.getElementById('login-screen').style.display = 'block';
                 document.getElementById('main-dashboard').style.display = 'none';
             }
         }
 
         async function handleLogin() {
-            const username = document.getElementById('login-username').value;
-            const password = document.getElementById('login-password').value;
-            const res = await fetch('/api/auth/login', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username, password })
-            });
-            if (res.ok) {
-                checkAuth();
-            } else {
-                const err = await res.json();
-                alert(err.detail || 'Ошибка авторизации');
+            const usernameInput = document.getElementById('login-username');
+            const passwordInput = document.getElementById('login-password');
+            const username = usernameInput.value.trim();
+            const password = passwordInput.value;
+
+            if (!username || !password) {
+                alert('Пожалуйста, введите логин и пароль.');
+                return;
+            }
+
+            try {
+                const res = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+
+                if (res.ok) {
+                    await checkAuth();
+                } else {
+                    let errorMsg = 'Ошибка авторизации';
+                    try {
+                        const err = await res.json();
+                        errorMsg = err.detail || errorMsg;
+                    } catch (e) {
+                        errorMsg = `Ошибка сервера (${res.status})`;
+                    }
+                    alert(errorMsg);
+                }
+            } catch (err) {
+                alert('Не удалось связаться с сервером. Проверьте интернет или повторите попытку позже.');
             }
         }
 
@@ -1783,9 +1757,9 @@ DASHBOARD_HTML = """
     <!-- Экран входа -->
     <div id="login-screen" class="login-box" style="display: none;">
         <h2>Авторизация</h2>
-        <input type="text" id="login-username" placeholder="Логин"><br>
-        <input type="password" id="login-password" placeholder="Пароль"><br>
-        <button onclick="handleLogin()">Войти</button>
+        <input type="text" id="login-username" placeholder="Логин" onkeydown="if(event.key==='Enter') handleLogin()"><br>
+        <input type="password" id="login-password" placeholder="Пароль" onkeydown="if(event.key==='Enter') handleLogin()"><br>
+        <button type="button" onclick="handleLogin()">Войти</button>
     </div>
 
     <!-- Основной Дашборд -->
@@ -1803,7 +1777,6 @@ DASHBOARD_HTML = """
         </div>
 
         <div id="tab-view" class="tab-content active">
-            <!-- Центрированная панель фильтрации без сортировки по времени -->
             <div class="filter-panel">
                 <div class="filter-group">
                     <label for="filter-season">Сезон слётов:</label>
@@ -1830,7 +1803,6 @@ DASHBOARD_HTML = """
         </div>
 
         <div id="tab-upcoming" class="tab-content">
-            <!-- Кнопки выбора времени слёта -->
             <div class="upcoming-filters">
                 <button id="btn-upcoming-1h" class="time-filter-btn active" onclick="setUpcomingHoursFilter(1)">В этот час</button>
                 <button id="btn-upcoming-2h" class="time-filter-btn" onclick="setUpcomingHoursFilter(2)">Через 2 часа</button>
@@ -1843,7 +1815,6 @@ DASHBOARD_HTML = """
             <div class="servers-container" id="servers-manage"></div>
         </div>
 
-        <!-- Управление пользователями и Логи сканирования для Администратора -->
         <div id="tab-admin" class="tab-content">
             <div class="server-card" style="max-width: 1100px; margin: 0 auto 20px auto;">
                 <h3>Создать нового пользователя</h3>
