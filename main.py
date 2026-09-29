@@ -2191,17 +2191,34 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
         houses = sorted(houses, key=lambda x: x["pos"])
         businesses = sorted(businesses, key=lambda x: x["pos"])
 
-        new_scan_obj = {
-            "scanId": scan_id,
-            "hourLabel": hour_label,
-            "scanTime": now_msk.strftime("%Y-%m-%d %H:%M:%S"),
-            "houses": houses,
-            "businesses": businesses,
-            "isConfirmed": is_pair,
-            "isPaired": is_pair,
-            "isActive": True,
-            "pairScanId": waiting_scan["scanId"] if is_pair else None
-        }
+        existing_scan = next((s for s in scans if s["scanId"] == scan_id), None)
+        
+        if existing_scan:
+            # Объединяем существующие данные с новыми (если пришел только один тип имущества, второй не затирается)
+            merged_houses = houses if house_entries else existing_scan.get("houses", [])
+            merged_businesses = businesses if biz_entries else existing_scan.get("businesses", [])
+
+            existing_scan["houses"] = sorted(merged_houses, key=lambda x: x["pos"])
+            existing_scan["businesses"] = sorted(merged_businesses, key=lambda x: x["pos"])
+            existing_scan["scanTime"] = now_msk.strftime("%Y-%m-%d %H:%M:%S")
+
+            if is_pair:
+                existing_scan["isConfirmed"] = True
+                existing_scan["isPaired"] = True
+                existing_scan["pairScanId"] = waiting_scan["scanId"]
+        else:
+            new_scan_obj = {
+                "scanId": scan_id,
+                "hourLabel": hour_label,
+                "scanTime": now_msk.strftime("%Y-%m-%d %H:%M:%S"),
+                "houses": houses,
+                "businesses": businesses,
+                "isConfirmed": is_pair,
+                "isPaired": is_pair,
+                "isActive": True,
+                "pairScanId": waiting_scan["scanId"] if is_pair else None
+            }
+            scans.append(new_scan_obj)
 
         if is_pair:
             waiting_scan["isConfirmed"] = True
@@ -2211,18 +2228,6 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
             for s in scans:
                 if s["scanId"] not in [scan_id, waiting_scan["scanId"]]:
                     s["isActive"] = False
-
-        existing_scan = next((s for s in scans if s["scanId"] == scan_id), None)
-        if existing_scan:
-            existing_scan["houses"] = houses
-            existing_scan["businesses"] = businesses
-            existing_scan["scanTime"] = now_msk.strftime("%Y-%m-%d %H:%M:%S")
-            if is_pair:
-                existing_scan["isConfirmed"] = True
-                existing_scan["isPaired"] = True
-                existing_scan["pairScanId"] = waiting_scan["scanId"]
-        else:
-            scans.append(new_scan_obj)
 
         await save_data_to_file_async()
 
