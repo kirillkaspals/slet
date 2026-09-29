@@ -307,11 +307,10 @@ def get_server_season_info(server: str) -> dict:
     }
 
 def get_latest_confirmed_scan(scans: List[dict]) -> Optional[dict]:
-    confirmed_scans = [s for s in scans if s.get("isConfirmed", False)]
+    """Возвращает последний подтверждённый и активный скан пары"""
+    confirmed_scans = [s for s in scans if s.get("isConfirmed", False) and s.get("isActive", True)]
     if confirmed_scans:
         return confirmed_scans[-1]
-    if scans:
-        return scans[-1]
     return None
 
 # --- АЛГОРИТМ УМНОГО СОПОСТАВЛЕНИЯ ---
@@ -384,7 +383,7 @@ def find_pairs_with_offset(prev_items: List[dict], curr_entries: List[PropertyEn
 
     return matches
 
-# --- ЛОГИКА PAYDAY И ОЧИСТКИ ОДИНОЧНЫХ СТАРЫХ СКАНОВ ---
+# --- ЛОГИКА PAYDAY И ПРОВЕРКИ АКТИВНОСТИ СКАНОВ ---
 async def process_hourly_payday():
     now_msk = datetime.now(MSK_TZ)
     is_restart_hour = (now_msk.hour == 5)
@@ -398,24 +397,19 @@ async def process_hourly_payday():
             print(f"Ошибка очистки логов сканирования: {e}")
 
     async with data_lock:
-        print(f"[{now_msk.strftime('%Y-%m-%d %H:%M:%S')}] Выполнение списания PayDay и очистка сканов...")
+        print(f"[{now_msk.strftime('%Y-%m-%d %H:%M:%S')}] Выполнение списания PayDay и проверка статусов сканов...")
         for srv, data in server_data.items():
             scans = data.get("scans", [])
             if not scans:
                 continue
 
-            valid_scans = []
+            # Помечаем одиночные сканы как неактивные, если следующая пара не пришла вовремя
             for s in scans:
                 scan_dt = datetime.strptime(s["scanTime"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=MSK_TZ)
                 time_diff = (now_msk - scan_dt).total_seconds() / 3600.0
 
-                if not s.get("hasPair", False) and time_diff >= 1.1:
-                    print(f"[{srv}] Удален одиночный устаревший скан {s['scanId']}")
-                    continue
-                valid_scans.append(s)
-
-            data["scans"] = valid_scans
-            scans = valid_scans
+                if not s.get("isPaired", False) and time_diff >= 1.5:
+                    s["isActive"] = False
 
             latest_scan = get_latest_confirmed_scan(scans)
             if not latest_scan or not latest_scan.get("isConfirmed", False):
@@ -761,6 +755,7 @@ DASHBOARD_HTML = """
         .scan-subtab { background-color: #252525; color: #888; border: 1px solid #3a3a3a; padding: 4px 12px; font-size: 0.85em; border-radius: 4px; cursor: pointer; white-space: nowrap; transition: 0.2s; }
         .scan-subtab.active { background-color: #1e88e5; color: #fff; border-color: #64b5f6; font-weight: bold; }
         .scan-subtab.single { border-color: #ff9800; color: #ffb74d; }
+        .scan-subtab.inactive { opacity: 0.5; border-color: #555; }
         .scan-subtab:hover:not(.active) { background-color: #333; color: #ddd; }
 
         .btn-delete-scan { background-color: #b71c1c; color: #fff; border: none; padding: 4px 8px; border-radius: 4px; font-size: 0.75em; font-weight: bold; cursor: pointer; transition: 0.2s; }
@@ -1447,12 +1442,16 @@ DASHBOARD_HTML = """
                     const activeScanId = activeServerScans[srv];
 
                     if (manageTabsElem) {
-                        manageTabsElem.innerHTML = scans.map(s => `
-                            <button class="scan-subtab ${s.scanId === activeScanId ? 'active' : ''} ${!s.hasPair ? 'single' : ''}" 
+                        manageTabsElem.innerHTML = scans.map(s => {
+                            let extraClass = '';
+                            if (!s.isPaired) extraClass += ' single';
+                            if (!s.isActive) extraClass += ' inactive';
+
+                            return `<button class="scan-subtab ${s.scanId === activeScanId ? 'active' : ''}${extraClass}" 
                                     onclick="selectScanTab('${srv}', '${s.scanId}')">
-                                ${s.hourLabel} ${!s.hasPair ? '⏳' : ''}
-                            </button>
-                        `).join('');
+                                ${s.hourLabel} ${!s.isPaired ? '⏳' : ''} ${!s.isActive ? '(неакт)' : ''}
+                            </button>`;
+                        }).join('');
                     }
 
                     const curScan = scans.find(s => s.scanId === activeScanId) || scans[scans.length - 1];
@@ -1695,27 +1694,27 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
             server_data[srv]["scans"] = []
 
         scans = server_data[srv]["scans"]
-        
-        last_scan = scans[-1] if scans else None
-        prev_scan = None
-        is_consecutive_hour = False
 
-        if last_scan:
-            last_scan_dt = datetime.strptime(last_scan["scanTime"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=MSK_TZ)
-            time_diff_sec = (now_msk - last_scan_dt).total_seconds()
-            
-            if 3000 <= time_diff_sec <= 4200:
-                prev_scan = last_scan
-                is_consecutive_hour = True
+        # Поиск последнего неспаренного ("ждущего") скана
+        waiting_scan = None
+        for s in reversed(scans):
+            if not s.get("isPaired", False) and s.get("isActive", True):
+                s_dt = datetime.strptime(s["scanTime"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=MSK_TZ)
+                # Если предыдущий скан был отправлен в предыдущий часовой промежуток (3000-4200 сек)
+                if 3000 <= (now_msk - s_dt).total_seconds() <= 4200:
+                    waiting_scan = s
+                    break
 
         house_entries = [e for e in payload.entries if e.propType == "house"]
         biz_entries = [e for e in payload.entries if e.propType != "house"]
 
-        prev_houses = prev_scan.get("houses", []) if (prev_scan and is_consecutive_hour) else []
-        prev_biz = prev_scan.get("businesses", []) if (prev_scan and is_consecutive_hour) else []
+        is_pair = waiting_scan is not None
 
-        house_matches = find_pairs_with_offset(prev_houses, house_entries, "house") if (prev_scan and is_consecutive_hour) else {}
-        biz_matches = find_pairs_with_offset(prev_biz, biz_entries, "biz") if (prev_scan and is_consecutive_hour) else {}
+        prev_houses = waiting_scan.get("houses", []) if is_pair else []
+        prev_biz = waiting_scan.get("businesses", []) if is_pair else []
+
+        house_matches = find_pairs_with_offset(prev_houses, house_entries, "house") if is_pair else {}
+        biz_matches = find_pairs_with_offset(prev_biz, biz_entries, "biz") if is_pair else {}
 
         houses = []
         for idx, item in enumerate(house_entries):
@@ -1738,7 +1737,7 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
                     "propId": item.propId,
                     "pos": item.pos,
                     "status": "insured",
-                    "isPendingPair": not is_consecutive_hour,
+                    "isPendingPair": not is_pair,
                     "updatedAt": now_msk.strftime("%H:%M:%S")
                 }
             houses.append(record)
@@ -1764,7 +1763,7 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
                     "propId": item.propId,
                     "pos": item.pos,
                     "status": "insured",
-                    "isPendingPair": not is_consecutive_hour,
+                    "isPendingPair": not is_pair,
                     "updatedAt": now_msk.strftime("%H:%M:%S")
                 }
             businesses.append(record)
@@ -1772,41 +1771,39 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
         houses = sorted(houses, key=lambda x: x["pos"])
         businesses = sorted(businesses, key=lambda x: x["pos"])
 
-        is_pair_found = is_consecutive_hour and (len(house_matches) > 0 or len(biz_matches) > 0)
-
-        if is_pair_found and prev_scan:
-            prev_scan["isConfirmed"] = True
-            prev_scan["hasPair"] = True
-
-        existing_scan = next((s for s in scans if s["scanId"] == scan_id), None)
-        has_houses_in_payload = len(house_entries) > 0
-        has_biz_in_payload = len(biz_entries) > 0
-
         new_scan_obj = {
             "scanId": scan_id,
             "hourLabel": hour_label,
             "scanTime": now_msk.strftime("%Y-%m-%d %H:%M:%S"),
             "houses": houses,
             "businesses": businesses,
-            "isConfirmed": is_pair_found,
-            "hasPair": is_pair_found
+            "isConfirmed": is_pair,
+            "isPaired": is_pair,
+            "isActive": True,
+            "pairScanId": waiting_scan["scanId"] if is_pair else None
         }
 
+        if is_pair:
+            waiting_scan["isConfirmed"] = True
+            waiting_scan["isPaired"] = True
+            waiting_scan["pairScanId"] = scan_id
+
+            # При появлении новой активной пары пометить все более ранние пары неактивными
+            for s in scans:
+                if s["scanId"] not in [scan_id, waiting_scan["scanId"]]:
+                    s["isActive"] = False
+
+        existing_scan = next((s for s in scans if s["scanId"] == scan_id), None)
         if existing_scan:
-            if has_houses_in_payload:
-                existing_scan["houses"] = houses
-            if has_biz_in_payload:
-                existing_scan["businesses"] = businesses
+            existing_scan["houses"] = houses
+            existing_scan["businesses"] = businesses
             existing_scan["scanTime"] = now_msk.strftime("%Y-%m-%d %H:%M:%S")
-            existing_scan["isConfirmed"] = existing_scan.get("isConfirmed", False) or is_pair_found
-            existing_scan["hasPair"] = existing_scan.get("hasPair", False) or is_pair_found
+            if is_pair:
+                existing_scan["isConfirmed"] = True
+                existing_scan["isPaired"] = True
+                existing_scan["pairScanId"] = waiting_scan["scanId"]
         else:
-            if is_consecutive_hour:
-                scans.append(new_scan_obj)
-                if len(scans) > 2:
-                    server_data[srv]["scans"] = scans[-2:]
-            else:
-                server_data[srv]["scans"] = [new_scan_obj]
+            scans.append(new_scan_obj)
 
         await save_data_to_file_async()
 
