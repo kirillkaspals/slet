@@ -39,11 +39,11 @@ ALL_SERVERS = [
 ]
 
 SEASONS_MAP = {
-    1: "По инфе",
-    2: "Скорострелы",
-    3: "Автогонки",
-    4: "По новому",
-    5: "Мотогонки"
+    1: "📱 По инфе",
+    2: "⌨️ Скорострелы",
+    3: "🏎️ Автогонки",
+    4: "✈️ По новому",
+    5: "🏍️ Мотогонки"
 }
 
 BASE_SERVER_SEASONS = {
@@ -2255,9 +2255,9 @@ DASHBOARD_HTML = """
         </div>
 
         <div class="tabs">
-            <button id="btn-tab-view" class="tab-btn active" onclick="switchTab('view')">Общий вид</button>
+            <button id="btn-tab-view" class="tab-btn active" onclick="switchTab('view')">👁️ Общий вид</button>
             <button id="btn-tab-upcoming" class="tab-btn" onclick="switchTab('upcoming')">🔥 Ближайшие слёты</button>
-            <button id="btn-tab-manage" class="tab-btn" style="display: none;" onclick="switchTab('manage')">Управление сканами</button>
+            <button id="btn-tab-manage" class="tab-btn" style="display: none;" onclick="switchTab('manage')">🛠️ Управление сканами</button>
             <button id="btn-tab-admin" class="tab-btn" style="display: none;" onclick="switchTab('admin')">👑 Админ-панель</button>
         </div>
 
@@ -2267,11 +2267,11 @@ DASHBOARD_HTML = """
                     <label for="filter-season">Сезон слётов:</label>
                     <select id="filter-season" class="filter-select" onchange="renderViewTab()">
                         <option value="all">Все сезоны</option>
-                        <option value="1">1 — По инфе</option>
-                        <option value="2">2 — Скорострелы</option>
-                        <option value="3">3 — Автогонки</option>
-                        <option value="4">4 — По новому</option>
-                        <option value="5">5 — Мотогонки</option>
+                        <option value="1">1 — 📱 По инфе</option>
+                        <option value="2">2 — ⌨️ Скорострелы</option>
+                        <option value="3">3 — 🏎️ Автогонки</option>
+                        <option value="4">4 — ✈️ По новому</option>
+                        <option value="5">5 — 🏍️ Мотогонки</option>
                     </select>
                 </div>
 
@@ -2301,28 +2301,22 @@ DASHBOARD_HTML = """
         </div>
 
         <div id="tab-admin" class="tab-content">
-            <div class="server-card" style="max-width: 1000px; margin: 0 auto 20px auto;">
-                <h3 style="margin-top:0;">Создать нового пользователя</h3>
-                <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                    <input type="text" id="new-username" placeholder="Новый логин" style="padding: 8px; background: #0f121a; border: 1px solid #263043; color: #fff; border-radius: 4px;">
-                    <input type="password" id="new-password" placeholder="Новый пароль" style="padding: 8px; background: #0f121a; border: 1px solid #263043; color: #fff; border-radius: 4px;">
+            <div style="max-width: 1200px; margin: 0 auto; background: var(--card-bg); padding: 20px; border-radius: 10px; border: 1px solid var(--card-border);">
+                <h3 style="color: var(--accent-orange); margin-top: 0;">Управление пользователями</h3>
+                <div style="display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap;">
+                    <input type="text" id="new-username" placeholder="Логин" style="background: #0f121a; border: 1px solid #263043; color: #fff; padding: 8px; border-radius: 6px;">
+                    <input type="password" id="new-password" placeholder="Пароль" style="background: #0f121a; border: 1px solid #263043; color: #fff; padding: 8px; border-radius: 6px;">
                     <select id="new-role" class="select-role" style="padding: 8px;">
                         <option value="user">User</option>
                         <option value="support">Support</option>
                         <option value="admin">Admin</option>
                     </select>
-                    <button class="btn-add" style="padding: 8px 16px; font-size: 0.85rem;" onclick="handleCreateUser()">Создать аккаунт</button>
+                    <button class="btn-add" style="padding: 8px 16px; font-size: 0.9rem;" onclick="handleCreateUser()">Создать пользователя</button>
                 </div>
-            </div>
+                <div id="admin-users-table"></div>
 
-            <div class="server-card" style="max-width: 1000px; margin: 0 auto 20px auto;">
-                <h3 style="margin-top:0;">Список пользователей</h3>
-                <div id="admin-users-table">Загрузка...</div>
-            </div>
-
-            <div class="server-card" style="max-width: 1000px; margin: 0 auto 20px auto;">
-                <h3 style="margin-top:0;">Логи полученных сканов за сегодня</h3>
-                <div id="admin-scan-logs-table">Загрузка...</div>
+                <h3 style="color: var(--accent-orange); margin-top: 30px;">Логи сканирований (последние 200)</h3>
+                <div id="admin-scan-logs-table"></div>
             </div>
         </div>
     </div>
