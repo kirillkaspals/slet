@@ -318,17 +318,18 @@ def find_pairs_with_offset(prev_items: List[dict], curr_entries: List[PropertyEn
     matches = {}
     used_prev_indices = set()
 
+    # --- ОБНОВЛЕННЫЙ АЛГОРИТМ ОПРЕДЕЛЕНИЯ СТАТУСОВ ---
     def determine_status(diff: int, p_type: str) -> str:
         if diff <= 0:
-            return "frozen" if diff == 0 else "insured"
+            return "frozen"  # 0 дельта — заморожен
         if p_type == "house":
-            return "uninsured" if diff >= 2 else "insured"
+            return "insured" if diff == 1 else "uninsured" # 1 - страх, 2+ - не страх
         else:
             if diff >= 4:
-                return "no_activity"
+                return "no_activity" # 4 - без занятости
             elif diff >= 2:
-                return "uninsured"
-            return "insured"
+                return "uninsured"   # 2 - не страх
+            return "insured"        # 1 - страх
 
     # 1. Точное сопоставление по propId
     for c_idx, curr in enumerate(curr_entries):
@@ -2117,11 +2118,14 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
 
         scans = server_data[srv]["scans"]
 
+        # 1. Поиск кандидата на пару: только НЕ спаренный скан строго предыдущего часа (~3300..3900 сек назад)
         waiting_scan = None
         for s in reversed(scans):
             if not s.get("isPaired", False) and s.get("isActive", True):
                 s_dt = datetime.strptime(s["scanTime"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=MSK_TZ)
-                if 3000 <= (now_msk - s_dt).total_seconds() <= 4200:
+                sec_diff = (now_msk - s_dt).total_seconds()
+                # 50–65 минут разницы (3000..3900 секунд)
+                if 3000 <= sec_diff <= 3900:
                     waiting_scan = s
                     break
 
@@ -2136,6 +2140,7 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
         house_matches = find_pairs_with_offset(prev_houses, house_entries, "house") if is_pair else {}
         biz_matches = find_pairs_with_offset(prev_biz, biz_entries, "biz") if is_pair else {}
 
+        # Формируем список домов
         houses = []
         for idx, item in enumerate(house_entries):
             if idx in house_matches:
@@ -2157,11 +2162,12 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
                     "propId": item.propId,
                     "pos": item.pos,
                     "status": "insured",
-                    "isPendingPair": not is_pair,
+                    "isPendingPair": not is_pair, # Ждет пару, если скан одиночный
                     "updatedAt": now_msk.strftime("%H:%M:%S")
                 }
             houses.append(record)
 
+        # Формируем список бизнесов
         businesses = []
         for idx, item in enumerate(biz_entries):
             if idx in biz_matches:
@@ -2183,7 +2189,7 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
                     "propId": item.propId,
                     "pos": item.pos,
                     "status": "insured",
-                    "isPendingPair": not is_pair,
+                    "isPendingPair": not is_pair, # Ждет пару, если скан одиночный
                     "updatedAt": now_msk.strftime("%H:%M:%S")
                 }
             businesses.append(record)
@@ -2194,7 +2200,6 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
         existing_scan = next((s for s in scans if s["scanId"] == scan_id), None)
         
         if existing_scan:
-            # Объединяем существующие данные с новыми (если пришел только один тип имущества, второй не затирается)
             merged_houses = houses if house_entries else existing_scan.get("houses", [])
             merged_businesses = businesses if biz_entries else existing_scan.get("businesses", [])
 
@@ -2220,103 +2225,12 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
             }
             scans.append(new_scan_obj)
 
+        # Если образовалась пара: помечаем предыдущий скан как спаренный, чтобы исключить его из следующих сравнений
         if is_pair:
             waiting_scan["isConfirmed"] = True
             waiting_scan["isPaired"] = True
             waiting_scan["pairScanId"] = scan_id
 
-            for s in scans:
-                if s["scanId"] not in [scan_id, waiting_scan["scanId"]]:
-                    s["isActive"] = False
-
         await save_data_to_file_async()
 
     return {"status": "ok", "scanId": scan_id, "count": len(payload.entries)}
-
-@app.post("/api/update_status")
-async def update_status(data: UpdateStatusModel, username: str = Depends(verify_editor)):
-    srv = data.server
-    async with data_lock:
-        if srv in server_data:
-            for scan in server_data[srv].get("scans", []):
-                if scan["scanId"] == data.scanId:
-                    target_key = "houses" if data.propType in ["house", "houses"] else "businesses"
-                    for item in scan[target_key]:
-                        if item["pos"] == data.pos:
-                            item["status"] = data.status
-                            item["isPendingPair"] = False
-                            await save_data_to_file_async()
-                            return {"status": "success"}
-    raise HTTPException(status_code=404, detail="Scan or Item not found")
-
-@app.post("/api/delete_item")
-async def delete_item(data: DeleteItemModel, username: str = Depends(verify_editor)):
-    srv = data.server
-    async with data_lock:
-        if srv in server_data:
-            for scan in server_data[srv].get("scans", []):
-                if scan["scanId"] == data.scanId:
-                    target_key = "houses" if data.propType in ["house", "houses"] else "businesses"
-                    scan[target_key] = [item for item in scan[target_key] if item["pos"] != data.pos]
-                    for new_idx, item in enumerate(scan[target_key], start=1):
-                        item["pos"] = new_idx
-                    await save_data_to_file_async()
-                    return {"status": "success"}
-    raise HTTPException(status_code=404, detail="Server or Scan not found")
-
-@app.post("/api/delete_scan")
-async def delete_scan(data: DeleteScanModel, username: str = Depends(verify_editor)):
-    srv = data.server
-    async with data_lock:
-        if srv in server_data and "scans" in server_data[srv]:
-            server_data[srv]["scans"] = [
-                s for s in server_data[srv]["scans"] if s["scanId"] != data.scanId
-            ]
-            await save_data_to_file_async()
-            return {"status": "success"}
-    raise HTTPException(status_code=404, detail="Scan not found")
-
-@app.post("/api/add_item")
-async def add_item(data: AddItemModel, username: str = Depends(verify_editor)):
-    srv = data.server
-    async with data_lock:
-        if srv in server_data:
-            for scan in server_data[srv].get("scans", []):
-                if scan["scanId"] == data.scanId:
-                    target_key = "houses" if data.propType in ["house", "houses"] else "businesses"
-                    existing_positions = [item["pos"] for item in scan[target_key]]
-                    new_pos = max(existing_positions, default=0) + 1
-                    
-                    new_record = {
-                        "basePd": data.pd,
-                        "pd": data.pd,
-                        "propId": data.propId,
-                        "pos": new_pos,
-                        "status": "insured",
-                        "isPendingPair": False,
-                        "updatedAt": datetime.now(MSK_TZ).strftime("%H:%M:%S")
-                    }
-                    
-                    scan[target_key].append(new_record)
-                    scan[target_key] = sorted(scan[target_key], key=lambda x: x["pos"])
-                    await save_data_to_file_async()
-                    return {"status": "success"}
-    raise HTTPException(status_code=404, detail="Server or Scan not found")
-
-@app.get("/api/paydays")
-async def get_paydays(username: str = Depends(verify_auth)):
-    async with data_lock:
-        res = {}
-        for srv, data in server_data.items():
-            scans = data.get("scans", [])
-            latest_confirmed = get_latest_confirmed_scan(scans)
-            res[srv] = {
-                "scans": scans,
-                "latestConfirmedScan": latest_confirmed,
-                "season": get_server_season_info(srv),
-                "dropRules": SERVER_DROP_RULES.get(srv, {
-                    "house": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3},
-                    "biz": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}
-                })
-            }
-        return res
