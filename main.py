@@ -316,17 +316,22 @@ def get_latest_confirmed_scan(scans: List[dict]) -> Optional[dict]:
 
 # --- АЛГОРИТМ УМНОГО СОПОСТАВЛЕНИЯ ---
 def find_pairs_with_offset(prev_items: List[dict], curr_entries: List[PropertyEntry], prop_type: str):
-    valid_diffs = {0, 1, 2} if prop_type == "house" else {0, 1, 2, 4}
     matches = {}
     used_prev_indices = set()
 
     def determine_status(diff: int, p_type: str) -> str:
-        if diff == 0:
-            return "frozen"
+        if diff <= 0:
+            return "frozen" if diff == 0 else "insured"
         if p_type == "house":
             return "uninsured" if diff >= 2 else "insured"
-        return "no_activity" if diff >= 4 else ("uninsured" if diff >= 2 else "insured")
+        else:
+            if diff >= 4:
+                return "no_activity"
+            elif diff >= 2:
+                return "uninsured"
+            return "insured"
 
+    # 1. Точное сопоставление по propId
     for c_idx, curr in enumerate(curr_entries):
         curr_prop_id = getattr(curr, 'propId', None)
         if curr_prop_id is not None:
@@ -336,12 +341,12 @@ def find_pairs_with_offset(prev_items: List[dict], curr_entries: List[PropertyEn
                 if prev.get("propId") == curr_prop_id:
                     base_pd = prev.get("basePd", prev.get("pd", 0))
                     diff = base_pd - curr.pd
-                    if diff in valid_diffs:
-                        auto_status = determine_status(diff, prop_type)
-                        matches[c_idx] = (prev, auto_status)
-                        used_prev_indices.add(p_idx)
-                        break
+                    auto_status = determine_status(diff, prop_type)
+                    matches[c_idx] = (prev, auto_status)
+                    used_prev_indices.add(p_idx)
+                    break
 
+    # 2. Сопоставление по позиции в списке pos
     for c_idx, curr in enumerate(curr_entries):
         if c_idx in matches:
             continue
@@ -350,10 +355,28 @@ def find_pairs_with_offset(prev_items: List[dict], curr_entries: List[PropertyEn
             if p_idx in used_prev_indices:
                 continue
 
+            if prev.get("pos") == curr.pos:
+                base_pd = prev.get("basePd", prev.get("pd", 0))
+                diff = base_pd - curr.pd
+                auto_status = determine_status(diff, prop_type)
+                matches[c_idx] = (prev, auto_status)
+                used_prev_indices.add(p_idx)
+                break
+
+    # 3. Резервный проход по допустимой дельте
+    for c_idx, curr in enumerate(curr_entries):
+        if c_idx in matches:
+            continue
+
+        valid_diffs = {0, 1, 2} if prop_type == "house" else {0, 1, 2, 4}
+        for p_idx, prev in enumerate(prev_items):
+            if p_idx in used_prev_indices:
+                continue
+
             base_pd = prev.get("basePd", prev.get("pd", 0))
             diff = base_pd - curr.pd
 
-            if diff in valid_diffs:
+            if diff in valid_diffs or diff < 0:
                 auto_status = determine_status(diff, prop_type)
                 matches[c_idx] = (prev, auto_status)
                 used_prev_indices.add(p_idx)
