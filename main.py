@@ -3,13 +3,13 @@ import contextlib
 import json
 import os
 import zoneinfo
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 import asyncpg
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from passlib.context import CryptContext
 from pydantic import BaseModel
 
@@ -188,6 +188,7 @@ async def init_db():
             );
         """)
 
+        # Таблица для сохранения авторизационных сессий
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS user_sessions (
                 token VARCHAR(64) PRIMARY KEY,
@@ -217,22 +218,23 @@ async def check_user_access(username: str) -> bool:
     return True
 
 async def get_username_by_token(token: str) -> Optional[str]:
+    """Получить имя пользователя по токену из памяти или БД"""
     if token in active_sessions:
         return active_sessions[token]
     
     if not db_pool:
         return None
 
-    now_utc_naive = datetime.now(timezone.utc).replace(tzinfo=None)
     async with db_pool.acquire() as conn:
         session = await conn.fetchrow(
             "SELECT username, expires_at FROM user_sessions WHERE token = $1", token
         )
         if session:
-            if session["expires_at"] > now_utc_naive:
+            if session["expires_at"] > datetime.utcnow():
                 active_sessions[token] = session["username"]
                 return session["username"]
             else:
+                # Удаляем истёкшую сессию
                 await conn.execute("DELETE FROM user_sessions WHERE token = $1", token)
     return None
 
@@ -307,46 +309,41 @@ def get_server_season_info(server: str) -> dict:
     }
 
 def get_latest_confirmed_scan(scans: List[dict]) -> Optional[dict]:
-    """Возвращает последний подтверждённый и активный скан пары"""
-    confirmed_scans = [s for s in scans if s.get("isConfirmed", False) and s.get("isActive", True)]
+    confirmed_scans = [s for s in scans if s.get("isConfirmed", False)]
     if confirmed_scans:
         return confirmed_scans[-1]
-    return None
+    dependent_scans = [s for s in scans if s.get("hasPair", False)]
+    if dependent_scans:
+        return dependent_scans[-1]
+    return scans[-1] if scans else None
 
 # --- АЛГОРИТМ УМНОГО СОПОСТАВЛЕНИЯ ---
 def find_pairs_with_offset(prev_items: List[dict], curr_entries: List[PropertyEntry], prop_type: str):
+    valid_diffs = {0, 1, 2} if prop_type == "house" else {0, 1, 2, 4}
     matches = {}
     used_prev_indices = set()
 
-    # --- ОБНОВЛЕННЫЙ АЛГОРИТМ ОПРЕДЕЛЕНИЯ СТАТУСОВ ---
     def determine_status(diff: int, p_type: str) -> str:
-        if diff <= 0:
-            return "frozen"  # 0 дельта — заморожен
+        if diff == 0:
+            return "frozen"
         if p_type == "house":
-            return "insured" if diff == 1 else "uninsured" # 1 - страх, 2+ - не страх
-        else:
-            if diff >= 4:
-                return "no_activity" # 4 - без занятости
-            elif diff >= 2:
-                return "uninsured"   # 2 - не страх
-            return "insured"        # 1 - страх
+            return "uninsured" if diff >= 2 else "insured"
+        return "no_activity" if diff >= 4 else ("uninsured" if diff >= 2 else "insured")
 
-    # 1. Точное сопоставление по propId
     for c_idx, curr in enumerate(curr_entries):
-        curr_prop_id = getattr(curr, 'propId', None)
-        if curr_prop_id is not None:
+        if curr.propId is not None:
             for p_idx, prev in enumerate(prev_items):
                 if p_idx in used_prev_indices:
                     continue
-                if prev.get("propId") == curr_prop_id:
-                    base_pd = prev.get("basePd", prev.get("pd", 0))
+                if prev.get("propId") == curr.propId:
+                    base_pd = prev.get("basePd", prev["pd"])
                     diff = base_pd - curr.pd
-                    auto_status = determine_status(diff, prop_type)
-                    matches[c_idx] = (prev, auto_status)
-                    used_prev_indices.add(p_idx)
-                    break
+                    if diff in valid_diffs:
+                        auto_status = determine_status(diff, prop_type)
+                        matches[c_idx] = (prev, auto_status)
+                        used_prev_indices.add(p_idx)
+                        break
 
-    # 2. Сопоставление по позиции в списке pos
     for c_idx, curr in enumerate(curr_entries):
         if c_idx in matches:
             continue
@@ -355,28 +352,10 @@ def find_pairs_with_offset(prev_items: List[dict], curr_entries: List[PropertyEn
             if p_idx in used_prev_indices:
                 continue
 
-            if prev.get("pos") == curr.pos:
-                base_pd = prev.get("basePd", prev.get("pd", 0))
-                diff = base_pd - curr.pd
-                auto_status = determine_status(diff, prop_type)
-                matches[c_idx] = (prev, auto_status)
-                used_prev_indices.add(p_idx)
-                break
-
-    # 3. Резервный проход по допустимой дельте
-    for c_idx, curr in enumerate(curr_entries):
-        if c_idx in matches:
-            continue
-
-        valid_diffs = {0, 1, 2} if prop_type == "house" else {0, 1, 2, 4}
-        for p_idx, prev in enumerate(prev_items):
-            if p_idx in used_prev_indices:
-                continue
-
-            base_pd = prev.get("basePd", prev.get("pd", 0))
+            base_pd = prev.get("basePd", prev["pd"])
             diff = base_pd - curr.pd
 
-            if diff in valid_diffs or diff < 0:
+            if diff in valid_diffs:
                 auto_status = determine_status(diff, prop_type)
                 matches[c_idx] = (prev, auto_status)
                 used_prev_indices.add(p_idx)
@@ -384,7 +363,7 @@ def find_pairs_with_offset(prev_items: List[dict], curr_entries: List[PropertyEn
 
     return matches
 
-# --- ЛОГИКА PAYDAY И ПРОВЕРКИ АКТИВНОСТИ СКАНОВ ---
+# --- ЛОГИКА PAYDAY ---
 async def process_hourly_payday():
     now_msk = datetime.now(MSK_TZ)
     is_restart_hour = (now_msk.hour == 5)
@@ -398,21 +377,14 @@ async def process_hourly_payday():
             print(f"Ошибка очистки логов сканирования: {e}")
 
     async with data_lock:
-        print(f"[{now_msk.strftime('%Y-%m-%d %H:%M:%S')}] Выполнение списания PayDay и проверка статусов сканов...")
+        print(f"[{now_msk.strftime('%Y-%m-%d %H:%M:%S')}] Выполнение списания PayDay (Рестарт: {is_restart_hour})...")
         for srv, data in server_data.items():
             scans = data.get("scans", [])
             if not scans:
                 continue
-
-            for s in scans:
-                scan_dt = datetime.strptime(s["scanTime"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=MSK_TZ)
-                time_diff = (now_msk - scan_dt).total_seconds() / 3600.0
-
-                if not s.get("isPaired", False) and time_diff >= 1.5:
-                    s["isActive"] = False
-
+            
             latest_scan = get_latest_confirmed_scan(scans)
-            if not latest_scan or not latest_scan.get("isConfirmed", False):
+            if not latest_scan:
                 continue
 
             updated_houses = []
@@ -422,7 +394,7 @@ async def process_hourly_payday():
                     continue
 
                 st = h.get("status", "insured")
-                if st != "frozen" and not is_restart_hour:
+                if st != "frozen":
                     decrement = 1 if st == "insured" else 2
                     h["pd"] -= decrement
                 
@@ -439,7 +411,7 @@ async def process_hourly_payday():
                     continue
 
                 st = b.get("status", "insured")
-                if st != "frozen" and not is_restart_hour:
+                if st != "frozen":
                     decrement = 1 if st == "insured" else (2 if st == "uninsured" else 4)
                     b["pd"] -= decrement
                 
@@ -502,14 +474,13 @@ async def login(data: LoginModel, response: Response):
     token = os.urandom(24).hex()
     active_sessions[token] = user["username"]
 
-    expires_at_dt = datetime.now(timezone.utc) + timedelta(days=SESSION_EXPIRE_DAYS)
-    expires_at_db = expires_at_dt.replace(tzinfo=None)
+    expires_at = datetime.utcnow() + timedelta(days=SESSION_EXPIRE_DAYS)
 
     if db_pool:
         async with db_pool.acquire() as conn:
             await conn.execute(
                 "INSERT INTO user_sessions (token, username, expires_at) VALUES ($1, $2, $3)",
-                token, user["username"], expires_at_db
+                token, user["username"], expires_at
             )
     
     max_age = SESSION_EXPIRE_DAYS * 24 * 3600
@@ -517,7 +488,7 @@ async def login(data: LoginModel, response: Response):
         key="session_token",
         value=token,
         max_age=max_age,
-        expires=expires_at_dt,
+        expires=expires_at,
         httponly=True,
         samesite="lax"
     )
@@ -652,497 +623,378 @@ async def change_password(data: ChangePasswordModel, current_admin: str = Depend
 
     return {"status": "success"}
 
-# --- ДАШБОРД (HTML / CSS / JS) ---
+# --- ЭНДПОИНТЫ API МОНИТОРИНГА ---
+
+@app.get("/", response_class=HTMLResponse)
+async def get_dashboard():
+    return HTMLResponse(content=DASHBOARD_HTML)
+
+@app.post("/api/paydays")
+async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header(None)):
+    if x_secret_key != SECRET_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Invalid Secret Key"
+        )
+
+    srv = payload.server
+    scanner_name = payload.scanner or "unknown"
+    now_msk = datetime.now(MSK_TZ)
+    hour_label = now_msk.strftime("%H:00")
+    scan_id = f"{now_msk.strftime('%Y-%m-%d')} {hour_label}"
+
+    if db_pool:
+        try:
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO scan_logs (server, scanner, created_at) VALUES ($1, $2, $3)",
+                    srv, scanner_name, now_msk.replace(tzinfo=None)
+                )
+        except Exception as e:
+            print(f"Ошибка сохранения лога сканирования в БД: {e}")
+
+    async with data_lock:
+        if srv not in server_data:
+            server_data[srv] = {"scans": []}
+        if "scans" not in server_data[srv]:
+            server_data[srv]["scans"] = []
+
+        scans = server_data[srv]["scans"]
+        
+        prev_scan = None
+        if len(scans) > 0:
+            prev_scan = scans[-1] if scans[-1]["scanId"] != scan_id else (scans[-2] if len(scans) > 1 else None)
+
+        house_entries = [e for e in payload.entries if e.propType == "house"]
+        biz_entries = [e for e in payload.entries if e.propType != "house"]
+
+        prev_houses = prev_scan.get("houses", []) if prev_scan else []
+        prev_biz = prev_scan.get("businesses", []) if prev_scan else []
+
+        house_matches = find_pairs_with_offset(prev_houses, house_entries, "house") if prev_scan else {}
+        biz_matches = find_pairs_with_offset(prev_biz, biz_entries, "biz") if prev_scan else {}
+
+        houses = []
+        for idx, item in enumerate(house_entries):
+            if idx in house_matches:
+                prev_item, auto_status = house_matches[idx]
+                prev_item["isPendingPair"] = False
+                record = {
+                    "basePd": item.pd,
+                    "pd": item.pd,
+                    "propId": item.propId,
+                    "pos": item.pos,
+                    "status": auto_status,
+                    "isPendingPair": False,
+                    "updatedAt": now_msk.strftime("%H:%M:%S")
+                }
+            else:
+                saved_status = "insured"
+                if prev_scan:
+                    matched_prev = None
+                    if item.propId is not None:
+                        matched_prev = next((ph for ph in prev_houses if ph.get("propId") == item.propId), None)
+                    if not matched_prev and idx < len(prev_houses):
+                        matched_prev = prev_houses[idx]
+                    if matched_prev and "status" in matched_prev:
+                        saved_status = matched_prev["status"]
+
+                record = {
+                    "basePd": item.pd,
+                    "pd": item.pd,
+                    "propId": item.propId,
+                    "pos": item.pos,
+                    "status": saved_status,
+                    "isPendingPair": True,
+                    "updatedAt": now_msk.strftime("%H:%M:%S")
+                }
+            houses.append(record)
+
+        businesses = []
+        for idx, item in enumerate(biz_entries):
+            if idx in biz_matches:
+                prev_item, auto_status = biz_matches[idx]
+                prev_item["isPendingPair"] = False
+                record = {
+                    "basePd": item.pd,
+                    "pd": item.pd,
+                    "propId": item.propId,
+                    "pos": item.pos,
+                    "status": auto_status,
+                    "isPendingPair": False,
+                    "updatedAt": now_msk.strftime("%H:%M:%S")
+                }
+            else:
+                saved_status = "insured"
+                if prev_scan:
+                    matched_prev = None
+                    if item.propId is not None:
+                        matched_prev = next((pb for pb in prev_biz if pb.get("propId") == item.propId), None)
+                    if not matched_prev and idx < len(prev_biz):
+                        matched_prev = prev_biz[idx]
+                    if matched_prev and "status" in matched_prev:
+                        saved_status = matched_prev["status"]
+
+                record = {
+                    "basePd": item.pd,
+                    "pd": item.pd,
+                    "propId": item.propId,
+                    "pos": item.pos,
+                    "status": saved_status,
+                    "isPendingPair": True,
+                    "updatedAt": now_msk.strftime("%H:%M:%S")
+                }
+            businesses.append(record)
+
+        houses = sorted(houses, key=lambda x: x["pos"])
+        businesses = sorted(businesses, key=lambda x: x["pos"])
+
+        is_pair_found = (len(house_matches) > 0 or len(biz_matches) > 0)
+
+        if is_pair_found and prev_scan:
+            prev_scan["isConfirmed"] = True
+            prev_scan["hasPair"] = True
+
+        existing_scan = next((s for s in scans if s["scanId"] == scan_id), None)
+        has_houses_in_payload = len(house_entries) > 0
+        has_biz_in_payload = len(biz_entries) > 0
+
+        if existing_scan:
+            if has_houses_in_payload:
+                existing_scan["houses"] = houses
+            if has_biz_in_payload:
+                existing_scan["businesses"] = businesses
+            existing_scan["scanTime"] = now_msk.strftime("%Y-%m-%d %H:%M:%S")
+            existing_scan["isConfirmed"] = existing_scan.get("isConfirmed", False) or is_pair_found
+            existing_scan["hasPair"] = existing_scan.get("hasPair", False) or is_pair_found
+        else:
+            scans.append({
+                "scanId": scan_id,
+                "hourLabel": hour_label,
+                "scanTime": now_msk.strftime("%Y-%m-%d %H:%M:%S"),
+                "houses": houses,
+                "businesses": businesses,
+                "isConfirmed": is_pair_found,
+                "hasPair": is_pair_found
+            })
+
+        if is_pair_found and len(scans) > 2:
+            server_data[srv]["scans"] = scans[-2:]
+
+        await save_data_to_file_async()
+
+    return {"status": "ok", "scanId": scan_id, "count": len(payload.entries)}
+
+@app.post("/api/update_status")
+async def update_status(data: UpdateStatusModel, username: str = Depends(verify_editor)):
+    srv = data.server
+    async with data_lock:
+        if srv in server_data:
+            for scan in server_data[srv].get("scans", []):
+                if scan["scanId"] == data.scanId:
+                    target_key = "houses" if data.propType in ["house", "houses"] else "businesses"
+                    for item in scan[target_key]:
+                        if item["pos"] == data.pos:
+                            item["status"] = data.status
+                            item["isPendingPair"] = False
+                            await save_data_to_file_async()
+                            return {"status": "success"}
+    raise HTTPException(status_code=404, detail="Scan or Item not found")
+
+@app.post("/api/delete_item")
+async def delete_item(data: DeleteItemModel, username: str = Depends(verify_editor)):
+    srv = data.server
+    async with data_lock:
+        if srv in server_data:
+            for scan in server_data[srv].get("scans", []):
+                if scan["scanId"] == data.scanId:
+                    target_key = "houses" if data.propType in ["house", "houses"] else "businesses"
+                    scan[target_key] = [item for item in scan[target_key] if item["pos"] != data.pos]
+                    await save_data_to_file_async()
+                    return {"status": "success"}
+    raise HTTPException(status_code=404, detail="Server or Scan not found")
+
+@app.post("/api/delete_scan")
+async def delete_scan(data: DeleteScanModel, username: str = Depends(verify_editor)):
+    srv = data.server
+    async with data_lock:
+        if srv in server_data and "scans" in server_data[srv]:
+            server_data[srv]["scans"] = [
+                s for s in server_data[srv]["scans"] if s["scanId"] != data.scanId
+            ]
+            await save_data_to_file_async()
+            return {"status": "success"}
+    raise HTTPException(status_code=404, detail="Scan not found")
+
+@app.post("/api/add_item")
+async def add_item(data: AddItemModel, username: str = Depends(verify_editor)):
+    srv = data.server
+    async with data_lock:
+        if srv in server_data:
+            for scan in server_data[srv].get("scans", []):
+                if scan["scanId"] == data.scanId:
+                    target_key = "houses" if data.propType in ["house", "houses"] else "businesses"
+                    existing_positions = [item["pos"] for item in scan[target_key]]
+                    new_pos = max(existing_positions, default=0) + 1
+                    
+                    new_record = {
+                        "basePd": data.pd,
+                        "pd": data.pd,
+                        "propId": data.propId,
+                        "pos": new_pos,
+                        "status": "insured",
+                        "isPendingPair": False,
+                        "updatedAt": datetime.now(MSK_TZ).strftime("%H:%M:%S")
+                    }
+                    
+                    scan[target_key].append(new_record)
+                    scan[target_key] = sorted(scan[target_key], key=lambda x: x["pos"])
+                    await save_data_to_file_async()
+                    return {"status": "success"}
+    raise HTTPException(status_code=404, detail="Server or Scan not found")
+
+@app.get("/api/paydays")
+async def get_paydays(username: str = Depends(verify_auth)):
+    async with data_lock:
+        res = {}
+        for srv, data in server_data.items():
+            scans = data.get("scans", [])
+            latest_confirmed = get_latest_confirmed_scan(scans)
+            res[srv] = {
+                "scans": scans,
+                "latestConfirmedScan": latest_confirmed,
+                "season": get_server_season_info(srv),
+                "dropRules": SERVER_DROP_RULES.get(srv, {
+                    "house": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3},
+                    "biz": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}
+                })
+            }
+        return res
+
+# --- ДАШБОРД ---
 DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Arizona RP — Мониторинг Слётов</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
-        :root {
-            --bg-main: #0b0f17;
-            --bg-card: #151c28;
-            --bg-card-hover: #1c2536;
-            --bg-input: #1e293b;
-            --border-color: #232d3f;
-            --accent-primary: #6366f1;
-            --accent-primary-hover: #4f46e5;
-            --accent-glow: rgba(99, 102, 241, 0.25);
-            --accent-danger: #ef4444;
-            --accent-warning: #f59e0b;
-            --accent-success: #10b981;
-            --accent-info: #06b6d4;
-            --text-main: #f8fafc;
-            --text-muted: #94a3b8;
-            --text-dim: #64748b;
-            --radius-sm: 8px;
-            --radius-md: 12px;
-            --radius-lg: 16px;
-        }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #121212; color: #e0e0e0; margin: 0; padding: 20px; }
+        h1 { text-align: center; color: #ff9800; margin-bottom: 20px; }
+        
+        .login-box { max-width: 400px; margin: 80px auto; background: #1e1e1e; padding: 30px; border-radius: 8px; border: 1px solid #333; text-align: center; }
+        .login-box input { width: 90%; padding: 10px; margin: 10px 0; background: #2a2a2a; border: 1px solid #444; color: #fff; border-radius: 4px; }
+        .login-box button { width: 95%; padding: 10px; background: #ff9800; border: none; font-weight: bold; cursor: pointer; border-radius: 4px; color: #121212; }
 
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            -webkit-tap-highlight-color: transparent;
-        }
+        .user-nav { display: flex; justify-content: space-between; align-items: center; max-width: 1100px; margin: 0 auto 20px auto; }
+        .btn-logout { background: #c62828; color: white; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; }
 
-        body {
-            background-color: var(--bg-main);
-            color: var(--text-main);
-            padding: 12px;
-            min-height: 100vh;
-        }
-
-        @media (min-width: 768px) {
-            body { padding: 24px; }
-        }
-
-        /* --- Header & Title --- */
-        .app-header {
-            text-align: center;
-            margin-bottom: 20px;
-        }
-
-        h1 {
-            font-size: 1.5rem;
-            font-weight: 700;
-            background: linear-gradient(135deg, #a5b4fc 0%, #6366f1 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            letter-spacing: -0.02em;
-        }
-
-        @media (min-width: 768px) {
-            h1 { font-size: 2rem; margin-bottom: 8px; }
-        }
-
-        /* --- Login Box --- */
-        .login-box {
-            max-width: 380px;
-            margin: 60px auto;
-            background: var(--bg-card);
-            padding: 28px;
-            border-radius: var(--radius-lg);
-            border: 1px solid var(--border-color);
-            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.5);
-            text-align: center;
-        }
-
-        .login-box h2 {
-            margin-bottom: 20px;
-            font-size: 1.25rem;
-            color: var(--text-main);
-        }
-
-        .login-box input {
-            width: 100%;
-            padding: 12px 14px;
-            margin-bottom: 14px;
-            background: var(--bg-input);
-            border: 1px solid var(--border-color);
-            color: var(--text-main);
-            border-radius: var(--radius-sm);
-            font-size: 0.95rem;
-            outline: none;
-            transition: border-color 0.2s;
-        }
-
-        .login-box input:focus {
-            border-color: var(--accent-primary);
-        }
-
-        .login-box button {
-            width: 100%;
-            padding: 12px;
-            background: linear-gradient(135deg, var(--accent-primary) 0%, var(--accent-primary-hover) 100%);
-            border: none;
-            font-weight: 600;
-            cursor: pointer;
-            border-radius: var(--radius-sm);
-            color: #fff;
-            font-size: 0.95rem;
-            box-shadow: 0 4px 12px var(--accent-glow);
-            transition: opacity 0.2s;
-        }
-
-        .login-box button:active { opacity: 0.85; }
-
-        /* --- User Navigation & Info --- */
-        .user-nav {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            max-width: 1200px;
-            margin: 0 auto 16px auto;
-            background: var(--bg-card);
-            padding: 10px 16px;
-            border-radius: var(--radius-md);
-            border: 1px solid var(--border-color);
-            font-size: 0.85rem;
-        }
-
-        .btn-logout {
-            background: rgba(239, 68, 68, 0.15);
-            color: #fca5a5;
-            border: 1px solid rgba(239, 68, 68, 0.3);
-            padding: 6px 14px;
-            border-radius: var(--radius-sm);
-            cursor: pointer;
-            font-weight: 500;
-            font-size: 0.8rem;
-            transition: all 0.2s;
-        }
-
-        .btn-logout:hover {
-            background: rgba(239, 68, 68, 0.25);
-            color: #fff;
-        }
-
-        /* --- Tabs --- */
-        .tabs {
-            display: flex;
-            justify-content: flex-start;
-            gap: 8px;
-            margin-bottom: 20px;
-            max-width: 1200px;
-            margin-left: auto;
-            margin-right: auto;
-            overflow-x: auto;
-            padding-bottom: 4px;
-            -webkit-overflow-scrolling: touch;
-        }
-
-        .tab-btn {
-            background-color: var(--bg-card);
-            color: var(--text-muted);
-            border: 1px solid var(--border-color);
-            padding: 10px 18px;
-            font-size: 0.85rem;
-            font-weight: 600;
-            border-radius: var(--radius-md);
-            cursor: pointer;
-            white-space: nowrap;
-            transition: all 0.2s;
-            flex-shrink: 0;
-        }
-
-        .tab-btn.active {
-            background: var(--accent-primary);
-            color: #ffffff;
-            border-color: var(--accent-primary);
-            box-shadow: 0 4px 14px var(--accent-glow);
-        }
+        .tabs { display: flex; justify-content: center; gap: 10px; margin-bottom: 25px; }
+        .tab-btn { background-color: #1e1e1e; color: #aaa; border: 1px solid #333; padding: 10px 24px; font-size: 1em; font-weight: bold; border-radius: 6px; cursor: pointer; transition: 0.2s; }
+        .tab-btn.active { background-color: #ff9800; color: #121212; border-color: #ff9800; }
+        .tab-btn:hover:not(.active) { background-color: #2a2a2a; color: #fff; }
 
         .tab-content { display: none; }
         .tab-content.active { display: block; }
 
-        /* --- Upcoming Filters --- */
+        /* Фильтры ближайших слётов */
         .upcoming-filters {
             display: flex;
             justify-content: center;
-            gap: 8px;
+            gap: 12px;
             margin-bottom: 20px;
         }
-
         .time-filter-btn {
-            background-color: var(--bg-card);
-            color: var(--text-muted);
-            border: 1px solid var(--border-color);
-            padding: 8px 16px;
-            font-size: 0.85rem;
-            font-weight: 600;
+            background-color: #1e1e1e;
+            color: #aaa;
+            border: 1px solid #333;
+            padding: 8px 18px;
+            font-size: 0.9em;
+            font-weight: bold;
             border-radius: 20px;
             cursor: pointer;
-            transition: all 0.2s;
+            transition: 0.2s;
         }
-
         .time-filter-btn.active {
-            background-color: var(--accent-danger);
+            background-color: #e53935;
             color: #ffffff;
-            border-color: var(--accent-danger);
-            box-shadow: 0 0 12px rgba(239, 68, 68, 0.4);
+            border-color: #ef5350;
+            box-shadow: 0 0 8px rgba(229, 57, 53, 0.4);
         }
 
-        /* --- Filter Panel --- */
         .filter-panel {
-            background: var(--bg-card);
-            border: 1px solid var(--border-color);
-            border-radius: var(--radius-md);
-            padding: 12px 16px;
-            margin: 0 auto 20px auto;
-            max-width: 1200px;
+            background: #1e1e1e;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 20px;
             display: flex;
             flex-wrap: wrap;
-            gap: 12px;
+            gap: 20px;
             align-items: center;
+            justify-content: center;
         }
-
         .filter-group {
             display: flex;
             flex-direction: column;
-            gap: 4px;
-            flex: 1 1 140px;
+            gap: 5px;
         }
-
         .filter-group label {
-            font-size: 0.75rem;
-            color: var(--text-muted);
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
+            font-size: 0.85em;
+            color: #ff9800;
+            font-weight: bold;
         }
-
         .filter-select {
-            background: var(--bg-input);
-            color: var(--text-main);
-            border: 1px solid var(--border-color);
-            padding: 8px 12px;
-            border-radius: var(--radius-sm);
-            font-size: 0.85rem;
-            outline: none;
-            width: 100%;
+            background: #2a2a2a;
+            color: #fff;
+            border: 1px solid #444;
+            padding: 6px 10px;
+            border-radius: 4px;
+            font-size: 0.9em;
         }
-
         .fav-btn {
             cursor: pointer;
-            font-size: 1.1rem;
+            font-size: 1.1em;
             user-select: none;
             margin-right: 6px;
-            transition: transform 0.15s ease;
-            display: inline-block;
+            transition: transform 0.1s;
+        }
+        .fav-btn:hover {
+            transform: scale(1.2);
         }
 
-        .fav-btn:hover { transform: scale(1.2); }
+        .servers-container { display: flex; flex-direction: column; gap: 15px; max-width: 1100px; margin: 0 auto; }
+        .server-card { background-color: #1e1e1e; border: 1px solid #333; border-radius: 8px; padding: 15px 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+        .server-header { border-bottom: 1px solid #333; padding-bottom: 8px; margin-bottom: 12px; }
+        .server-title { font-size: 1.3em; font-weight: bold; color: #4caf50; display: flex; justify-content: space-between; align-items: center; }
+        .season-badge { font-size: 0.75em; background-color: #332a12; color: #ffb74d; border: 1px solid #ff9800; padding: 3px 8px; border-radius: 12px; font-weight: normal; }
+        
+        .scan-tabs-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid #2a2a2a; padding-bottom: 6px; }
+        .scan-tabs-container { display: flex; gap: 6px; overflow-x: auto; }
+        .scan-subtab { background-color: #252525; color: #888; border: 1px solid #3a3a3a; padding: 4px 12px; font-size: 0.85em; border-radius: 4px; cursor: pointer; white-space: nowrap; transition: 0.2s; }
+        .scan-subtab.active { background-color: #1e88e5; color: #fff; border-color: #64b5f6; font-weight: bold; }
+        .scan-subtab.single { border-color: #ff9800; color: #ffb74d; }
+        .scan-subtab:hover:not(.active) { background-color: #333; color: #ddd; }
 
-        /* --- Servers Grid & Cards --- */
-        .servers-container {
-            display: flex;
-            flex-direction: column;
-            gap: 16px;
-            max-width: 1200px;
-            margin: 0 auto;
-        }
+        .btn-delete-scan { background-color: #b71c1c; color: #fff; border: none; padding: 4px 8px; border-radius: 4px; font-size: 0.75em; font-weight: bold; cursor: pointer; transition: 0.2s; }
+        .btn-delete-scan:hover { background-color: #d32f2f; }
 
-        .server-card {
-            background-color: var(--bg-card);
-            border: 1px solid var(--border-color);
-            border-radius: var(--radius-md);
-            padding: 16px;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
-            transition: border-color 0.2s;
-        }
-
-        .server-card:hover {
-            border-color: #334155;
-        }
-
-        .server-header {
-            border-bottom: 1px solid var(--border-color);
-            padding-bottom: 10px;
-            margin-bottom: 14px;
-        }
-
-        .server-title {
-            font-size: 1.1rem;
-            font-weight: 700;
-            color: var(--text-main);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-wrap: wrap;
-            gap: 8px;
-        }
-
-        .season-badge {
-            font-size: 0.75rem;
-            background: rgba(245, 158, 11, 0.1);
-            color: var(--accent-warning);
-            border: 1px solid rgba(245, 158, 11, 0.25);
-            padding: 3px 10px;
-            border-radius: 12px;
-            font-weight: 500;
-        }
-
-        /* Scan Subtabs Bar */
-        .scan-tabs-bar {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 14px;
-            border-bottom: 1px solid var(--border-color);
-            padding-bottom: 8px;
-            gap: 10px;
-        }
-
-        .scan-tabs-container {
-            display: flex;
-            gap: 6px;
-            overflow-x: auto;
-            padding-bottom: 4px;
-            -webkit-overflow-scrolling: touch;
-        }
-
-        .scan-subtab {
-            background-color: var(--bg-input);
-            color: var(--text-muted);
-            border: 1px solid var(--border-color);
-            padding: 5px 12px;
-            font-size: 0.8rem;
-            border-radius: var(--radius-sm);
-            cursor: pointer;
-            white-space: nowrap;
-            transition: all 0.2s;
-        }
-
-        .scan-subtab.active {
-            background-color: var(--accent-primary);
-            color: #fff;
-            border-color: var(--accent-primary);
-            font-weight: 600;
-        }
-
-        .scan-subtab.single { border-color: rgba(245, 158, 11, 0.5); color: var(--accent-warning); }
-        .scan-subtab.inactive { opacity: 0.4; }
-
-        .btn-delete-scan {
-            background-color: rgba(239, 68, 68, 0.15);
-            color: #fca5a5;
-            border: 1px solid rgba(239, 68, 68, 0.3);
-            padding: 4px 10px;
-            border-radius: var(--radius-sm);
-            font-size: 0.75rem;
-            font-weight: 600;
-            cursor: pointer;
-            white-space: nowrap;
-        }
-
-        .btn-delete-scan:hover { background-color: var(--accent-danger); color: #fff; }
-
-        /* Tables & Layout */
-        .tables-grid {
-            display: grid;
-            grid-template-columns: 1fr;
-            gap: 16px;
-        }
-
-        @media (min-width: 900px) {
-            .tables-grid { grid-template-columns: 1fr 1fr; gap: 20px; }
-        }
-
-        .section-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 8px;
-        }
-
-        .section-title {
-            font-size: 0.85rem;
-            font-weight: 700;
-            color: var(--accent-info);
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-        }
-
-        .btn-add {
-            background-color: rgba(99, 102, 241, 0.15);
-            color: #a5b4fc;
-            border: 1px solid rgba(99, 102, 241, 0.3);
-            border-radius: var(--radius-sm);
-            padding: 3px 10px;
-            font-size: 0.75rem;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.2s;
-        }
-
-        .btn-add:hover { background-color: var(--accent-primary); color: #fff; }
-
-        .table-responsive {
-            width: 100%;
-            overflow-x: auto;
-            -webkit-overflow-scrolling: touch;
-            border-radius: var(--radius-sm);
-            border: 1px solid var(--border-color);
-        }
-
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 0.8rem;
-            text-align: left;
-            background-color: rgba(15, 23, 42, 0.4);
-        }
-
-        th, td {
-            padding: 8px 10px;
-            border-bottom: 1px solid var(--border-color);
-            vertical-align: middle;
-        }
-
-        th {
-            background-color: var(--bg-input);
-            color: var(--text-muted);
-            font-weight: 600;
-            font-size: 0.75rem;
-            text-transform: uppercase;
-        }
-
-        tr:last-child td { border-bottom: none; }
-
-        /* Badges */
-        .pd-badge {
-            background-color: rgba(239, 68, 68, 0.2);
-            color: #fca5a5;
-            border: 1px solid rgba(239, 68, 68, 0.3);
-            padding: 2px 6px;
-            border-radius: 4px;
-            font-weight: 700;
-        }
-
-        .pd-badge-drop {
-            background-color: var(--accent-danger);
-            color: #fff;
-            padding: 2px 6px;
-            border-radius: 4px;
-            font-weight: 700;
-            animation: pulse 1.5s infinite;
-        }
-
-        .pd-badge-fixed {
-            background-color: rgba(100, 116, 139, 0.2);
-            color: #cbd5e1;
-            border: 1px solid var(--border-color);
-            padding: 2px 6px;
-            border-radius: 4px;
-            font-weight: 700;
-        }
-
-        .time-left-badge {
-            font-weight: 600;
-            color: var(--accent-warning);
-            font-size: 0.8rem;
-            background-color: rgba(245, 158, 11, 0.1);
-            padding: 3px 8px;
-            border-radius: 6px;
-            border: 1px solid rgba(245, 158, 11, 0.25);
-            display: inline-block;
-            white-space: nowrap;
-        }
-
-        .time-left-frozen {
-            font-weight: 600;
-            color: var(--accent-info);
-            font-size: 0.8rem;
-            white-space: nowrap;
-        }
+        .tables-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
+        @media (max-width: 850px) { .tables-grid { grid-template-columns: 1fr; } }
+        .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+        .section-title { font-size: 0.95em; font-weight: bold; color: #00bcd4; }
+        .btn-add { background-color: #008cba; color: white; border: none; border-radius: 4px; padding: 2px 8px; font-size: 0.85em; font-weight: bold; cursor: pointer; transition: 0.2s; }
+        .btn-add:hover { background-color: #005f73; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+        th, td { padding: 6px 8px; text-align: left; border-bottom: 1px solid #2a2a2a; }
+        th { background-color: #252525; color: #aaa; }
+        .pd-badge { background-color: #e53935; color: #fff; padding: 2px 6px; border-radius: 4px; font-weight: bold; }
+        .pd-badge-drop { background-color: #d32f2f; color: #ffeb3b; padding: 2px 6px; border-radius: 4px; font-weight: bold; animation: pulse 1.5s infinite; }
+        .pd-badge-fixed { background-color: #37474f; color: #81d4fa; border: 1px solid #00838f; padding: 2px 6px; border-radius: 4px; font-weight: bold; }
+        
+        .time-left-badge { font-weight: bold; color: #ffb74d; font-size: 0.85em; background-color: #231b0c; padding: 2px 6px; border-radius: 4px; border: 1px solid #5d4037; }
+        .time-left-frozen { font-weight: bold; color: #64b5f6; font-size: 0.85em; }
 
         @keyframes pulse {
             0% { opacity: 1; }
@@ -1150,79 +1002,29 @@ DASHBOARD_HTML = """
             100% { opacity: 1; }
         }
 
-        /* Controls in tables */
-        .btn-group {
-            display: flex;
-            gap: 4px;
-            flex-wrap: wrap;
-        }
+        .btn-group { display: flex; gap: 3px; flex-wrap: wrap; }
+        .btn-opt { background-color: #2a2a2a; color: #888; border: 1px solid #444; padding: 3px 6px; font-size: 0.75em; border-radius: 4px; cursor: pointer; transition: 0.2s; }
+        .btn-opt.active-insured { background-color: #2e7d32; color: #fff; border-color: #4caf50; }
+        .btn-opt.active-uninsured { background-color: #c62828; color: #fff; border-color: #ef5350; }
+        .btn-opt.active-noact { background-color: #b71c1c; color: #fff; border-color: #ff1744; font-weight: bold; }
+        .btn-opt.active-frozen { background-color: #1565c0; color: #fff; border-color: #42a5f5; font-weight: bold; }
+        
+        .status-text { font-weight: bold; font-size: 0.85em; padding: 2px 6px; border-radius: 4px; display: inline-block; }
+        .status-insured { color: #81c784; }
+        .status-uninsured { color: #e57373; }
+        .status-noact { color: #ff5252; }
+        .status-frozen { color: #64b5f6; }
+        .status-pending { color: #ffb74d; font-style: italic; }
 
-        .btn-opt {
-            background-color: var(--bg-input);
-            color: var(--text-muted);
-            border: 1px solid var(--border-color);
-            padding: 4px 8px;
-            font-size: 0.75rem;
-            border-radius: 4px;
-            cursor: pointer;
-            transition: all 0.15s;
-        }
-
-        .btn-opt.active-insured { background-color: var(--accent-success); color: #fff; border-color: var(--accent-success); }
-        .btn-opt.active-uninsured { background-color: var(--accent-danger); color: #fff; border-color: var(--accent-danger); }
-        .btn-opt.active-noact { background-color: #b91c1c; color: #fff; border-color: #b91c1c; font-weight: 700; }
-        .btn-opt.active-frozen { background-color: #0284c7; color: #fff; border-color: #0284c7; font-weight: 700; }
-
-        .status-text { font-weight: 600; font-size: 0.8rem; padding: 2px 6px; border-radius: 4px; display: inline-block; }
-        .status-insured { color: var(--accent-success); }
-        .status-uninsured { color: #f87171; }
-        .status-noact { color: #ef4444; }
-        .status-frozen { color: #38bdf8; }
-        .status-pending { color: var(--accent-warning); font-style: italic; }
-
-        .btn-del {
-            background-color: transparent;
-            color: #f87171;
-            border: 1px solid rgba(239, 68, 68, 0.4);
-            padding: 2px 6px;
-            font-size: 0.75rem;
-            border-radius: 4px;
-            cursor: pointer;
-        }
-
-        .btn-del:hover { background-color: var(--accent-danger); color: #fff; }
-
-        .btn-user-del {
-            background-color: rgba(239, 68, 68, 0.2);
-            color: #fca5a5;
-            border: 1px solid rgba(239, 68, 68, 0.4);
-            padding: 4px 8px;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 0.75rem;
-        }
-
-        .select-role {
-            background: var(--bg-input);
-            color: var(--text-main);
-            border: 1px solid var(--border-color);
-            padding: 4px;
-            border-radius: 4px;
-            font-size: 0.8rem;
-        }
-
-        .empty { color: var(--text-dim); font-style: italic; font-size: 0.8rem; }
-        .empty-center {
-            text-align: center;
-            color: var(--text-muted);
-            font-style: italic;
-            padding: 24px;
-            background-color: var(--bg-card);
-            border-radius: var(--radius-md);
-            border: 1px solid var(--border-color);
-            max-width: 1200px;
-            margin: 0 auto;
-        }
+        .btn-del { background-color: transparent; color: #ef5350; border: 1px solid #ef5350; padding: 2px 6px; font-size: 0.8em; border-radius: 4px; cursor: pointer; transition: 0.2s; }
+        .btn-del:hover { background-color: #ef5350; color: #fff; }
+        .btn-user-del { background-color: #c62828; color: #fff; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 0.8em; }
+        .btn-user-del:hover { background-color: #e53935; }
+        
+        .select-role { background: #2a2a2a; color: #fff; border: 1px solid #444; padding: 4px; border-radius: 4px; font-size: 0.85em; }
+        
+        .empty { color: #666; font-style: italic; font-size: 0.85em; }
+        .empty-center { text-align: center; color: #888; font-style: italic; padding: 20px; background-color: #1e1e1e; border-radius: 8px; border: 1px solid #333; }
     </style>
     <script>
         const ALL_SERVERS = [
@@ -1279,7 +1081,7 @@ DASHBOARD_HTML = """
                 currentUser = data;
                 document.getElementById('login-screen').style.display = 'none';
                 document.getElementById('main-dashboard').style.display = 'block';
-                document.getElementById('user-info').innerText = `${data.username} (${data.role})`;
+                document.getElementById('user-info').innerText = `Вы вошли как: ${data.username} (${data.role})`;
                 
                 const canManage = data.role === 'admin' || data.role === 'support';
                 const isAdmin = data.role === 'admin';
@@ -1387,17 +1189,17 @@ DASHBOARD_HTML = """
             if (!res.ok) return;
             const users = await res.json();
             
-            let html = `<div class="table-responsive"><table><tr><th>ID</th><th>Логин</th><th>Роль</th><th>Доступ</th><th>Действия</th></tr>`;
+            let html = `<table><tr><th>ID</th><th>Логин</th><th>Роль</th><th>Доступ</th><th>Действия</th></tr>`;
             users.forEach(u => {
                 const isSelf = u.username === currentUser.username;
                 
                 const toggleAccessBtn = !isSelf ? 
-                    `<button class="btn-add" onclick="toggleUserAccess(${u.id}, ${u.is_allowed})">${u.is_allowed ? 'Заблокировать' : 'Разблокировать'}</button>` : '—';
+                    `<button onclick="toggleUserAccess(${u.id}, ${u.is_allowed})">${u.is_allowed ? 'Заблокировать' : 'Разблокировать'}</button>` : '—';
                 
                 const deleteUserBtn = !isSelf ? 
                     `<button class="btn-user-del" onclick="deleteUser(${u.id}, '${u.username}')">Удалить</button>` : '';
 
-                const changePwBtn = `<button class="btn-add" style="background-color: var(--accent-warning); color: #000;" onclick="changeUserPassword(${u.id}, '${u.username}')">🔑 Пароль</button>`;
+                const changePwBtn = `<button class="btn-add" style="background-color: #f57c00;" onclick="changeUserPassword(${u.id}, '${u.username}')">🔑 Пароль</button>`;
 
                 const roleSelect = !isSelf ? `
                     <select class="select-role" onchange="changeUserRole(${u.id}, this.value)">
@@ -1412,16 +1214,14 @@ DASHBOARD_HTML = """
                     <td>${u.username}</td>
                     <td>${roleSelect}</td>
                     <td>${u.is_allowed ? '✅ Разрешен' : '❌ Заблокирован'}</td>
-                    <td>
-                        <div style="display: flex; gap: 4px; align-items: center; flex-wrap: wrap;">
-                            ${changePwBtn}
-                            ${toggleAccessBtn} 
-                            ${deleteUserBtn}
-                        </div>
+                    <td style="display: flex; gap: 5px; align-items: center; flex-wrap: wrap;">
+                        ${changePwBtn}
+                        ${toggleAccessBtn} 
+                        ${deleteUserBtn}
                     </td>
                 </tr>`;
             });
-            document.getElementById('admin-users-table').innerHTML = html + '</table></div>';
+            document.getElementById('admin-users-table').innerHTML = html + '</table>';
         }
 
         async function loadScanLogs() {
@@ -1434,15 +1234,15 @@ DASHBOARD_HTML = """
                 return;
             }
 
-            let html = `<div class="table-responsive"><table><tr><th>Время (МСК)</th><th>Сервер</th><th>Отправитель</th></tr>`;
+            let html = `<table><tr><th>Время (МСК)</th><th>Сервер</th><th>Отправитель</th></tr>`;
             logs.forEach(l => {
                 html += `<tr>
                     <td><b>${l.created_at}</b></td>
-                    <td><span style="color: var(--accent-info);">${l.server}</span></td>
-                    <td><span style="color: var(--accent-warning);">${l.scanner}</span></td>
+                    <td><span style="color: #00bcd4;">${l.server}</span></td>
+                    <td><span style="color: #ffb74d;">${l.scanner}</span></td>
                 </tr>`;
             });
-            document.getElementById('admin-scan-logs-table').innerHTML = html + '</table></div>';
+            document.getElementById('admin-scan-logs-table').innerHTML = html + '</table>';
         }
 
         async function changeUserPassword(userId, username) {
@@ -1631,10 +1431,10 @@ DASHBOARD_HTML = """
 
             let paydaysApplied = 0;
             while (paydaysApplied < neededPayDays) {
-                if (targetTime.getHours() !== 5) {
-                    paydaysApplied++;
-                }
-                if (paydaysApplied < neededPayDays) {
+                paydaysApplied++;
+                if (paydaysApplied === neededPayDays && targetTime.getHours() === 5) {
+                    targetTime.setHours(6);
+                } else if (paydaysApplied < neededPayDays) {
                     targetTime.setHours(targetTime.getHours() + 1);
                 }
             }
@@ -1656,7 +1456,7 @@ DASHBOARD_HTML = """
         function renderTable(items, server, scanId, type, interactive = true, isDropTab = false, info = {}) {
             if (!items || items.length === 0) return '<span class="empty">Нет данных</span>';
             
-            let html = '<div class="table-responsive"><table><tr><th>№</th><th>ID</th><th>PD</th><th>Статус</th>' + 
+            let html = '<table><tr><th>№</th><th>ID</th><th>PD</th><th>Статус</th>' + 
                        (!interactive ? '<th>Слёт через</th>' : '') + 
                        (interactive ? '<th></th>' : '') + '</tr>';
             
@@ -1673,12 +1473,12 @@ DASHBOARD_HTML = """
                             <button class="btn-opt ${st === 'insured' && !isPending ? 'active-insured' : ''}" onclick="setStatus('${server}', '${scanId}', '${type}', ${item.pos}, 'insured')">Страх.</button>
                             <button class="btn-opt ${st === 'uninsured' && !isPending ? 'active-uninsured' : ''}" onclick="setStatus('${server}', '${scanId}', '${type}', ${item.pos}, 'uninsured')">Не страх.</button>
                             ${type === 'biz' ? `<button class="btn-opt ${st === 'no_activity' && !isPending ? 'active-noact' : ''}" onclick="setStatus('${server}', '${scanId}', 'biz',${item.pos}, 'no_activity')">Без зан.</button>` : ''}
-                            <button class="btn-opt ${st === 'frozen' && !isPending ? 'active-frozen' : ''}" onclick="setStatus('${server}', '${scanId}', '${type}', ${item.pos}, 'frozen')">Замор.</button>
+                            <button class="btn-opt ${st === 'frozen' && !isPending ? 'active-frozen' : ''}" onclick="setStatus('${server}', '${scanId}', '${type}', ${item.pos}, 'frozen')">Заморожен</button>
                         </div>
-                        ${isPending ? '<span class="status-pending">⏳ Ждем пару</span>' : ''}`;
+                        ${isPending ? '<span class="status-pending">⏳ Новый (без пары)</span>' : ''}`;
                 } else {
                     if (isPending) {
-                        statusControl = `<span class="status-pending">⏳ Ожидание 2-го скана</span>`;
+                        statusControl = `<span class="status-pending">⏳ Новый (без пары)</span>`;
                     } else {
                         let label = 'Страховка';
                         let classNm = 'status-insured';
@@ -1704,7 +1504,7 @@ DASHBOARD_HTML = """
                 }
 
                 html += `<tr>
-                    <td><b>${item.pos}</b></td>
+                    <td>${item.pos}</td>
                     <td>${item.propId ? '№' + item.propId : '—'}</td>
                     <td><span class="${badgeClass}">${displayPd} pd</span></td>
                     <td>${statusControl}</td>
@@ -1712,7 +1512,7 @@ DASHBOARD_HTML = """
                     ${interactive ? `<td><button class="btn-del" onclick="deleteItem('${server}', '${scanId}', '${type}',${item.pos})">✖</button></td>` : ''}
                 </tr>`;
             });
-            return html + '</table></div>';
+            return html + '</table>';
         }
 
         function renderViewTab() {
@@ -1758,7 +1558,7 @@ DASHBOARD_HTML = """
                         <div class="server-header">
                             <div class="server-title">
                                 <span>
-                                    <span class="fav-btn" title="В избранное" onclick="toggleFavorite('${srv}')">${starIcon}</span>
+                                    <span class="fav-btn" title="Добавить в избранное" onclick="toggleFavorite('${srv}')">${starIcon}</span>
                                     ${displayName}
                                 </span>
                                 <span class="season-badge season-badge-${srv}">Загрузка...</span>
@@ -1802,8 +1602,8 @@ DASHBOARD_HTML = """
                     elemHouse.innerHTML = renderTable(latestConfirmed.houses, srv, latestConfirmed.scanId, 'house', false, false, info);
                     elemBiz.innerHTML = renderTable(latestConfirmed.businesses, srv, latestConfirmed.scanId, 'biz', false, false, info);
                 } else {
-                    elemHouse.innerHTML = '<span class="empty">Ожидание 2-го скана</span>';
-                    elemBiz.innerHTML = '<span class="empty">Ожидание 2-го скана</span>';
+                    elemHouse.innerHTML = '<span class="empty">Ожидание 2-й точки</span>';
+                    elemBiz.innerHTML = '<span class="empty">Ожидание 2-й точки</span>';
                 }
             }
         }
@@ -1861,16 +1661,12 @@ DASHBOARD_HTML = """
                     const activeScanId = activeServerScans[srv];
 
                     if (manageTabsElem) {
-                        manageTabsElem.innerHTML = scans.map(s => {
-                            let extraClass = '';
-                            if (!s.isPaired) extraClass += ' single';
-                            if (!s.isActive) extraClass += ' inactive';
-
-                            return `<button class="scan-subtab ${s.scanId === activeScanId ? 'active' : ''}${extraClass}" 
+                        manageTabsElem.innerHTML = scans.map(s => `
+                            <button class="scan-subtab ${s.scanId === activeScanId ? 'active' : ''} ${!s.hasPair ? 'single' : ''}" 
                                     onclick="selectScanTab('${srv}', '${s.scanId}')">
-                                ${s.hourLabel} ${!s.isPaired ? '⏳' : ''} ${!s.isActive ? '(неакт)' : ''}
-                            </button>`;
-                        }).join('');
+                                ${s.hourLabel} ${!s.hasPair ? '⚠️' : ''}
+                            </button>
+                        `).join('');
                     }
 
                     const curScan = scans.find(s => s.scanId === activeScanId) || scans[scans.length - 1];
@@ -1883,7 +1679,7 @@ DASHBOARD_HTML = """
                     }
 
                     const latestConfirmed = info.latestConfirmedScan;
-                    if (latestConfirmed && latestConfirmed.isConfirmed) {
+                    if (latestConfirmed) {
                         const houseRules = getPropRules(info, 'house');
                         const bizRules = getPropRules(info, 'biz');
 
@@ -1982,36 +1778,35 @@ DASHBOARD_HTML = """
     </script>
 </head>
 <body>
-    <div class="app-header">
-        <h1>Arizona RP — Мониторинг Слётов</h1>
-    </div>
+    <h1>Arizona RP — Мониторинг Слётов</h1>
 
     <!-- Экран входа -->
     <div id="login-screen" class="login-box" style="display: none;">
         <h2>Авторизация</h2>
-        <input type="text" id="login-username" placeholder="Логин">
-        <input type="password" id="login-password" placeholder="Пароль">
+        <input type="text" id="login-username" placeholder="Логин"><br>
+        <input type="password" id="login-password" placeholder="Пароль"><br>
         <button onclick="handleLogin()">Войти</button>
     </div>
 
     <!-- Основной Дашборд -->
     <div id="main-dashboard" style="display: none;">
         <div class="user-nav">
-            <span id="user-info">...</span>
+            <span id="user-info"></span>
             <button class="btn-logout" onclick="handleLogout()">Выйти</button>
         </div>
 
         <div class="tabs">
             <button id="btn-tab-view" class="tab-btn active" onclick="switchTab('view')">Общий вид</button>
             <button id="btn-tab-upcoming" class="tab-btn" onclick="switchTab('upcoming')">🔥 Ближайшие слёты</button>
-            <button id="btn-tab-manage" class="tab-btn" style="display: none;" onclick="switchTab('manage')">Управление</button>
+            <button id="btn-tab-manage" class="tab-btn" style="display: none;" onclick="switchTab('manage')">Управление сканами</button>
             <button id="btn-tab-admin" class="tab-btn" style="display: none;" onclick="switchTab('admin')">👑 Админ-панель</button>
         </div>
 
         <div id="tab-view" class="tab-content active">
+            <!-- Центрированная панель фильтрации без сортировки по времени -->
             <div class="filter-panel">
                 <div class="filter-group">
-                    <label for="filter-season">Сезон слётов</label>
+                    <label for="filter-season">Сезон слётов:</label>
                     <select id="filter-season" class="filter-select" onchange="renderViewTab()">
                         <option value="all">Все сезоны</option>
                         <option value="1">1 — По инфе</option>
@@ -2023,7 +1818,7 @@ DASHBOARD_HTML = """
                 </div>
 
                 <div class="filter-group">
-                    <label for="filter-fav">Серверы</label>
+                    <label for="filter-fav">Серверы:</label>
                     <select id="filter-fav" class="filter-select" onchange="renderViewTab()">
                         <option value="all">Все серверы</option>
                         <option value="fav_only">Только избранные ⭐</option>
@@ -2035,6 +1830,7 @@ DASHBOARD_HTML = """
         </div>
 
         <div id="tab-upcoming" class="tab-content">
+            <!-- Кнопки выбора времени слёта -->
             <div class="upcoming-filters">
                 <button id="btn-upcoming-1h" class="time-filter-btn active" onclick="setUpcomingHoursFilter(1)">В этот час</button>
                 <button id="btn-upcoming-2h" class="time-filter-btn" onclick="setUpcomingHoursFilter(2)">Через 2 часа</button>
@@ -2047,29 +1843,28 @@ DASHBOARD_HTML = """
             <div class="servers-container" id="servers-manage"></div>
         </div>
 
+        <!-- Управление пользователями и Логи сканирования для Администратора -->
         <div id="tab-admin" class="tab-content">
-            <div class="server-card" style="max-width: 1200px; margin: 0 auto 20px auto;">
-                <h3 style="margin-bottom: 12px; font-size: 1rem; color: var(--text-main);">Создать нового пользователя</h3>
-                <div style="display: flex; flex-wrap: wrap; gap: 10px;">
-                    <input type="text" id="new-username" placeholder="Логин" class="filter-select" style="flex: 1; min-width: 140px;">
-                    <input type="password" id="new-password" placeholder="Пароль" class="filter-select" style="flex: 1; min-width: 140px;">
-                    <select id="new-role" class="select-role" style="padding: 8px 12px;">
-                        <option value="user">User</option>
-                        <option value="support">Support</option>
-                        <option value="admin">Admin</option>
-                    </select>
-                    <button class="btn-add" style="padding: 8px 16px; background-color: var(--accent-primary); color: #fff;" onclick="handleCreateUser()">Создать</button>
-                </div>
+            <div class="server-card" style="max-width: 1100px; margin: 0 auto 20px auto;">
+                <h3>Создать нового пользователя</h3>
+                <input type="text" id="new-username" placeholder="Новый логин" style="padding: 6px; margin-right: 10px;">
+                <input type="password" id="new-password" placeholder="Новый пароль" style="padding: 6px; margin-right: 10px;">
+                <select id="new-role" class="select-role" style="padding: 6px; margin-right: 10px;">
+                    <option value="user">User</option>
+                    <option value="support">Support</option>
+                    <option value="admin">Admin</option>
+                </select>
+                <button class="btn-add" style="padding: 6px 12px;" onclick="handleCreateUser()">Создать аккаунт</button>
             </div>
 
-            <div class="server-card" style="max-width: 1200px; margin: 0 auto 20px auto;">
-                <h3 style="margin-bottom: 12px; font-size: 1rem; color: var(--text-main);">Список пользователей</h3>
+            <div class="server-card" style="max-width: 1100px; margin: 0 auto 20px auto;">
+                <h3>Список пользователей</h3>
                 <div id="admin-users-table">Загрузка...</div>
             </div>
 
-            <div class="server-card" style="max-width: 1200px; margin: 0 auto;">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-                    <h3 style="margin: 0; font-size: 1rem; color: var(--text-main);">📜 Логи сканирования (за сегодня)</h3>
+            <div class="server-card" style="max-width: 1100px; margin: 0 auto;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                    <h3 style="margin: 0;">📜 Логи сканирования (за сегодня)</h3>
                     <button class="btn-add" onclick="loadScanLogs()">Обновить</button>
                 </div>
                 <div id="admin-scan-logs-table">Загрузка логов...</div>
@@ -2080,157 +1875,6 @@ DASHBOARD_HTML = """
 </html>
 """
 
-# --- ЭНДПОИНТЫ API МОНИТОРИНГА ---
-
-@app.get("/", response_class=HTMLResponse)
-async def get_dashboard():
-    return HTMLResponse(content=DASHBOARD_HTML)
-
-@app.post("/api/paydays")
-async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header(None)):
-    if x_secret_key != SECRET_KEY:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Forbidden: Invalid Secret Key"
-        )
-
-    srv = payload.server
-    scanner_name = payload.scanner or "unknown"
-    now_msk = datetime.now(MSK_TZ)
-    hour_label = now_msk.strftime("%H:00")
-    scan_id = f"{now_msk.strftime('%Y-%m-%d')} {hour_label}"
-
-    if db_pool:
-        try:
-            async with db_pool.acquire() as conn:
-                await conn.execute(
-                    "INSERT INTO scan_logs (server, scanner, created_at) VALUES ($1, $2, $3)",
-                    srv, scanner_name, now_msk.replace(tzinfo=None)
-                )
-        except Exception as e:
-            print(f"Ошибка сохранения лога сканирования в БД: {e}")
-
-    async with data_lock:
-        if srv not in server_data:
-            server_data[srv] = {"scans": []}
-        if "scans" not in server_data[srv]:
-            server_data[srv]["scans"] = []
-
-        scans = server_data[srv]["scans"]
-
-        # 1. Поиск кандидата на пару: только НЕ спаренный скан строго предыдущего часа (~3300..3900 сек назад)
-        waiting_scan = None
-        for s in reversed(scans):
-            if not s.get("isPaired", False) and s.get("isActive", True):
-                s_dt = datetime.strptime(s["scanTime"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=MSK_TZ)
-                sec_diff = (now_msk - s_dt).total_seconds()
-                # 50–65 минут разницы (3000..3900 секунд)
-                if 3000 <= sec_diff <= 3900:
-                    waiting_scan = s
-                    break
-
-        house_entries = [e for e in payload.entries if e.propType == "house"]
-        biz_entries = [e for e in payload.entries if e.propType != "house"]
-
-        is_pair = waiting_scan is not None
-
-        prev_houses = waiting_scan.get("houses", []) if is_pair else []
-        prev_biz = waiting_scan.get("businesses", []) if is_pair else []
-
-        house_matches = find_pairs_with_offset(prev_houses, house_entries, "house") if is_pair else {}
-        biz_matches = find_pairs_with_offset(prev_biz, biz_entries, "biz") if is_pair else {}
-
-        # Формируем список домов
-        houses = []
-        for idx, item in enumerate(house_entries):
-            if idx in house_matches:
-                prev_item, auto_status = house_matches[idx]
-                prev_item["isPendingPair"] = False
-                record = {
-                    "basePd": item.pd,
-                    "pd": item.pd,
-                    "propId": item.propId,
-                    "pos": item.pos,
-                    "status": auto_status,
-                    "isPendingPair": False,
-                    "updatedAt": now_msk.strftime("%H:%M:%S")
-                }
-            else:
-                record = {
-                    "basePd": item.pd,
-                    "pd": item.pd,
-                    "propId": item.propId,
-                    "pos": item.pos,
-                    "status": "insured",
-                    "isPendingPair": not is_pair, # Ждет пару, если скан одиночный
-                    "updatedAt": now_msk.strftime("%H:%M:%S")
-                }
-            houses.append(record)
-
-        # Формируем список бизнесов
-        businesses = []
-        for idx, item in enumerate(biz_entries):
-            if idx in biz_matches:
-                prev_item, auto_status = biz_matches[idx]
-                prev_item["isPendingPair"] = False
-                record = {
-                    "basePd": item.pd,
-                    "pd": item.pd,
-                    "propId": item.propId,
-                    "pos": item.pos,
-                    "status": auto_status,
-                    "isPendingPair": False,
-                    "updatedAt": now_msk.strftime("%H:%M:%S")
-                }
-            else:
-                record = {
-                    "basePd": item.pd,
-                    "pd": item.pd,
-                    "propId": item.propId,
-                    "pos": item.pos,
-                    "status": "insured",
-                    "isPendingPair": not is_pair, # Ждет пару, если скан одиночный
-                    "updatedAt": now_msk.strftime("%H:%M:%S")
-                }
-            businesses.append(record)
-
-        houses = sorted(houses, key=lambda x: x["pos"])
-        businesses = sorted(businesses, key=lambda x: x["pos"])
-
-        existing_scan = next((s for s in scans if s["scanId"] == scan_id), None)
-        
-        if existing_scan:
-            merged_houses = houses if house_entries else existing_scan.get("houses", [])
-            merged_businesses = businesses if biz_entries else existing_scan.get("businesses", [])
-
-            existing_scan["houses"] = sorted(merged_houses, key=lambda x: x["pos"])
-            existing_scan["businesses"] = sorted(merged_businesses, key=lambda x: x["pos"])
-            existing_scan["scanTime"] = now_msk.strftime("%Y-%m-%d %H:%M:%S")
-
-            if is_pair:
-                existing_scan["isConfirmed"] = True
-                existing_scan["isPaired"] = True
-                existing_scan["pairScanId"] = waiting_scan["scanId"]
-        else:
-            new_scan_obj = {
-                "scanId": scan_id,
-                "hourLabel": hour_label,
-                "scanTime": now_msk.strftime("%Y-%m-%d %H:%M:%S"),
-                "houses": houses,
-                "businesses": businesses,
-                "isConfirmed": is_pair,
-                "isPaired": is_pair,
-                "isActive": True,
-                "pairScanId": waiting_scan["scanId"] if is_pair else None
-            }
-            scans.append(new_scan_obj)
-
-        # Если образовалась пара: помечаем предыдущий скан как спаренный, чтобы исключить его из следующих сравнений
-        if is_pair:
-            waiting_scan["isConfirmed"] = True
-            waiting_scan["isPaired"] = True
-            waiting_scan["pairScanId"] = scan_id
-
-        await save_data_to_file_async()
-
-    return {"status": "ok", "scanId": scan_id, "count": len(payload.entries)}
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
