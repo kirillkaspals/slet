@@ -178,7 +178,6 @@ async def init_db():
             );
         """)
         
-        # Таблица для хранения логов сканирования
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS scan_logs (
                 id SERIAL PRIMARY KEY,
@@ -208,7 +207,6 @@ async def check_user_access(username: str) -> bool:
     return True
 
 async def verify_auth(request: Request) -> str:
-    """Проверяет, авторизован ли пользователь."""
     token = request.cookies.get("session_token")
     if not token or token not in active_sessions:
         raise HTTPException(status_code=401, detail="Необходима авторизация")
@@ -221,14 +219,12 @@ async def verify_auth(request: Request) -> str:
     return username
 
 async def verify_admin(username: str = Depends(verify_auth)) -> str:
-    """Пропускает только пользователей с ролью admin."""
     user = await get_user_by_username(username)
     if not user or user["role"] != "admin":
         raise HTTPException(status_code=403, detail="Отказано в доступе: требуется роль администратора")
     return username
 
 async def verify_editor(username: str = Depends(verify_auth)) -> str:
-    """Пропускает пользователей с ролью admin или support."""
     user = await get_user_by_username(username)
     if not user or user["role"] not in ["admin", "support"]:
         raise HTTPException(status_code=403, detail="Отказано в доступе: требуется роль admin или support")
@@ -337,7 +333,6 @@ async def process_hourly_payday():
     now_msk = datetime.now(MSK_TZ)
     is_restart_hour = (now_msk.hour == 5)
 
-    # Очистка логов сканирования каждый день в 00:00 МСК
     if now_msk.hour == 0 and db_pool:
         try:
             async with db_pool.acquire() as conn:
@@ -357,7 +352,6 @@ async def process_hourly_payday():
             if not latest_scan:
                 continue
 
-            # ОБРАБОТКА ДОМОВ
             updated_houses = []
             for h in latest_scan.get("houses", []):
                 if h.get("isPendingPair", False):
@@ -375,7 +369,6 @@ async def process_hourly_payday():
 
             latest_scan["houses"] = sorted(updated_houses, key=lambda x: x["pos"])
 
-            # ОБРАБОТКА БИЗНЕСОВ
             updated_biz = []
             for b in latest_scan.get("businesses", []):
                 if b.get("isPendingPair", False):
@@ -482,7 +475,6 @@ async def get_users(username: str = Depends(verify_admin)):
 
 @app.get("/api/admin/scan_logs")
 async def get_scan_logs(username: str = Depends(verify_admin)):
-    """Возвращает логи сканирования за текущие сутки."""
     if not db_pool:
         return []
     async with db_pool.acquire() as conn:
@@ -532,7 +524,6 @@ async def delete_user(data: DeleteUserModel, current_admin: str = Depends(verify
         
         await conn.execute("DELETE FROM users WHERE id = $1", data.user_id)
         
-        # Завершаем сессию удаленного пользователя, если он активен
         tokens_to_remove = [t for t, u in active_sessions.items() if u == target["username"]]
         for t in tokens_to_remove:
             del active_sessions[t]
@@ -591,7 +582,6 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
     hour_label = now_msk.strftime("%H:00")
     scan_id = f"{now_msk.strftime('%Y-%m-%d')} {hour_label}"
 
-    # Запись события сканирования в базу данных
     if db_pool:
         try:
             async with db_pool.acquire() as conn:
@@ -847,7 +837,31 @@ DASHBOARD_HTML = """
         .tab-content { display: none; }
         .tab-content.active { display: block; }
 
-        /* Панель фильтров */
+        /* Фильтры ближайших слётов */
+        .upcoming-filters {
+            display: flex;
+            justify-content: center;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+        .time-filter-btn {
+            background-color: #1e1e1e;
+            color: #aaa;
+            border: 1px solid #333;
+            padding: 8px 18px;
+            font-size: 0.9em;
+            font-weight: bold;
+            border-radius: 20px;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+        .time-filter-btn.active {
+            background-color: #e53935;
+            color: #ffffff;
+            border-color: #ef5350;
+            box-shadow: 0 0 8px rgba(229, 57, 53, 0.4);
+        }
+
         .filter-panel {
             background: #1e1e1e;
             border: 1px solid #333;
@@ -964,6 +978,7 @@ DASHBOARD_HTML = """
         let currentUser = null;
         let favoriteServers = JSON.parse(localStorage.getItem('fav_servers') || '[]');
         let globalServerData = {};
+        let selectedUpcomingHours = 1; // 1, 2 или 3 часа
 
         function getPropRules(info, type) {
             const defaultRules = { insured: 2, uninsured_min: 2, uninsured_max: 3 };
@@ -1085,6 +1100,13 @@ DASHBOARD_HTML = """
                 document.getElementById('btn-tab-view').classList.add('active');
                 document.getElementById('tab-view').classList.add('active');
             }
+        }
+
+        function setUpcomingHoursFilter(hours) {
+            selectedUpcomingHours = hours;
+            document.querySelectorAll('.time-filter-btn').forEach(btn => btn.classList.remove('active'));
+            document.getElementById(`btn-upcoming-${hours}h`).classList.add('active');
+            loadData();
         }
 
         async function loadAdminUsers() {
@@ -1210,30 +1232,6 @@ DASHBOARD_HTML = """
             }
         }
 
-        async function handleCreateUser() {
-            const username = document.getElementById('new-username').value;
-            const password = document.getElementById('new-password').value;
-            const role = document.getElementById('new-role').value;
-            
-            if (!username || !password) return alert('Заполните все поля');
-
-            const res = await fetch('/api/admin/create_user', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username, password, role })
-            });
-
-            if (res.ok) {
-                alert('Пользователь создан!');
-                document.getElementById('new-username').value = '';
-                document.getElementById('new-password').value = '';
-                loadAdminUsers();
-            } else {
-                const err = await res.json();
-                alert(err.detail || 'Ошибка создания');
-            }
-        }
-
         function selectScanTab(server, scanId) {
             activeServerScans[server] = scanId;
             loadData();
@@ -1308,9 +1306,30 @@ DASHBOARD_HTML = """
             } catch(e) { console.error(e); }
         }
 
+        function calculateDropPaydays(item, typeRules) {
+            if (!item || item.isPendingPair || item.status === 'frozen') return null;
+
+            const st = item.status || 'insured';
+            const rules = typeRules || { insured: 2, uninsured_min: 2, uninsured_max: 3 };
+
+            let decrement = 1;
+            let dropLimit = rules.insured;
+
+            if (st === 'uninsured') {
+                decrement = 2;
+                dropLimit = rules.uninsured_min;
+            } else if (st === 'no_activity') {
+                decrement = 4;
+                dropLimit = rules.uninsured_min;
+            }
+
+            const neededPayDays = Math.max(0, Math.ceil((item.pd - (dropLimit - 1)) / decrement));
+            return neededPayDays;
+        }
+
         function calculateDropTime(pd, status, typeRules, propType) {
             if (status === 'frozen') {
-                return { text: '❄️ Заморожен', isFrozen: true };
+                return { text: '❄️ Заморожен', isFrozen: true, paydays: null };
             }
 
             const rules = typeRules || { insured: 2, uninsured_min: 2, uninsured_max: 3 };
@@ -1346,7 +1365,7 @@ DASHBOARD_HTML = """
             }
 
             const diffMs = targetTime.getTime() - mskNow.getTime();
-            if (diffMs <= 0) return { text: '< 1 мин', isFrozen: false };
+            if (diffMs <= 0) return { text: '< 1 мин', isFrozen: false, paydays: neededPayDays };
 
             const totalMinutes = Math.floor(diffMs / 60000);
             const hours = Math.floor(totalMinutes / 60);
@@ -1356,7 +1375,7 @@ DASHBOARD_HTML = """
             if (hours > 0) timeStr += `${hours} ч `;
             timeStr += `${minutes} мин`;
 
-            return { text: timeStr, isFrozen: false };
+            return { text: timeStr, isFrozen: false, paydays: neededPayDays };
         }
 
         function renderTable(items, server, scanId, type, interactive = true, isDropTab = false, info = {}) {
@@ -1522,27 +1541,10 @@ DASHBOARD_HTML = """
             }
         }
 
-        function willDropNextPayday(item, typeRules, propType) {
-            if (!item || item.isPendingPair) return false;
-            
-            const st = item.status || 'insured';
-            if (st === 'frozen') return false;
-            
-            const rules = typeRules || { insured: 2, uninsured_min: 2, uninsured_max: 3 };
-            
-            let decrement = 1;
-            let dropLimit = rules.insured;
-
-            if (st === 'uninsured') {
-                decrement = 2;
-                dropLimit = rules.uninsured_min;
-            } else if (st === 'no_activity') {
-                decrement = 4;
-                dropLimit = rules.uninsured_min;
-            }
-
-            const pdAfterPayday = item.pd - decrement;
-            return pdAfterPayday < dropLimit;
+        function willDropInExactHours(item, typeRules, targetHours) {
+            const paydaysToDrop = calculateDropPaydays(item, typeRules);
+            if (paydaysToDrop === null) return false;
+            return paydaysToDrop === targetHours;
         }
 
         async function loadData() {
@@ -1614,11 +1616,16 @@ DASHBOARD_HTML = """
                         const houseRules = getPropRules(info, 'house');
                         const bizRules = getPropRules(info, 'biz');
 
-                        const droppingHouses = (latestConfirmed.houses || []).filter(h => willDropNextPayday(h, houseRules, 'house'));
-                        const droppingBiz = (latestConfirmed.businesses || []).filter(b => willDropNextPayday(b, bizRules, 'biz'));
+                        const droppingHouses = (latestConfirmed.houses || []).filter(h => willDropInExactHours(h, houseRules, selectedUpcomingHours));
+                        const droppingBiz = (latestConfirmed.businesses || []).filter(b => willDropInExactHours(b, bizRules, selectedUpcomingHours));
 
                         if (droppingHouses.length > 0 || droppingBiz.length > 0) {
                             hasUpcomingDrops = true;
+                            
+                            let hourTitleStr = 'в этот час';
+                            if (selectedUpcomingHours === 2) hourTitleStr = 'через 2 часа';
+                            if (selectedUpcomingHours === 3) hourTitleStr = 'через 3 часа';
+
                             const cardUpcoming = `
                                 <div class="server-card">
                                     <div class="server-header">
@@ -1629,11 +1636,11 @@ DASHBOARD_HTML = """
                                     </div>
                                     <div class="tables-grid">
                                         <div>
-                                            <div class="section-title">Слетающие дома в PD</div>
+                                            <div class="section-title">Слетающие дома (${hourTitleStr})</div>
                                             ${renderTable(droppingHouses, srv, latestConfirmed.scanId, 'house', false, true, info)}
                                         </div>
                                         <div>
-                                            <div class="section-title">Слетающие бизнесы в PD</div>
+                                            <div class="section-title">Слетающие бизнесы (${hourTitleStr})</div>
                                             ${renderTable(droppingBiz, srv, latestConfirmed.scanId, 'biz', false, true, info)}
                                         </div>
                                     </div>
@@ -1644,7 +1651,10 @@ DASHBOARD_HTML = """
                 }
 
                 if (!hasUpcomingDrops) {
-                    containerUpcoming.innerHTML = '<div class="empty-center">В ближайший PayDay слётов имущества не ожидается</div>';
+                    let hourMsg = 'в этот час';
+                    if (selectedUpcomingHours === 2) hourMsg = 'через 2 часа';
+                    if (selectedUpcomingHours === 3) hourMsg = 'через 3 часа';
+                    containerUpcoming.innerHTML = `<div class="empty-center">Слётов имущества ${hourMsg} не ожидается</div>`;
                 }
             } catch(e) { console.error(e); }
         }
@@ -1759,6 +1769,12 @@ DASHBOARD_HTML = """
         </div>
 
         <div id="tab-upcoming" class="tab-content">
+            <!-- Кнопки выбора времени слёта -->
+            <div class="upcoming-filters">
+                <button id="btn-upcoming-1h" class="time-filter-btn active" onclick="setUpcomingHoursFilter(1)">В этот час</button>
+                <button id="btn-upcoming-2h" class="time-filter-btn" onclick="setUpcomingHoursFilter(2)">Через 2 часа</button>
+                <button id="btn-upcoming-3h" class="time-filter-btn" onclick="setUpcomingHoursFilter(3)">Через 3 часа</button>
+            </div>
             <div class="servers-container" id="servers-upcoming"></div>
         </div>
 
