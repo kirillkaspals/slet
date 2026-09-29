@@ -9,7 +9,7 @@ from typing import Dict, List, Optional
 import asyncpg
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 from passlib.context import CryptContext
 from pydantic import BaseModel
 
@@ -188,7 +188,6 @@ async def init_db():
             );
         """)
 
-        # Таблица для сохранения авторизационных сессий
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS user_sessions (
                 token VARCHAR(64) PRIMARY KEY,
@@ -218,7 +217,6 @@ async def check_user_access(username: str) -> bool:
     return True
 
 async def get_username_by_token(token: str) -> Optional[str]:
-    """Получить имя пользователя по токену из памяти или БД"""
     if token in active_sessions:
         return active_sessions[token]
     
@@ -234,7 +232,6 @@ async def get_username_by_token(token: str) -> Optional[str]:
                 active_sessions[token] = session["username"]
                 return session["username"]
             else:
-                # Удаляем истёкшую сессию
                 await conn.execute("DELETE FROM user_sessions WHERE token = $1", token)
     return None
 
@@ -312,10 +309,7 @@ def get_latest_confirmed_scan(scans: List[dict]) -> Optional[dict]:
     confirmed_scans = [s for s in scans if s.get("isConfirmed", False)]
     if confirmed_scans:
         return confirmed_scans[-1]
-    dependent_scans = [s for s in scans if s.get("hasPair", False)]
-    if dependent_scans:
-        return dependent_scans[-1]
-    return scans[-1] if scans else None
+    return None
 
 # --- АЛГОРИТМ УМНОГО СОПОСТАВЛЕНИЯ ---
 def find_pairs_with_offset(prev_items: List[dict], curr_entries: List[PropertyEntry], prop_type: str):
@@ -363,7 +357,7 @@ def find_pairs_with_offset(prev_items: List[dict], curr_entries: List[PropertyEn
 
     return matches
 
-# --- ЛОГИКА PAYDAY ---
+# --- ЛОГИКА PAYDAY И ОЧИСТКИ ОДИНОЧНЫХ СТАРЫХ СКТАНОВ ---
 async def process_hourly_payday():
     now_msk = datetime.now(MSK_TZ)
     is_restart_hour = (now_msk.hour == 5)
@@ -377,12 +371,27 @@ async def process_hourly_payday():
             print(f"Ошибка очистки логов сканирования: {e}")
 
     async with data_lock:
-        print(f"[{now_msk.strftime('%Y-%m-%d %H:%M:%S')}] Выполнение списания PayDay (Рестарт: {is_restart_hour})...")
+        print(f"[{now_msk.strftime('%Y-%m-%d %H:%M:%S')}] Выполнение списания PayDay и очистка сканов...")
         for srv, data in server_data.items():
             scans = data.get("scans", [])
             if not scans:
                 continue
-            
+
+            # Удаляем одиночные сканы, для которых так и не пришел последовательный скан спустя час
+            valid_scans = []
+            for s in scans:
+                scan_dt = datetime.strptime(s["scanTime"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=MSK_TZ)
+                time_diff = (now_msk - scan_dt).total_seconds() / 3600.0
+
+                # Если скан без пары и прождал более 1.1 часа без поддержки — удаляем
+                if not s.get("hasPair", False) and time_diff >= 1.1:
+                    print(f"[{srv}] Удален одиночный устаревший скан {s['scanId']}")
+                    continue
+                valid_scans.append(s)
+
+            data["scans"] = valid_scans
+            scans = valid_scans
+
             latest_scan = get_latest_confirmed_scan(scans)
             if not latest_scan:
                 continue
@@ -623,7 +632,7 @@ async def change_password(data: ChangePasswordModel, current_admin: str = Depend
 
     return {"status": "success"}
 
-# --- ЭНДПОИНТЫ API МОНИТОРИНГА ---
+# --- ЭНДПОИНТЫ API МОНИТОРИНГА С ОБНОВЛЕННОЙ ЛОГИКОЙ ПОСЛЕДОВАТЕЛЬНЫХ СКАНОВ ---
 
 @app.get("/", response_class=HTMLResponse)
 async def get_dashboard():
@@ -661,9 +670,18 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
 
         scans = server_data[srv]["scans"]
         
+        # --- НОВАЯ СТРОГАЯ ПРОВЕРКА ПОСЛЕДОВАТЕЛЬНОСТИ СКАНОВ ---
         prev_scan = None
-        if len(scans) > 0:
-            prev_scan = scans[-1] if scans[-1]["scanId"] != scan_id else (scans[-2] if len(scans) > 1 else None)
+        # Поиск предыдущего скана СТРОГО за предыдущий час
+        expected_prev_time = now_msk - timedelta(hours=1)
+        expected_prev_hour_label = expected_prev_time.strftime("%H:00")
+
+        for s in reversed(scans):
+            if s["scanId"] != scan_id:
+                # Если скан был ровно час назад
+                if s.get("hourLabel") == expected_prev_hour_label:
+                    prev_scan = s
+                break
 
         house_entries = [e for e in payload.entries if e.propType == "house"]
         biz_entries = [e for e in payload.entries if e.propType != "house"]
@@ -671,6 +689,7 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
         prev_houses = prev_scan.get("houses", []) if prev_scan else []
         prev_biz = prev_scan.get("businesses", []) if prev_scan else []
 
+        # Сравнение производится ТОЛЬКО если prev_scan существует и ровно на 1 час раньше
         house_matches = find_pairs_with_offset(prev_houses, house_entries, "house") if prev_scan else {}
         biz_matches = find_pairs_with_offset(prev_biz, biz_entries, "biz") if prev_scan else {}
 
@@ -689,22 +708,12 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
                     "updatedAt": now_msk.strftime("%H:%M:%S")
                 }
             else:
-                saved_status = "insured"
-                if prev_scan:
-                    matched_prev = None
-                    if item.propId is not None:
-                        matched_prev = next((ph for ph in prev_houses if ph.get("propId") == item.propId), None)
-                    if not matched_prev and idx < len(prev_houses):
-                        matched_prev = prev_houses[idx]
-                    if matched_prev and "status" in matched_prev:
-                        saved_status = matched_prev["status"]
-
                 record = {
                     "basePd": item.pd,
                     "pd": item.pd,
                     "propId": item.propId,
                     "pos": item.pos,
-                    "status": saved_status,
+                    "status": "insured",
                     "isPendingPair": True,
                     "updatedAt": now_msk.strftime("%H:%M:%S")
                 }
@@ -725,22 +734,12 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
                     "updatedAt": now_msk.strftime("%H:%M:%S")
                 }
             else:
-                saved_status = "insured"
-                if prev_scan:
-                    matched_prev = None
-                    if item.propId is not None:
-                        matched_prev = next((pb for pb in prev_biz if pb.get("propId") == item.propId), None)
-                    if not matched_prev and idx < len(prev_biz):
-                        matched_prev = prev_biz[idx]
-                    if matched_prev and "status" in matched_prev:
-                        saved_status = matched_prev["status"]
-
                 record = {
                     "basePd": item.pd,
                     "pd": item.pd,
                     "propId": item.propId,
                     "pos": item.pos,
-                    "status": saved_status,
+                    "status": "insured",
                     "isPendingPair": True,
                     "updatedAt": now_msk.strftime("%H:%M:%S")
                 }
@@ -778,8 +777,20 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
                 "hasPair": is_pair_found
             })
 
-        if is_pair_found and len(scans) > 2:
-            server_data[srv]["scans"] = scans[-2:]
+        # --- ОЧИСТКА СТАРЫХ СКАНОВ ---
+        # Если сформировалась пара с предыдущим сканом, удаляем все более ранние сканы (оставляем только активную пару)
+        if is_pair_found and prev_scan:
+            server_data[srv]["scans"] = [prev_scan, scans[-1]]
+        else:
+            # Если пара не сформировалась (разрыв > 1 часа), удаляем устаревшие одиночные сканы
+            filtered_scans = []
+            for s in scans:
+                s_dt = datetime.strptime(s["scanTime"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=MSK_TZ)
+                # Если скан без пары и пролежал более 1 часа и 5 минут — удаляем его
+                if not s.get("hasPair", False) and (now_msk - s_dt).total_seconds() > 3900:
+                    continue
+                filtered_scans.append(s)
+            server_data[srv]["scans"] = filtered_scans
 
         await save_data_to_file_async()
 
@@ -898,7 +909,6 @@ DASHBOARD_HTML = """
         .tab-content { display: none; }
         .tab-content.active { display: block; }
 
-        /* Фильтры ближайших слётов */
         .upcoming-filters {
             display: flex;
             justify-content: center;
@@ -1475,10 +1485,10 @@ DASHBOARD_HTML = """
                             ${type === 'biz' ? `<button class="btn-opt ${st === 'no_activity' && !isPending ? 'active-noact' : ''}" onclick="setStatus('${server}', '${scanId}', 'biz',${item.pos}, 'no_activity')">Без зан.</button>` : ''}
                             <button class="btn-opt ${st === 'frozen' && !isPending ? 'active-frozen' : ''}" onclick="setStatus('${server}', '${scanId}', '${type}', ${item.pos}, 'frozen')">Заморожен</button>
                         </div>
-                        ${isPending ? '<span class="status-pending">⏳ Новый (без пары)</span>' : ''}`;
+                        ${isPending ? '<span class="status-pending">⏳ Ожидание пары</span>' : ''}`;
                 } else {
                     if (isPending) {
-                        statusControl = `<span class="status-pending">⏳ Новый (без пары)</span>`;
+                        statusControl = `<span class="status-pending">⏳ Ожидание пары</span>`;
                     } else {
                         let label = 'Страховка';
                         let classNm = 'status-insured';
@@ -1602,8 +1612,8 @@ DASHBOARD_HTML = """
                     elemHouse.innerHTML = renderTable(latestConfirmed.houses, srv, latestConfirmed.scanId, 'house', false, false, info);
                     elemBiz.innerHTML = renderTable(latestConfirmed.businesses, srv, latestConfirmed.scanId, 'biz', false, false, info);
                 } else {
-                    elemHouse.innerHTML = '<span class="empty">Ожидание 2-й точки</span>';
-                    elemBiz.innerHTML = '<span class="empty">Ожидание 2-й точки</span>';
+                    elemHouse.innerHTML = '<span class="empty">Ожидание последовательного скана</span>';
+                    elemBiz.innerHTML = '<span class="empty">Ожидание последовательного скана</span>';
                 }
             }
         }
@@ -1664,7 +1674,7 @@ DASHBOARD_HTML = """
                         manageTabsElem.innerHTML = scans.map(s => `
                             <button class="scan-subtab ${s.scanId === activeScanId ? 'active' : ''} ${!s.hasPair ? 'single' : ''}" 
                                     onclick="selectScanTab('${srv}', '${s.scanId}')">
-                                ${s.hourLabel} ${!s.hasPair ? '⚠️' : ''}
+                                ${s.hourLabel} ${!s.hasPair ? '⏳' : ''}
                             </button>
                         `).join('');
                     }
@@ -1803,7 +1813,6 @@ DASHBOARD_HTML = """
         </div>
 
         <div id="tab-view" class="tab-content active">
-            <!-- Центрированная панель фильтрации без сортировки по времени -->
             <div class="filter-panel">
                 <div class="filter-group">
                     <label for="filter-season">Сезон слётов:</label>
@@ -1830,7 +1839,6 @@ DASHBOARD_HTML = """
         </div>
 
         <div id="tab-upcoming" class="tab-content">
-            <!-- Кнопки выбора времени слёта -->
             <div class="upcoming-filters">
                 <button id="btn-upcoming-1h" class="time-filter-btn active" onclick="setUpcomingHoursFilter(1)">В этот час</button>
                 <button id="btn-upcoming-2h" class="time-filter-btn" onclick="setUpcomingHoursFilter(2)">Через 2 часа</button>
@@ -1843,7 +1851,6 @@ DASHBOARD_HTML = """
             <div class="servers-container" id="servers-manage"></div>
         </div>
 
-        <!-- Управление пользователями и Логи сканирования для Администратора -->
         <div id="tab-admin" class="tab-content">
             <div class="server-card" style="max-width: 1100px; margin: 0 auto 20px auto;">
                 <h3>Создать нового пользователя</h3>
@@ -1873,8 +1880,3 @@ DASHBOARD_HTML = """
     </div>
 </body>
 </html>
-"""
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
