@@ -325,12 +325,13 @@ def find_pairs_with_offset(prev_items: List[dict], curr_entries: List[PropertyEn
         return "no_activity" if diff >= 4 else ("uninsured" if diff >= 2 else "insured")
 
     for c_idx, curr in enumerate(curr_entries):
-        if curr.propId is not None:
+        curr_prop_id = getattr(curr, 'propId', None)
+        if curr_prop_id is not None:
             for p_idx, prev in enumerate(prev_items):
                 if p_idx in used_prev_indices:
                     continue
-                if prev.get("propId") == curr.propId:
-                    base_pd = prev.get("basePd", prev["pd"])
+                if prev.get("propId") == curr_prop_id:
+                    base_pd = prev.get("basePd", prev.get("pd", 0))
                     diff = base_pd - curr.pd
                     if diff in valid_diffs:
                         auto_status = determine_status(diff, prop_type)
@@ -346,7 +347,7 @@ def find_pairs_with_offset(prev_items: List[dict], curr_entries: List[PropertyEn
             if p_idx in used_prev_indices:
                 continue
 
-            base_pd = prev.get("basePd", prev["pd"])
+            base_pd = prev.get("basePd", prev.get("pd", 0))
             diff = base_pd - curr.pd
 
             if diff in valid_diffs:
@@ -357,7 +358,7 @@ def find_pairs_with_offset(prev_items: List[dict], curr_entries: List[PropertyEn
 
     return matches
 
-# --- ЛОГИКА PAYDAY И ОЧИСТКИ ОДИНОЧНЫХ СТАРЫХ СКТАНОВ ---
+# --- ЛОГИКА PAYDAY И ОЧИСТКИ ОДИНОЧНЫХ СТАРЫХ СКАНОВ ---
 async def process_hourly_payday():
     now_msk = datetime.now(MSK_TZ)
     is_restart_hour = (now_msk.hour == 5)
@@ -377,13 +378,12 @@ async def process_hourly_payday():
             if not scans:
                 continue
 
-            # Удаляем одиночные сканы, для которых так и не пришел последовательный скан спустя час
             valid_scans = []
             for s in scans:
                 scan_dt = datetime.strptime(s["scanTime"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=MSK_TZ)
                 time_diff = (now_msk - scan_dt).total_seconds() / 3600.0
 
-                # Если скан без пары и прождал более 1.1 часа без поддержки — удаляем
+                # Если скан был одиночным без пары и пролежал более 1.1 часа — удаляем его
                 if not s.get("hasPair", False) and time_diff >= 1.1:
                     print(f"[{srv}] Удален одиночный устаревший скан {s['scanId']}")
                     continue
@@ -403,7 +403,7 @@ async def process_hourly_payday():
                     continue
 
                 st = h.get("status", "insured")
-                if st != "frozen":
+                if st != "frozen" and not is_restart_hour:
                     decrement = 1 if st == "insured" else 2
                     h["pd"] -= decrement
                 
@@ -420,7 +420,7 @@ async def process_hourly_payday():
                     continue
 
                 st = b.get("status", "insured")
-                if st != "frozen":
+                if st != "frozen" and not is_restart_hour:
                     decrement = 1 if st == "insured" else (2 if st == "uninsured" else 4)
                     b["pd"] -= decrement
                 
@@ -632,7 +632,7 @@ async def change_password(data: ChangePasswordModel, current_admin: str = Depend
 
     return {"status": "success"}
 
-# --- ЭНДПОИНТЫ API МОНИТОРИНГА С ОБНОВЛЕННОЙ ЛОГИКОЙ ПОСЛЕДОВАТЕЛЬНЫХ СКАНОВ ---
+# --- ЭНДПОИНТЫ API МОНИТОРИНГА ---
 
 @app.get("/", response_class=HTMLResponse)
 async def get_dashboard():
@@ -670,28 +670,27 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
 
         scans = server_data[srv]["scans"]
         
-        # --- НОВАЯ СТРОГАЯ ПРОВЕРКА ПОСЛЕДОВАТЕЛЬНОСТИ СКАНОВ ---
+        last_scan = scans[-1] if scans else None
         prev_scan = None
-        # Поиск предыдущего скана СТРОГО за предыдущий час
-        expected_prev_time = now_msk - timedelta(hours=1)
-        expected_prev_hour_label = expected_prev_time.strftime("%H:00")
+        is_consecutive_hour = False
 
-        for s in reversed(scans):
-            if s["scanId"] != scan_id:
-                # Если скан был ровно час назад
-                if s.get("hourLabel") == expected_prev_hour_label:
-                    prev_scan = s
-                break
+        if last_scan:
+            last_scan_dt = datetime.strptime(last_scan["scanTime"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=MSK_TZ)
+            time_diff_sec = (now_msk - last_scan_dt).total_seconds()
+            
+            # Проверяем, был ли предыдущий скан ровно 1 час назад (с небольшим запасом от 50 до 70 минут)
+            if 3000 <= time_diff_sec <= 4200:
+                prev_scan = last_scan
+                is_consecutive_hour = True
 
         house_entries = [e for e in payload.entries if e.propType == "house"]
         biz_entries = [e for e in payload.entries if e.propType != "house"]
 
-        prev_houses = prev_scan.get("houses", []) if prev_scan else []
-        prev_biz = prev_scan.get("businesses", []) if prev_scan else []
+        prev_houses = prev_scan.get("houses", []) if (prev_scan and is_consecutive_hour) else []
+        prev_biz = prev_scan.get("businesses", []) if (prev_scan and is_consecutive_hour) else []
 
-        # Сравнение производится ТОЛЬКО если prev_scan существует и ровно на 1 час раньше
-        house_matches = find_pairs_with_offset(prev_houses, house_entries, "house") if prev_scan else {}
-        biz_matches = find_pairs_with_offset(prev_biz, biz_entries, "biz") if prev_scan else {}
+        house_matches = find_pairs_with_offset(prev_houses, house_entries, "house") if (prev_scan and is_consecutive_hour) else {}
+        biz_matches = find_pairs_with_offset(prev_biz, biz_entries, "biz") if (prev_scan and is_consecutive_hour) else {}
 
         houses = []
         for idx, item in enumerate(house_entries):
@@ -748,7 +747,7 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
         houses = sorted(houses, key=lambda x: x["pos"])
         businesses = sorted(businesses, key=lambda x: x["pos"])
 
-        is_pair_found = (len(house_matches) > 0 or len(biz_matches) > 0)
+        is_pair_found = is_consecutive_hour and (len(house_matches) > 0 or len(biz_matches) > 0)
 
         if is_pair_found and prev_scan:
             prev_scan["isConfirmed"] = True
@@ -757,6 +756,16 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
         existing_scan = next((s for s in scans if s["scanId"] == scan_id), None)
         has_houses_in_payload = len(house_entries) > 0
         has_biz_in_payload = len(biz_entries) > 0
+
+        new_scan_obj = {
+            "scanId": scan_id,
+            "hourLabel": hour_label,
+            "scanTime": now_msk.strftime("%Y-%m-%d %H:%M:%S"),
+            "houses": houses,
+            "businesses": businesses,
+            "isConfirmed": is_pair_found,
+            "hasPair": is_pair_found
+        }
 
         if existing_scan:
             if has_houses_in_payload:
@@ -767,30 +776,13 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
             existing_scan["isConfirmed"] = existing_scan.get("isConfirmed", False) or is_pair_found
             existing_scan["hasPair"] = existing_scan.get("hasPair", False) or is_pair_found
         else:
-            scans.append({
-                "scanId": scan_id,
-                "hourLabel": hour_label,
-                "scanTime": now_msk.strftime("%Y-%m-%d %H:%M:%S"),
-                "houses": houses,
-                "businesses": businesses,
-                "isConfirmed": is_pair_found,
-                "hasPair": is_pair_found
-            })
-
-        # --- ОЧИСТКА СТАРЫХ СКАНОВ ---
-        # Если сформировалась пара с предыдущим сканом, удаляем все более ранние сканы (оставляем только активную пару)
-        if is_pair_found and prev_scan:
-            server_data[srv]["scans"] = [prev_scan, scans[-1]]
-        else:
-            # Если пара не сформировалась (разрыв > 1 часа), удаляем устаревшие одиночные сканы
-            filtered_scans = []
-            for s in scans:
-                s_dt = datetime.strptime(s["scanTime"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=MSK_TZ)
-                # Если скан без пары и пролежал более 1 часа и 5 минут — удаляем его
-                if not s.get("hasPair", False) and (now_msk - s_dt).total_seconds() > 3900:
-                    continue
-                filtered_scans.append(s)
-            server_data[srv]["scans"] = filtered_scans
+            if is_consecutive_hour:
+                # Последовательный скан -> Добавляем в общую цепочку
+                scans.append(new_scan_obj)
+            else:
+                # Произошел разрыв во времени (> 1 часа).
+                # Удаляем ВСЕ прошлые сканы и оставляем только текущий новый скан одиночкой.
+                server_data[srv]["scans"] = [new_scan_obj]
 
         await save_data_to_file_async()
 
@@ -821,6 +813,8 @@ async def delete_item(data: DeleteItemModel, username: str = Depends(verify_edit
                 if scan["scanId"] == data.scanId:
                     target_key = "houses" if data.propType in ["house", "houses"] else "businesses"
                     scan[target_key] = [item for item in scan[target_key] if item["pos"] != data.pos]
+                    for new_idx, item in enumerate(scan[target_key], start=1):
+                        item["pos"] = new_idx
                     await save_data_to_file_async()
                     return {"status": "success"}
     raise HTTPException(status_code=404, detail="Server or Scan not found")
@@ -1441,10 +1435,10 @@ DASHBOARD_HTML = """
 
             let paydaysApplied = 0;
             while (paydaysApplied < neededPayDays) {
-                paydaysApplied++;
-                if (paydaysApplied === neededPayDays && targetTime.getHours() === 5) {
-                    targetTime.setHours(6);
-                } else if (paydaysApplied < neededPayDays) {
+                if (targetTime.getHours() !== 5) {
+                    paydaysApplied++;
+                }
+                if (paydaysApplied < neededPayDays) {
                     targetTime.setHours(targetTime.getHours() + 1);
                 }
             }
@@ -1880,3 +1874,4 @@ DASHBOARD_HTML = """
     </div>
 </body>
 </html>
+"""
