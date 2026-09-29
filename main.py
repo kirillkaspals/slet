@@ -870,8 +870,9 @@ DASHBOARD_HTML = """
             margin-bottom: 20px;
             display: flex;
             flex-wrap: wrap;
-            gap: 15px;
+            gap: 20px;
             align-items: center;
+            justify-content: center;
         }
         .filter-group {
             display: flex;
@@ -974,11 +975,27 @@ DASHBOARD_HTML = """
             "Faraway", "Bumble-Bee", "Christmas", "Love", "Mirage",
             "Drake", "Space", "Home"
         ];
+
+        const SERVER_NUMBERS = {
+            "Phoenix": 1, "Tucson": 2, "Scottdale": 3, "Chandler": 4, "Brainburg": 5,
+            "Saint-Rose": 6, "Mesa": 7, "Red-Rock": 8, "Yuma": 9, "Surprise": 10,
+            "Prescott": 11, "Glendale": 12, "Kingman": 13, "Winslow": 14, "Payson": 15,
+            "Gilbert": 16, "Show-Low": 17, "Casa-Grande": 18, "Page": 19, "Sun-City": 20,
+            "Queen-Creek": 21, "Sedona": 22, "Holiday": 23, "Wednesday": 24, "Yava": 25,
+            "Faraway": 26, "Bumble-Bee": 27, "Christmas": 28, "Love": 30, "Mirage": 29,
+            "Drake": 31, "Space": 32, "Home": 33
+        };
+
+        function getServerDisplayName(srv) {
+            const num = SERVER_NUMBERS[srv];
+            return num ? `${num}. ${srv}` : srv;
+        }
+
         const activeServerScans = {};
         let currentUser = null;
         let favoriteServers = JSON.parse(localStorage.getItem('fav_servers') || '[]');
         let globalServerData = {};
-        let selectedUpcomingHours = 1; // 1, 2 или 3 часа
+        let selectedUpcomingHours = 1;
 
         function getPropRules(info, type) {
             const defaultRules = { insured: 2, uninsured_min: 2, uninsured_max: 3 };
@@ -994,36 +1011,6 @@ DASHBOARD_HTML = """
             }
             localStorage.setItem('fav_servers', JSON.stringify(favoriteServers));
             renderViewTab();
-        }
-
-        function getMinMinutesToDrop(info) {
-            if (!info || !info.latestConfirmedScan) return Infinity;
-            
-            const scan = info.latestConfirmedScan;
-            let minMinutes = Infinity;
-
-            const allProps = [
-                ...(scan.houses || []).map(h => ({ ...h, type: 'house' })),
-                ...(scan.businesses || []).map(b => ({ ...b, type: 'biz' }))
-            ];
-
-            allProps.forEach(item => {
-                if (item.isPendingPair || item.status === 'frozen') return;
-                const rules = getPropRules(info, item.type);
-                const timeInfo = calculateDropTime(item.pd, item.status || 'insured', rules, item.type);
-                if (timeInfo && !timeInfo.isFrozen) {
-                    let mins = 0;
-                    const matchHours = timeInfo.text.match(/(\\d+)\\s*ч/);
-                    const matchMins = timeInfo.text.match(/(\\d+)\\s*мин/);
-                    if (matchHours) mins += parseInt(matchHours[1]) * 60;
-                    if (matchMins) mins += parseInt(matchMins[1]);
-                    if (timeInfo.text.includes('< 1 мин')) mins = 0;
-                    
-                    if (mins < minMinutes) minMinutes = mins;
-                }
-            });
-
-            return minMinutes;
         }
 
         async function checkAuth() {
@@ -1472,7 +1459,6 @@ DASHBOARD_HTML = """
             if (!containerView) return;
 
             const seasonFilter = document.getElementById('filter-season').value;
-            const sortFilter = document.getElementById('filter-sort').value;
             const favFilter = document.getElementById('filter-fav').value;
 
             let filteredServers = ALL_SERVERS.filter(srv => {
@@ -1494,14 +1480,6 @@ DASHBOARD_HTML = """
                 return true;
             });
 
-            if (sortFilter === 'nearest') {
-                filteredServers.sort((a, b) => {
-                    const minA = getMinMinutesToDrop(globalServerData[a]);
-                    const minB = getMinMinutesToDrop(globalServerData[b]);
-                    return minA - minB;
-                });
-            }
-
             containerView.innerHTML = '';
 
             if (filteredServers.length === 0) {
@@ -1512,6 +1490,7 @@ DASHBOARD_HTML = """
             filteredServers.forEach(srv => {
                 const isFav = favoriteServers.includes(srv);
                 const starIcon = isFav ? '⭐' : '☆';
+                const displayName = getServerDisplayName(srv);
 
                 const cardView = `
                     <div class="server-card">
@@ -1519,7 +1498,7 @@ DASHBOARD_HTML = """
                             <div class="server-title">
                                 <span>
                                     <span class="fav-btn" title="Добавить в избранное" onclick="toggleFavorite('${srv}')">${starIcon}</span>
-                                    ${srv}
+                                    ${displayName}
                                 </span>
                                 <span class="season-badge season-badge-${srv}">Загрузка...</span>
                             </div>
@@ -1653,11 +1632,13 @@ DASHBOARD_HTML = """
                             if (selectedUpcomingHours === 2) hourTitleStr = 'через 2 часа';
                             if (selectedUpcomingHours === 3) hourTitleStr = 'через 3 часа';
 
+                            const displayName = getServerDisplayName(srv);
+
                             const cardUpcoming = `
                                 <div class="server-card">
                                     <div class="server-header">
                                         <div class="server-title">
-                                            <span>${srv}</span>
+                                            <span>${displayName}</span>
                                             <span class="season-badge">${info.season ? info.season.display : ''}</span>
                                         </div>
                                     </div>
@@ -1761,7 +1742,7 @@ DASHBOARD_HTML = """
         </div>
 
         <div id="tab-view" class="tab-content active">
-            <!-- Панель фильтрации -->
+            <!-- Центрированная панель фильтрации без сортировки по времени -->
             <div class="filter-panel">
                 <div class="filter-group">
                     <label for="filter-season">Сезон слётов:</label>
@@ -1772,14 +1753,6 @@ DASHBOARD_HTML = """
                         <option value="3">3 — Автогонки</option>
                         <option value="4">4 — По новому</option>
                         <option value="5">5 — Мотогонки</option>
-                    </select>
-                </div>
-
-                <div class="filter-group">
-                    <label for="filter-sort">Сортировка по времени слёта:</label>
-                    <select id="filter-sort" class="filter-select" onchange="renderViewTab()">
-                        <option value="default">По умолчанию (список серверов)</option>
-                        <option value="nearest">Сначала ближайшие слёты</option>
                     </select>
                 </div>
 
