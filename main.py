@@ -332,6 +332,33 @@ async def save_data_to_file_async():
 
     await asyncio.to_thread(_save)
 
+def check_and_update_outdated_scans() -> bool:
+    """
+    Проверяет одиночные непарные сканы. Если со времени сканирования
+    прошло >= 2 часов (т.е. за следующий часовой интервал не пришел парный скан),
+    скан помечается как устаревший (isOutdated = True).
+    """
+    now_msk = datetime.now(MSK_TZ)
+    now_hour_start = now_msk.replace(minute=0, second=0, microsecond=0)
+    changed = False
+
+    for srv, data in server_data.items():
+        scans = data.get("scans", [])
+        for s in scans:
+            if not s.get("hasPair", False) and not s.get("isOutdated", False):
+                scan_time_str = s.get("scanTime")
+                if scan_time_str:
+                    try:
+                        scan_dt = datetime.strptime(scan_time_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=MSK_TZ)
+                        scan_hour_start = scan_dt.replace(minute=0, second=0, microsecond=0)
+                        hours_diff = (now_hour_start - scan_hour_start).total_seconds() / 3600
+                        if hours_diff >= 2:
+                            s["isOutdated"] = True
+                            changed = True
+                    except Exception:
+                        pass
+    return changed
+
 def get_current_season_id(server: str) -> int:
     base_id = BASE_SERVER_SEASONS.get(server, 1)
     now_msk = datetime.now(MSK_TZ)
@@ -423,6 +450,7 @@ async def process_hourly_payday():
             print(f"Ошибка очистки логов сканирования: {e}")
 
     async with data_lock:
+        check_and_update_outdated_scans()
         print(f"[{now_msk.strftime('%Y-%m-%d %H:%M:%S')}] Выполнение списания PayDay (Рестарт: {is_restart_hour})...")
         for srv, data in server_data.items():
             scans = data.get("scans", [])
@@ -487,6 +515,7 @@ async def lifespan(app: FastAPI):
         await init_db()
         loaded_db_data = await load_data_from_db()
         server_data.update(loaded_db_data)
+        check_and_update_outdated_scans()
     except Exception as e:
         print(f"Ошибка подключения к PostgreSQL: {e}")
 
@@ -720,6 +749,8 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
             print(f"Ошибка сохранения лога сканирования в БД: {e}")
 
     async with data_lock:
+        check_and_update_outdated_scans()
+
         if srv not in server_data:
             server_data[srv] = {"scans": []}
         if "scans" not in server_data[srv]:
@@ -727,14 +758,14 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
 
         scans = server_data[srv]["scans"]
         
-        # Находим предыдущий скан, который ЕЩЁ НЕ имеет пары (изолируем пару 1-2 от скана 3)
+        # Находим предыдущий скан, который ЕЩЁ НЕ имеет пары и НЕ устарел
         other_scans = [s for s in scans if s["scanId"] != scan_id]
         
         prev_scan = None
         if other_scans:
             last_s = other_scans[-1]
-            # Новая пара формируется только если предыдущий скан был НЕПАРНЫМ!
-            if not last_s.get("hasPair", False):
+            # Новая пара формируется только если предыдущий скан был НЕПАРНЫМ и НЕ УСТАРЕВШИМ!
+            if not last_s.get("hasPair", False) and not last_s.get("isOutdated", False):
                 prev_scan = last_s
 
         house_entries = [e for e in payload.entries if e.propType == "house"]
@@ -872,6 +903,10 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
             }
             scans.append(new_scan)
 
+        # Автоматическая очистка: оставляем максимум последние 4 скана (2 пары)
+        if len(server_data[srv]["scans"]) > 4:
+            server_data[srv]["scans"] = server_data[srv]["scans"][-4:]
+
         await save_data_to_file_async()
 
     return {"status": "ok", "scanId": scan_id, "count": len(payload.entries)}
@@ -947,6 +982,8 @@ async def add_item(data: AddItemModel, username: str = Depends(verify_editor)):
 @app.get("/api/paydays")
 async def get_paydays(username: str = Depends(verify_auth)):
     async with data_lock:
+        if check_and_update_outdated_scans():
+            await save_data_to_file_async()
         res = {}
         for srv, data in server_data.items():
             scans = data.get("scans", [])
@@ -1274,8 +1311,7 @@ DASHBOARD_HTML = """
             gap: 4px;
         }
 
-        /* Стили подсветок сканов согласно заданию */
-        /* Зеленый цвет: Актуальная заменяющая пара (например 3 и 4) */
+        /* Подсветка сканов */
         .scan-subtab.current-pair { 
             background-color: rgba(46, 125, 50, 0.2); 
             color: #81c784; 
@@ -1288,7 +1324,6 @@ DASHBOARD_HTML = """
             box-shadow: 0 0 8px rgba(76, 175, 80, 0.4);
         }
 
-        /* Серый цвет: Старые ушедшие из актуальности сканы (например 1 и 2) */
         .scan-subtab.old-pair { 
             background-color: rgba(55, 71, 79, 0.25); 
             color: #78909c; 
@@ -1302,7 +1337,6 @@ DASHBOARD_HTML = """
             opacity: 1;
         }
 
-        /* Оранжевый цвет: Одиночный скан в ожидании пары */
         .scan-subtab.single { 
             background-color: rgba(255, 152, 0, 0.15); 
             color: #ffb74d; 
@@ -2068,14 +2102,18 @@ DASHBOARD_HTML = """
 
                             if (s.hasPair) {
                                 if (s.isCurrentPair) {
-                                    typeClass = 'current-pair'; // Зеленый цвет для актуальной заменяющей пары (3 и 4)
+                                    typeClass = 'current-pair';
                                     statusIcon = '🟢';
                                     titleHint = 'Актуальная пара';
                                 } else {
-                                    typeClass = 'old-pair';     // Серый цвет для устаревших пар (1 и 2)
+                                    typeClass = 'old-pair';
                                     statusIcon = '⚪';
                                     titleHint = 'Старый скан (устарел)';
                                 }
+                            } else if (s.isOutdated) {
+                                typeClass = 'old-pair';
+                                statusIcon = '🔴';
+                                titleHint = 'Скан устарел (не дождался пары)';
                             }
 
                             const isActive = s.scanId === activeScanId ? 'active' : '';
@@ -2282,20 +2320,12 @@ DASHBOARD_HTML = """
                 <div id="admin-users-table">Загрузка...</div>
             </div>
 
-            <div class="server-card" style="max-width: 1000px; margin: 0 auto;">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                    <h3 style="margin: 0;">📜 Логи сканирования (за сегодня)</h3>
-                    <button class="btn-add" onclick="loadScanLogs()">Обновить</button>
-                </div>
-                <div id="admin-scan-logs-table">Загрузка логов...</div>
+            <div class="server-card" style="max-width: 1000px; margin: 0 auto 20px auto;">
+                <h3 style="margin-top:0;">Логи полученных сканов за сегодня</h3>
+                <div id="admin-scan-logs-table">Загрузка...</div>
             </div>
         </div>
     </div>
 </body>
 </html>
 """
-
-if __name__ == "__main__":
-    import uvicorn
-    module_name = os.path.splitext(os.path.basename(__file__))[0]
-    uvicorn.run(f"{module_name}:app", host="0.0.0.0", port=8000, reload=True)
