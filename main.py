@@ -403,7 +403,6 @@ async def process_hourly_payday():
             if not scans:
                 continue
 
-            # Помечаем одиночные сканы как неактивные, если следующая пара не пришла вовремя
             for s in scans:
                 scan_dt = datetime.strptime(s["scanTime"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=MSK_TZ)
                 time_diff = (now_msk - scan_dt).total_seconds() / 3600.0
@@ -652,130 +651,497 @@ async def change_password(data: ChangePasswordModel, current_admin: str = Depend
 
     return {"status": "success"}
 
-# --- ДАШБОРД (HTML) ---
+# --- ДАШБОРД (HTML / CSS / JS) ---
 DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Arizona RP — Мониторинг Слётов</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #121212; color: #e0e0e0; margin: 0; padding: 20px; }
-        h1 { text-align: center; color: #ff9800; margin-bottom: 20px; }
-        
-        .login-box { max-width: 400px; margin: 80px auto; background: #1e1e1e; padding: 30px; border-radius: 8px; border: 1px solid #333; text-align: center; }
-        .login-box input { width: 90%; padding: 10px; margin: 10px 0; background: #2a2a2a; border: 1px solid #444; color: #fff; border-radius: 4px; }
-        .login-box button { width: 95%; padding: 10px; background: #ff9800; border: none; font-weight: bold; cursor: pointer; border-radius: 4px; color: #121212; }
+        :root {
+            --bg-main: #0b0f17;
+            --bg-card: #151c28;
+            --bg-card-hover: #1c2536;
+            --bg-input: #1e293b;
+            --border-color: #232d3f;
+            --accent-primary: #6366f1;
+            --accent-primary-hover: #4f46e5;
+            --accent-glow: rgba(99, 102, 241, 0.25);
+            --accent-danger: #ef4444;
+            --accent-warning: #f59e0b;
+            --accent-success: #10b981;
+            --accent-info: #06b6d4;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --text-dim: #64748b;
+            --radius-sm: 8px;
+            --radius-md: 12px;
+            --radius-lg: 16px;
+        }
 
-        .user-nav { display: flex; justify-content: space-between; align-items: center; max-width: 1100px; margin: 0 auto 20px auto; }
-        .btn-logout { background: #c62828; color: white; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; }
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            -webkit-tap-highlight-color: transparent;
+        }
 
-        .tabs { display: flex; justify-content: center; gap: 10px; margin-bottom: 25px; }
-        .tab-btn { background-color: #1e1e1e; color: #aaa; border: 1px solid #333; padding: 10px 24px; font-size: 1em; font-weight: bold; border-radius: 6px; cursor: pointer; transition: 0.2s; }
-        .tab-btn.active { background-color: #ff9800; color: #121212; border-color: #ff9800; }
-        .tab-btn:hover:not(.active) { background-color: #2a2a2a; color: #fff; }
+        body {
+            background-color: var(--bg-main);
+            color: var(--text-main);
+            padding: 12px;
+            min-height: 100vh;
+        }
+
+        @media (min-width: 768px) {
+            body { padding: 24px; }
+        }
+
+        /* --- Header & Title --- */
+        .app-header {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+
+        h1 {
+            font-size: 1.5rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, #a5b4fc 0%, #6366f1 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: -0.02em;
+        }
+
+        @media (min-width: 768px) {
+            h1 { font-size: 2rem; margin-bottom: 8px; }
+        }
+
+        /* --- Login Box --- */
+        .login-box {
+            max-width: 380px;
+            margin: 60px auto;
+            background: var(--bg-card);
+            padding: 28px;
+            border-radius: var(--radius-lg);
+            border: 1px solid var(--border-color);
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.5);
+            text-align: center;
+        }
+
+        .login-box h2 {
+            margin-bottom: 20px;
+            font-size: 1.25rem;
+            color: var(--text-main);
+        }
+
+        .login-box input {
+            width: 100%;
+            padding: 12px 14px;
+            margin-bottom: 14px;
+            background: var(--bg-input);
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            border-radius: var(--radius-sm);
+            font-size: 0.95rem;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        .login-box input:focus {
+            border-color: var(--accent-primary);
+        }
+
+        .login-box button {
+            width: 100%;
+            padding: 12px;
+            background: linear-gradient(135deg, var(--accent-primary) 0%, var(--accent-primary-hover) 100%);
+            border: none;
+            font-weight: 600;
+            cursor: pointer;
+            border-radius: var(--radius-sm);
+            color: #fff;
+            font-size: 0.95rem;
+            box-shadow: 0 4px 12px var(--accent-glow);
+            transition: opacity 0.2s;
+        }
+
+        .login-box button:active { opacity: 0.85; }
+
+        /* --- User Navigation & Info --- */
+        .user-nav {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            max-width: 1200px;
+            margin: 0 auto 16px auto;
+            background: var(--bg-card);
+            padding: 10px 16px;
+            border-radius: var(--radius-md);
+            border: 1px solid var(--border-color);
+            font-size: 0.85rem;
+        }
+
+        .btn-logout {
+            background: rgba(239, 68, 68, 0.15);
+            color: #fca5a5;
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            padding: 6px 14px;
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            font-weight: 500;
+            font-size: 0.8rem;
+            transition: all 0.2s;
+        }
+
+        .btn-logout:hover {
+            background: rgba(239, 68, 68, 0.25);
+            color: #fff;
+        }
+
+        /* --- Tabs --- */
+        .tabs {
+            display: flex;
+            justify-content: flex-start;
+            gap: 8px;
+            margin-bottom: 20px;
+            max-width: 1200px;
+            margin-left: auto;
+            margin-right: auto;
+            overflow-x: auto;
+            padding-bottom: 4px;
+            -webkit-overflow-scrolling: touch;
+        }
+
+        .tab-btn {
+            background-color: var(--bg-card);
+            color: var(--text-muted);
+            border: 1px solid var(--border-color);
+            padding: 10px 18px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            border-radius: var(--radius-md);
+            cursor: pointer;
+            white-space: nowrap;
+            transition: all 0.2s;
+            flex-shrink: 0;
+        }
+
+        .tab-btn.active {
+            background: var(--accent-primary);
+            color: #ffffff;
+            border-color: var(--accent-primary);
+            box-shadow: 0 4px 14px var(--accent-glow);
+        }
 
         .tab-content { display: none; }
         .tab-content.active { display: block; }
 
+        /* --- Upcoming Filters --- */
         .upcoming-filters {
             display: flex;
             justify-content: center;
-            gap: 12px;
+            gap: 8px;
             margin-bottom: 20px;
-        }
-        .time-filter-btn {
-            background-color: #1e1e1e;
-            color: #aaa;
-            border: 1px solid #333;
-            padding: 8px 18px;
-            font-size: 0.9em;
-            font-weight: bold;
-            border-radius: 20px;
-            cursor: pointer;
-            transition: 0.2s;
-        }
-        .time-filter-btn.active {
-            background-color: #e53935;
-            color: #ffffff;
-            border-color: #ef5350;
-            box-shadow: 0 0 8px rgba(229, 57, 53, 0.4);
         }
 
+        .time-filter-btn {
+            background-color: var(--bg-card);
+            color: var(--text-muted);
+            border: 1px solid var(--border-color);
+            padding: 8px 16px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            border-radius: 20px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .time-filter-btn.active {
+            background-color: var(--accent-danger);
+            color: #ffffff;
+            border-color: var(--accent-danger);
+            box-shadow: 0 0 12px rgba(239, 68, 68, 0.4);
+        }
+
+        /* --- Filter Panel --- */
         .filter-panel {
-            background: #1e1e1e;
-            border: 1px solid #333;
-            border-radius: 8px;
-            padding: 15px;
-            margin-bottom: 20px;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-md);
+            padding: 12px 16px;
+            margin: 0 auto 20px auto;
+            max-width: 1200px;
             display: flex;
             flex-wrap: wrap;
-            gap: 20px;
+            gap: 12px;
             align-items: center;
-            justify-content: center;
         }
+
         .filter-group {
             display: flex;
             flex-direction: column;
-            gap: 5px;
+            gap: 4px;
+            flex: 1 1 140px;
         }
+
         .filter-group label {
-            font-size: 0.85em;
-            color: #ff9800;
-            font-weight: bold;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
         }
+
         .filter-select {
-            background: #2a2a2a;
-            color: #fff;
-            border: 1px solid #444;
-            padding: 6px 10px;
-            border-radius: 4px;
-            font-size: 0.9em;
+            background: var(--bg-input);
+            color: var(--text-main);
+            border: 1px solid var(--border-color);
+            padding: 8px 12px;
+            border-radius: var(--radius-sm);
+            font-size: 0.85rem;
+            outline: none;
+            width: 100%;
         }
+
         .fav-btn {
             cursor: pointer;
-            font-size: 1.1em;
+            font-size: 1.1rem;
             user-select: none;
             margin-right: 6px;
-            transition: transform 0.1s;
-        }
-        .fav-btn:hover {
-            transform: scale(1.2);
+            transition: transform 0.15s ease;
+            display: inline-block;
         }
 
-        .servers-container { display: flex; flex-direction: column; gap: 15px; max-width: 1100px; margin: 0 auto; }
-        .server-card { background-color: #1e1e1e; border: 1px solid #333; border-radius: 8px; padding: 15px 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
-        .server-header { border-bottom: 1px solid #333; padding-bottom: 8px; margin-bottom: 12px; }
-        .server-title { font-size: 1.3em; font-weight: bold; color: #4caf50; display: flex; justify-content: space-between; align-items: center; }
-        .season-badge { font-size: 0.75em; background-color: #332a12; color: #ffb74d; border: 1px solid #ff9800; padding: 3px 8px; border-radius: 12px; font-weight: normal; }
-        
-        .scan-tabs-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px solid #2a2a2a; padding-bottom: 6px; }
-        .scan-tabs-container { display: flex; gap: 6px; overflow-x: auto; }
-        .scan-subtab { background-color: #252525; color: #888; border: 1px solid #3a3a3a; padding: 4px 12px; font-size: 0.85em; border-radius: 4px; cursor: pointer; white-space: nowrap; transition: 0.2s; }
-        .scan-subtab.active { background-color: #1e88e5; color: #fff; border-color: #64b5f6; font-weight: bold; }
-        .scan-subtab.single { border-color: #ff9800; color: #ffb74d; }
-        .scan-subtab.inactive { opacity: 0.5; border-color: #555; }
-        .scan-subtab:hover:not(.active) { background-color: #333; color: #ddd; }
+        .fav-btn:hover { transform: scale(1.2); }
 
-        .btn-delete-scan { background-color: #b71c1c; color: #fff; border: none; padding: 4px 8px; border-radius: 4px; font-size: 0.75em; font-weight: bold; cursor: pointer; transition: 0.2s; }
-        .btn-delete-scan:hover { background-color: #d32f2f; }
+        /* --- Servers Grid & Cards --- */
+        .servers-container {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
 
-        .tables-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
-        @media (max-width: 850px) { .tables-grid { grid-template-columns: 1fr; } }
-        .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
-        .section-title { font-size: 0.95em; font-weight: bold; color: #00bcd4; }
-        .btn-add { background-color: #008cba; color: white; border: none; border-radius: 4px; padding: 2px 8px; font-size: 0.85em; font-weight: bold; cursor: pointer; transition: 0.2s; }
-        .btn-add:hover { background-color: #005f73; }
-        table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
-        th, td { padding: 6px 8px; text-align: left; border-bottom: 1px solid #2a2a2a; }
-        th { background-color: #252525; color: #aaa; }
-        .pd-badge { background-color: #e53935; color: #fff; padding: 2px 6px; border-radius: 4px; font-weight: bold; }
-        .pd-badge-drop { background-color: #d32f2f; color: #ffeb3b; padding: 2px 6px; border-radius: 4px; font-weight: bold; animation: pulse 1.5s infinite; }
-        .pd-badge-fixed { background-color: #37474f; color: #81d4fa; border: 1px solid #00838f; padding: 2px 6px; border-radius: 4px; font-weight: bold; }
-        
-        .time-left-badge { font-weight: bold; color: #ffb74d; font-size: 0.85em; background-color: #231b0c; padding: 2px 6px; border-radius: 4px; border: 1px solid #5d4037; }
-        .time-left-frozen { font-weight: bold; color: #64b5f6; font-size: 0.85em; }
+        .server-card {
+            background-color: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-md);
+            padding: 16px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
+            transition: border-color 0.2s;
+        }
+
+        .server-card:hover {
+            border-color: #334155;
+        }
+
+        .server-header {
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 10px;
+            margin-bottom: 14px;
+        }
+
+        .server-title {
+            font-size: 1.1rem;
+            font-weight: 700;
+            color: var(--text-main);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .season-badge {
+            font-size: 0.75rem;
+            background: rgba(245, 158, 11, 0.1);
+            color: var(--accent-warning);
+            border: 1px solid rgba(245, 158, 11, 0.25);
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-weight: 500;
+        }
+
+        /* Scan Subtabs Bar */
+        .scan-tabs-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 14px;
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 8px;
+            gap: 10px;
+        }
+
+        .scan-tabs-container {
+            display: flex;
+            gap: 6px;
+            overflow-x: auto;
+            padding-bottom: 4px;
+            -webkit-overflow-scrolling: touch;
+        }
+
+        .scan-subtab {
+            background-color: var(--bg-input);
+            color: var(--text-muted);
+            border: 1px solid var(--border-color);
+            padding: 5px 12px;
+            font-size: 0.8rem;
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            white-space: nowrap;
+            transition: all 0.2s;
+        }
+
+        .scan-subtab.active {
+            background-color: var(--accent-primary);
+            color: #fff;
+            border-color: var(--accent-primary);
+            font-weight: 600;
+        }
+
+        .scan-subtab.single { border-color: rgba(245, 158, 11, 0.5); color: var(--accent-warning); }
+        .scan-subtab.inactive { opacity: 0.4; }
+
+        .btn-delete-scan {
+            background-color: rgba(239, 68, 68, 0.15);
+            color: #fca5a5;
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            padding: 4px 10px;
+            border-radius: var(--radius-sm);
+            font-size: 0.75rem;
+            font-weight: 600;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+
+        .btn-delete-scan:hover { background-color: var(--accent-danger); color: #fff; }
+
+        /* Tables & Layout */
+        .tables-grid {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 16px;
+        }
+
+        @media (min-width: 900px) {
+            .tables-grid { grid-template-columns: 1fr 1fr; gap: 20px; }
+        }
+
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+
+        .section-title {
+            font-size: 0.85rem;
+            font-weight: 700;
+            color: var(--accent-info);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .btn-add {
+            background-color: rgba(99, 102, 241, 0.15);
+            color: #a5b4fc;
+            border: 1px solid rgba(99, 102, 241, 0.3);
+            border-radius: var(--radius-sm);
+            padding: 3px 10px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-add:hover { background-color: var(--accent-primary); color: #fff; }
+
+        .table-responsive {
+            width: 100%;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+            border-radius: var(--radius-sm);
+            border: 1px solid var(--border-color);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.8rem;
+            text-align: left;
+            background-color: rgba(15, 23, 42, 0.4);
+        }
+
+        th, td {
+            padding: 8px 10px;
+            border-bottom: 1px solid var(--border-color);
+            vertical-align: middle;
+        }
+
+        th {
+            background-color: var(--bg-input);
+            color: var(--text-muted);
+            font-weight: 600;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+        }
+
+        tr:last-child td { border-bottom: none; }
+
+        /* Badges */
+        .pd-badge {
+            background-color: rgba(239, 68, 68, 0.2);
+            color: #fca5a5;
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-weight: 700;
+        }
+
+        .pd-badge-drop {
+            background-color: var(--accent-danger);
+            color: #fff;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-weight: 700;
+            animation: pulse 1.5s infinite;
+        }
+
+        .pd-badge-fixed {
+            background-color: rgba(100, 116, 139, 0.2);
+            color: #cbd5e1;
+            border: 1px solid var(--border-color);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-weight: 700;
+        }
+
+        .time-left-badge {
+            font-weight: 600;
+            color: var(--accent-warning);
+            font-size: 0.8rem;
+            background-color: rgba(245, 158, 11, 0.1);
+            padding: 3px 8px;
+            border-radius: 6px;
+            border: 1px solid rgba(245, 158, 11, 0.25);
+            display: inline-block;
+            white-space: nowrap;
+        }
+
+        .time-left-frozen {
+            font-weight: 600;
+            color: var(--accent-info);
+            font-size: 0.8rem;
+            white-space: nowrap;
+        }
 
         @keyframes pulse {
             0% { opacity: 1; }
@@ -783,29 +1149,79 @@ DASHBOARD_HTML = """
             100% { opacity: 1; }
         }
 
-        .btn-group { display: flex; gap: 3px; flex-wrap: wrap; }
-        .btn-opt { background-color: #2a2a2a; color: #888; border: 1px solid #444; padding: 3px 6px; font-size: 0.75em; border-radius: 4px; cursor: pointer; transition: 0.2s; }
-        .btn-opt.active-insured { background-color: #2e7d32; color: #fff; border-color: #4caf50; }
-        .btn-opt.active-uninsured { background-color: #c62828; color: #fff; border-color: #ef5350; }
-        .btn-opt.active-noact { background-color: #b71c1c; color: #fff; border-color: #ff1744; font-weight: bold; }
-        .btn-opt.active-frozen { background-color: #1565c0; color: #fff; border-color: #42a5f5; font-weight: bold; }
-        
-        .status-text { font-weight: bold; font-size: 0.85em; padding: 2px 6px; border-radius: 4px; display: inline-block; }
-        .status-insured { color: #81c784; }
-        .status-uninsured { color: #e57373; }
-        .status-noact { color: #ff5252; }
-        .status-frozen { color: #64b5f6; }
-        .status-pending { color: #ffb74d; font-style: italic; }
+        /* Controls in tables */
+        .btn-group {
+            display: flex;
+            gap: 4px;
+            flex-wrap: wrap;
+        }
 
-        .btn-del { background-color: transparent; color: #ef5350; border: 1px solid #ef5350; padding: 2px 6px; font-size: 0.8em; border-radius: 4px; cursor: pointer; transition: 0.2s; }
-        .btn-del:hover { background-color: #ef5350; color: #fff; }
-        .btn-user-del { background-color: #c62828; color: #fff; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 0.8em; }
-        .btn-user-del:hover { background-color: #e53935; }
-        
-        .select-role { background: #2a2a2a; color: #fff; border: 1px solid #444; padding: 4px; border-radius: 4px; font-size: 0.85em; }
-        
-        .empty { color: #666; font-style: italic; font-size: 0.85em; }
-        .empty-center { text-align: center; color: #888; font-style: italic; padding: 20px; background-color: #1e1e1e; border-radius: 8px; border: 1px solid #333; }
+        .btn-opt {
+            background-color: var(--bg-input);
+            color: var(--text-muted);
+            border: 1px solid var(--border-color);
+            padding: 4px 8px;
+            font-size: 0.75rem;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        .btn-opt.active-insured { background-color: var(--accent-success); color: #fff; border-color: var(--accent-success); }
+        .btn-opt.active-uninsured { background-color: var(--accent-danger); color: #fff; border-color: var(--accent-danger); }
+        .btn-opt.active-noact { background-color: #b91c1c; color: #fff; border-color: #b91c1c; font-weight: 700; }
+        .btn-opt.active-frozen { background-color: #0284c7; color: #fff; border-color: #0284c7; font-weight: 700; }
+
+        .status-text { font-weight: 600; font-size: 0.8rem; padding: 2px 6px; border-radius: 4px; display: inline-block; }
+        .status-insured { color: var(--accent-success); }
+        .status-uninsured { color: #f87171; }
+        .status-noact { color: #ef4444; }
+        .status-frozen { color: #38bdf8; }
+        .status-pending { color: var(--accent-warning); font-style: italic; }
+
+        .btn-del {
+            background-color: transparent;
+            color: #f87171;
+            border: 1px solid rgba(239, 68, 68, 0.4);
+            padding: 2px 6px;
+            font-size: 0.75rem;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        .btn-del:hover { background-color: var(--accent-danger); color: #fff; }
+
+        .btn-user-del {
+            background-color: rgba(239, 68, 68, 0.2);
+            color: #fca5a5;
+            border: 1px solid rgba(239, 68, 68, 0.4);
+            padding: 4px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.75rem;
+        }
+
+        .select-role {
+            background: var(--bg-input);
+            color: var(--text-main);
+            border: 1px solid var(--border-color);
+            padding: 4px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+        }
+
+        .empty { color: var(--text-dim); font-style: italic; font-size: 0.8rem; }
+        .empty-center {
+            text-align: center;
+            color: var(--text-muted);
+            font-style: italic;
+            padding: 24px;
+            background-color: var(--bg-card);
+            border-radius: var(--radius-md);
+            border: 1px solid var(--border-color);
+            max-width: 1200px;
+            margin: 0 auto;
+        }
     </style>
     <script>
         const ALL_SERVERS = [
@@ -862,7 +1278,7 @@ DASHBOARD_HTML = """
                 currentUser = data;
                 document.getElementById('login-screen').style.display = 'none';
                 document.getElementById('main-dashboard').style.display = 'block';
-                document.getElementById('user-info').innerText = `Вы вошли как: ${data.username} (${data.role})`;
+                document.getElementById('user-info').innerText = `${data.username} (${data.role})`;
                 
                 const canManage = data.role === 'admin' || data.role === 'support';
                 const isAdmin = data.role === 'admin';
@@ -970,17 +1386,17 @@ DASHBOARD_HTML = """
             if (!res.ok) return;
             const users = await res.json();
             
-            let html = `<table><tr><th>ID</th><th>Логин</th><th>Роль</th><th>Доступ</th><th>Действия</th></tr>`;
+            let html = `<div class="table-responsive"><table><tr><th>ID</th><th>Логин</th><th>Роль</th><th>Доступ</th><th>Действия</th></tr>`;
             users.forEach(u => {
                 const isSelf = u.username === currentUser.username;
                 
                 const toggleAccessBtn = !isSelf ? 
-                    `<button onclick="toggleUserAccess(${u.id}, ${u.is_allowed})">${u.is_allowed ? 'Заблокировать' : 'Разблокировать'}</button>` : '—';
+                    `<button class="btn-add" onclick="toggleUserAccess(${u.id}, ${u.is_allowed})">${u.is_allowed ? 'Заблокировать' : 'Разблокировать'}</button>` : '—';
                 
                 const deleteUserBtn = !isSelf ? 
                     `<button class="btn-user-del" onclick="deleteUser(${u.id}, '${u.username}')">Удалить</button>` : '';
 
-                const changePwBtn = `<button class="btn-add" style="background-color: #f57c00;" onclick="changeUserPassword(${u.id}, '${u.username}')">🔑 Пароль</button>`;
+                const changePwBtn = `<button class="btn-add" style="background-color: var(--accent-warning); color: #000;" onclick="changeUserPassword(${u.id}, '${u.username}')">🔑 Пароль</button>`;
 
                 const roleSelect = !isSelf ? `
                     <select class="select-role" onchange="changeUserRole(${u.id}, this.value)">
@@ -995,14 +1411,16 @@ DASHBOARD_HTML = """
                     <td>${u.username}</td>
                     <td>${roleSelect}</td>
                     <td>${u.is_allowed ? '✅ Разрешен' : '❌ Заблокирован'}</td>
-                    <td style="display: flex; gap: 5px; align-items: center; flex-wrap: wrap;">
-                        ${changePwBtn}
-                        ${toggleAccessBtn} 
-                        ${deleteUserBtn}
+                    <td>
+                        <div style="display: flex; gap: 4px; align-items: center; flex-wrap: wrap;">
+                            ${changePwBtn}
+                            ${toggleAccessBtn} 
+                            ${deleteUserBtn}
+                        </div>
                     </td>
                 </tr>`;
             });
-            document.getElementById('admin-users-table').innerHTML = html + '</table>';
+            document.getElementById('admin-users-table').innerHTML = html + '</table></div>';
         }
 
         async function loadScanLogs() {
@@ -1015,15 +1433,15 @@ DASHBOARD_HTML = """
                 return;
             }
 
-            let html = `<table><tr><th>Время (МСК)</th><th>Сервер</th><th>Отправитель</th></tr>`;
+            let html = `<div class="table-responsive"><table><tr><th>Время (МСК)</th><th>Сервер</th><th>Отправитель</th></tr>`;
             logs.forEach(l => {
                 html += `<tr>
                     <td><b>${l.created_at}</b></td>
-                    <td><span style="color: #00bcd4;">${l.server}</span></td>
-                    <td><span style="color: #ffb74d;">${l.scanner}</span></td>
+                    <td><span style="color: var(--accent-info);">${l.server}</span></td>
+                    <td><span style="color: var(--accent-warning);">${l.scanner}</span></td>
                 </tr>`;
             });
-            document.getElementById('admin-scan-logs-table').innerHTML = html + '</table>';
+            document.getElementById('admin-scan-logs-table').innerHTML = html + '</table></div>';
         }
 
         async function changeUserPassword(userId, username) {
@@ -1237,7 +1655,7 @@ DASHBOARD_HTML = """
         function renderTable(items, server, scanId, type, interactive = true, isDropTab = false, info = {}) {
             if (!items || items.length === 0) return '<span class="empty">Нет данных</span>';
             
-            let html = '<table><tr><th>№</th><th>ID</th><th>PD</th><th>Статус</th>' + 
+            let html = '<div class="table-responsive"><table><tr><th>№</th><th>ID</th><th>PD</th><th>Статус</th>' + 
                        (!interactive ? '<th>Слёт через</th>' : '') + 
                        (interactive ? '<th></th>' : '') + '</tr>';
             
@@ -1254,9 +1672,9 @@ DASHBOARD_HTML = """
                             <button class="btn-opt ${st === 'insured' && !isPending ? 'active-insured' : ''}" onclick="setStatus('${server}', '${scanId}', '${type}', ${item.pos}, 'insured')">Страх.</button>
                             <button class="btn-opt ${st === 'uninsured' && !isPending ? 'active-uninsured' : ''}" onclick="setStatus('${server}', '${scanId}', '${type}', ${item.pos}, 'uninsured')">Не страх.</button>
                             ${type === 'biz' ? `<button class="btn-opt ${st === 'no_activity' && !isPending ? 'active-noact' : ''}" onclick="setStatus('${server}', '${scanId}', 'biz',${item.pos}, 'no_activity')">Без зан.</button>` : ''}
-                            <button class="btn-opt ${st === 'frozen' && !isPending ? 'active-frozen' : ''}" onclick="setStatus('${server}', '${scanId}', '${type}', ${item.pos}, 'frozen')">Заморожен</button>
+                            <button class="btn-opt ${st === 'frozen' && !isPending ? 'active-frozen' : ''}" onclick="setStatus('${server}', '${scanId}', '${type}', ${item.pos}, 'frozen')">Замор.</button>
                         </div>
-                        ${isPending ? '<span class="status-pending">⏳ Ожидание пары</span>' : ''}`;
+                        ${isPending ? '<span class="status-pending">⏳ Ждем пару</span>' : ''}`;
                 } else {
                     if (isPending) {
                         statusControl = `<span class="status-pending">⏳ Ожидание 2-го скана</span>`;
@@ -1285,7 +1703,7 @@ DASHBOARD_HTML = """
                 }
 
                 html += `<tr>
-                    <td>${item.pos}</td>
+                    <td><b>${item.pos}</b></td>
                     <td>${item.propId ? '№' + item.propId : '—'}</td>
                     <td><span class="${badgeClass}">${displayPd} pd</span></td>
                     <td>${statusControl}</td>
@@ -1293,7 +1711,7 @@ DASHBOARD_HTML = """
                     ${interactive ? `<td><button class="btn-del" onclick="deleteItem('${server}', '${scanId}', '${type}',${item.pos})">✖</button></td>` : ''}
                 </tr>`;
             });
-            return html + '</table>';
+            return html + '</table></div>';
         }
 
         function renderViewTab() {
@@ -1339,7 +1757,7 @@ DASHBOARD_HTML = """
                         <div class="server-header">
                             <div class="server-title">
                                 <span>
-                                    <span class="fav-btn" title="Добавить в избранное" onclick="toggleFavorite('${srv}')">${starIcon}</span>
+                                    <span class="fav-btn" title="В избранное" onclick="toggleFavorite('${srv}')">${starIcon}</span>
                                     ${displayName}
                                 </span>
                                 <span class="season-badge season-badge-${srv}">Загрузка...</span>
@@ -1563,34 +1981,36 @@ DASHBOARD_HTML = """
     </script>
 </head>
 <body>
-    <h1>Arizona RP — Мониторинг Слётов</h1>
+    <div class="app-header">
+        <h1>Arizona RP — Мониторинг Слётов</h1>
+    </div>
 
     <!-- Экран входа -->
     <div id="login-screen" class="login-box" style="display: none;">
         <h2>Авторизация</h2>
-        <input type="text" id="login-username" placeholder="Логин"><br>
-        <input type="password" id="login-password" placeholder="Пароль"><br>
+        <input type="text" id="login-username" placeholder="Логин">
+        <input type="password" id="login-password" placeholder="Пароль">
         <button onclick="handleLogin()">Войти</button>
     </div>
 
     <!-- Основной Дашборд -->
     <div id="main-dashboard" style="display: none;">
         <div class="user-nav">
-            <span id="user-info"></span>
+            <span id="user-info">...</span>
             <button class="btn-logout" onclick="handleLogout()">Выйти</button>
         </div>
 
         <div class="tabs">
             <button id="btn-tab-view" class="tab-btn active" onclick="switchTab('view')">Общий вид</button>
             <button id="btn-tab-upcoming" class="tab-btn" onclick="switchTab('upcoming')">🔥 Ближайшие слёты</button>
-            <button id="btn-tab-manage" class="tab-btn" style="display: none;" onclick="switchTab('manage')">Управление сканами</button>
+            <button id="btn-tab-manage" class="tab-btn" style="display: none;" onclick="switchTab('manage')">Управление</button>
             <button id="btn-tab-admin" class="tab-btn" style="display: none;" onclick="switchTab('admin')">👑 Админ-панель</button>
         </div>
 
         <div id="tab-view" class="tab-content active">
             <div class="filter-panel">
                 <div class="filter-group">
-                    <label for="filter-season">Сезон слётов:</label>
+                    <label for="filter-season">Сезон слётов</label>
                     <select id="filter-season" class="filter-select" onchange="renderViewTab()">
                         <option value="all">Все сезоны</option>
                         <option value="1">1 — По инфе</option>
@@ -1602,7 +2022,7 @@ DASHBOARD_HTML = """
                 </div>
 
                 <div class="filter-group">
-                    <label for="filter-fav">Серверы:</label>
+                    <label for="filter-fav">Серверы</label>
                     <select id="filter-fav" class="filter-select" onchange="renderViewTab()">
                         <option value="all">Все серверы</option>
                         <option value="fav_only">Только избранные ⭐</option>
@@ -1627,26 +2047,28 @@ DASHBOARD_HTML = """
         </div>
 
         <div id="tab-admin" class="tab-content">
-            <div class="server-card" style="max-width: 1100px; margin: 0 auto 20px auto;">
-                <h3>Создать нового пользователя</h3>
-                <input type="text" id="new-username" placeholder="Новый логин" style="padding: 6px; margin-right: 10px;">
-                <input type="password" id="new-password" placeholder="Новый пароль" style="padding: 6px; margin-right: 10px;">
-                <select id="new-role" class="select-role" style="padding: 6px; margin-right: 10px;">
-                    <option value="user">User</option>
-                    <option value="support">Support</option>
-                    <option value="admin">Admin</option>
-                </select>
-                <button class="btn-add" style="padding: 6px 12px;" onclick="handleCreateUser()">Создать аккаунт</button>
+            <div class="server-card" style="max-width: 1200px; margin: 0 auto 20px auto;">
+                <h3 style="margin-bottom: 12px; font-size: 1rem; color: var(--text-main);">Создать нового пользователя</h3>
+                <div style="display: flex; flex-wrap: wrap; gap: 10px;">
+                    <input type="text" id="new-username" placeholder="Логин" class="filter-select" style="flex: 1; min-width: 140px;">
+                    <input type="password" id="new-password" placeholder="Пароль" class="filter-select" style="flex: 1; min-width: 140px;">
+                    <select id="new-role" class="select-role" style="padding: 8px 12px;">
+                        <option value="user">User</option>
+                        <option value="support">Support</option>
+                        <option value="admin">Admin</option>
+                    </select>
+                    <button class="btn-add" style="padding: 8px 16px; background-color: var(--accent-primary); color: #fff;" onclick="handleCreateUser()">Создать</button>
+                </div>
             </div>
 
-            <div class="server-card" style="max-width: 1100px; margin: 0 auto 20px auto;">
-                <h3>Список пользователей</h3>
+            <div class="server-card" style="max-width: 1200px; margin: 0 auto 20px auto;">
+                <h3 style="margin-bottom: 12px; font-size: 1rem; color: var(--text-main);">Список пользователей</h3>
                 <div id="admin-users-table">Загрузка...</div>
             </div>
 
-            <div class="server-card" style="max-width: 1100px; margin: 0 auto;">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                    <h3 style="margin: 0;">📜 Логи сканирования (за сегодня)</h3>
+            <div class="server-card" style="max-width: 1200px; margin: 0 auto;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                    <h3 style="margin: 0; font-size: 1rem; color: var(--text-main);">📜 Логи сканирования (за сегодня)</h3>
                     <button class="btn-add" onclick="loadScanLogs()">Обновить</button>
                 </div>
                 <div id="admin-scan-logs-table">Загрузка логов...</div>
@@ -1695,12 +2117,10 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
 
         scans = server_data[srv]["scans"]
 
-        # Поиск последнего неспаренного ("ждущего") скана
         waiting_scan = None
         for s in reversed(scans):
             if not s.get("isPaired", False) and s.get("isActive", True):
                 s_dt = datetime.strptime(s["scanTime"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=MSK_TZ)
-                # Если предыдущий скан был отправлен в предыдущий часовой промежуток (3000-4200 сек)
                 if 3000 <= (now_msk - s_dt).total_seconds() <= 4200:
                     waiting_scan = s
                     break
@@ -1788,7 +2208,6 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
             waiting_scan["isPaired"] = True
             waiting_scan["pairScanId"] = scan_id
 
-            # При появлении новой активной пары пометить все более ранние пары неактивными
             for s in scans:
                 if s["scanId"] not in [scan_id, waiting_scan["scanId"]]:
                     s["isActive"] = False
