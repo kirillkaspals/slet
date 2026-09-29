@@ -99,7 +99,7 @@ def get_drop_limit(server: str, prop_type: str, status: str) -> int:
         "biz": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}
     })
     rules = srv_rules.get(prop_type, {"insured": 2, "uninsured_min": 2, "uninsured_max": 3})
-    if status in ["uninsured", "frozen"]:
+    if status in ["uninsured", "no_activity", "frozen"]:
         return rules.get("uninsured_min", 2)
     return rules.get("insured", 2)
 
@@ -393,7 +393,7 @@ async def process_hourly_payday():
                     continue
 
                 st = h.get("status", "insured")
-                if st != "frozen":
+                if not is_restart_hour and st != "frozen":
                     decrement = 1 if st == "insured" else 2
                     h["pd"] -= decrement
                 
@@ -410,7 +410,7 @@ async def process_hourly_payday():
                     continue
 
                 st = b.get("status", "insured")
-                if st != "frozen":
+                if not is_restart_hour and st != "frozen":
                     decrement = 1 if st == "insured" else (2 if st == "uninsured" else 4)
                     b["pd"] -= decrement
                 
@@ -464,7 +464,10 @@ app.add_middleware(
 @app.post("/api/auth/login")
 async def login(data: LoginModel, response: Response):
     if not db_pool:
-        raise HTTPException(status_code=53, detail="База данных недоступна. Попробуйте позже.")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="База данных недоступна. Попробуйте позже."
+        )
 
     user = await get_user_by_username(data.username)
     if not user or not pwd_context.verify(data.password, user["password_hash"]):
@@ -530,6 +533,8 @@ async def get_me(request: Request):
 
 @app.get("/api/admin/users")
 async def get_users(username: str = Depends(verify_admin)):
+    if not db_pool:
+        return []
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT id, username, role, is_allowed, created_at FROM users ORDER BY id ASC")
         return [dict(row) for row in rows]
@@ -555,12 +560,16 @@ async def get_scan_logs(username: str = Depends(verify_admin)):
 
 @app.post("/api/admin/toggle_access")
 async def toggle_access(data: ToggleAccessModel, username: str = Depends(verify_admin)):
+    if not db_pool:
+        raise HTTPException(status_code=53, detail="БД недоступна")
     async with db_pool.acquire() as conn:
         await conn.execute("UPDATE users SET is_allowed = $1 WHERE id = $2", data.is_allowed, data.user_id)
     return {"status": "success"}
 
 @app.post("/api/admin/create_user")
 async def create_user(data: CreateUserModel, username: str = Depends(verify_admin)):
+    if not db_pool:
+        raise HTTPException(status_code=53, detail="БД недоступна")
     role = data.role if data.role in ["user", "support", "admin"] else "user"
     hashed_pw = pwd_context.hash(data.password)
     async with db_pool.acquire() as conn:
@@ -576,6 +585,8 @@ async def create_user(data: CreateUserModel, username: str = Depends(verify_admi
 
 @app.post("/api/admin/delete_user")
 async def delete_user(data: DeleteUserModel, current_admin: str = Depends(verify_admin)):
+    if not db_pool:
+        raise HTTPException(status_code=53, detail="БД недоступна")
     async with db_pool.acquire() as conn:
         target = await conn.fetchrow("SELECT username FROM users WHERE id = $1", data.user_id)
         if not target:
@@ -594,6 +605,8 @@ async def delete_user(data: DeleteUserModel, current_admin: str = Depends(verify
 
 @app.post("/api/admin/update_role")
 async def update_role(data: UpdateRoleModel, current_admin: str = Depends(verify_admin)):
+    if not db_pool:
+        raise HTTPException(status_code=53, detail="БД недоступна")
     if data.role not in ["user", "support", "admin"]:
         raise HTTPException(status_code=400, detail="Недопустимая роль")
         
@@ -610,6 +623,8 @@ async def update_role(data: UpdateRoleModel, current_admin: str = Depends(verify
 
 @app.post("/api/admin/change_password")
 async def change_password(data: ChangePasswordModel, current_admin: str = Depends(verify_admin)):
+    if not db_pool:
+        raise HTTPException(status_code=53, detail="БД недоступна")
     if not data.new_password or len(data.new_password.strip()) < 4:
         raise HTTPException(status_code=400, detail="Пароль слишком короткий (минимум 4 символа)")
 
@@ -680,6 +695,7 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
             if idx in house_matches:
                 prev_item, auto_status = house_matches[idx]
                 prev_item["isPendingPair"] = False
+                prev_item["status"] = auto_status
                 record = {
                     "basePd": item.pd,
                     "pd": item.pd,
@@ -716,6 +732,7 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
             if idx in biz_matches:
                 prev_item, auto_status = biz_matches[idx]
                 prev_item["isPendingPair"] = False
+                prev_item["status"] = auto_status
                 record = {
                     "basePd": item.pd,
                     "pd": item.pd,
@@ -1355,30 +1372,9 @@ DASHBOARD_HTML = """
             } catch(e) { console.error(e); }
         }
 
-        function calculateDropPaydays(item, typeRules) {
-            if (!item || item.isPendingPair || item.status === 'frozen') return null;
-
-            const st = item.status || 'insured';
-            const rules = typeRules || { insured: 2, uninsured_min: 2, uninsured_max: 3 };
-
-            let decrement = 1;
-            let dropLimit = rules.insured;
-
-            if (st === 'uninsured') {
-                decrement = 2;
-                dropLimit = rules.uninsured_min;
-            } else if (st === 'no_activity') {
-                decrement = 4;
-                dropLimit = rules.uninsured_min;
-            }
-
-            const neededPayDays = Math.max(0, Math.ceil((item.pd - (dropLimit - 1)) / decrement));
-            return neededPayDays;
-        }
-
-        function calculateDropTime(pd, status, typeRules, propType) {
+        function calculateDropInfo(pd, status, typeRules) {
             if (status === 'frozen') {
-                return { text: '❄️ Заморожен', isFrozen: true, paydays: null };
+                return { text: '❄️ Заморожен', isFrozen: true, paydays: null, hourSteps: null };
             }
 
             const rules = typeRules || { insured: 2, uninsured_min: 2, uninsured_max: 3 };
@@ -1405,16 +1401,22 @@ DASHBOARD_HTML = """
 
             let paydaysApplied = 0;
             while (paydaysApplied < neededPayDays) {
-                paydaysApplied++;
-                if (paydaysApplied === neededPayDays && targetTime.getHours() === 5) {
-                    targetTime.setHours(6);
-                } else if (paydaysApplied < neededPayDays) {
+                if (targetTime.getHours() !== 5) {
+                    paydaysApplied++;
+                }
+                if (paydaysApplied < neededPayDays) {
                     targetTime.setHours(targetTime.getHours() + 1);
                 }
             }
 
+            let firstNextHour = new Date(mskNow);
+            firstNextHour.setMinutes(0, 0, 0);
+            firstNextHour.setHours(firstNextHour.getHours() + 1);
+
+            const hourSteps = Math.round((targetTime.getTime() - firstNextHour.getTime()) / 3600000) + 1;
+
             const diffMs = targetTime.getTime() - mskNow.getTime();
-            if (diffMs <= 0) return { text: '< 1 мин', isFrozen: false, paydays: neededPayDays };
+            if (diffMs <= 0) return { text: '< 1 мин', isFrozen: false, paydays: neededPayDays, hourSteps: 1 };
 
             const totalMinutes = Math.floor(diffMs / 60000);
             const hours = Math.floor(totalMinutes / 60);
@@ -1424,7 +1426,11 @@ DASHBOARD_HTML = """
             if (hours > 0) timeStr += `${hours} ч `;
             timeStr += `${minutes} мин`;
 
-            return { text: timeStr, isFrozen: false, paydays: neededPayDays };
+            return { text: timeStr, isFrozen: false, paydays: neededPayDays, hourSteps: hourSteps };
+        }
+
+        function calculateDropTime(pd, status, typeRules) {
+            return calculateDropInfo(pd, status, typeRules);
         }
 
         function renderTable(items, server, scanId, type, interactive = true, isDropTab = false, info = {}) {
@@ -1471,7 +1477,7 @@ DASHBOARD_HTML = """
                         dropTimeTd = '<td><span class="empty">—</span></td>';
                     } else {
                         const typeRules = getPropRules(info, type);
-                        const dropInfo = calculateDropTime(item.pd, st, typeRules, type);
+                        const dropInfo = calculateDropTime(item.pd, st, typeRules);
                         const badgeStyle = dropInfo.isFrozen ? 'time-left-frozen' : 'time-left-badge';
                         dropTimeTd = `<td><span class="${badgeStyle}">${dropInfo.text}</span></td>`;
                     }
@@ -1572,7 +1578,7 @@ DASHBOARD_HTML = """
 
                 const latestConfirmed = info.latestConfirmedScan;
 
-                if (latestConfirmed) {
+                if (latestConfirmed && (latestConfirmed.isConfirmed || latestConfirmed.hasPair)) {
                     elemHouse.innerHTML = renderTable(latestConfirmed.houses, srv, latestConfirmed.scanId, 'house', false, false, info);
                     elemBiz.innerHTML = renderTable(latestConfirmed.businesses, srv, latestConfirmed.scanId, 'biz', false, false, info);
                 } else {
@@ -1583,9 +1589,10 @@ DASHBOARD_HTML = """
         }
 
         function willDropInExactHours(item, typeRules, targetHours) {
-            const paydaysToDrop = calculateDropPaydays(item, typeRules);
-            if (paydaysToDrop === null) return false;
-            return paydaysToDrop === targetHours;
+            if (!item || item.isPendingPair || item.status === 'frozen') return false;
+            const st = item.status || 'insured';
+            const dropInfo = calculateDropInfo(item.pd, st, typeRules);
+            return dropInfo.hourSteps === targetHours;
         }
 
         async function loadData() {
@@ -1653,7 +1660,7 @@ DASHBOARD_HTML = """
                     }
 
                     const latestConfirmed = info.latestConfirmedScan;
-                    if (latestConfirmed) {
+                    if (latestConfirmed && (latestConfirmed.isConfirmed || latestConfirmed.hasPair)) {
                         const houseRules = getPropRules(info, 'house');
                         const bizRules = getPropRules(info, 'biz');
 
@@ -1848,4 +1855,5 @@ DASHBOARD_HTML = """
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    module_name = os.path.splitext(os.path.basename(__file__))[0]
+    uvicorn.run(f"{module_name}:app", host="0.0.0.0", port=8000, reload=True)
