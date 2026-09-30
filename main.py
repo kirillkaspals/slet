@@ -40,7 +40,7 @@ ALL_SERVERS = [
 
 SEASONS_MAP = {
     1: "📱 По инфе",
-    2: "⌨️ Скорострелы",
+    2: "⌨️️ Скорострелы",
     3: "🏎️ Автогонки",
     4: "✈️ По новому",
     5: "🏍️ Мотогонки"
@@ -333,11 +333,6 @@ async def save_data_to_file_async():
     await asyncio.to_thread(_save)
 
 def check_and_update_outdated_scans() -> bool:
-    """
-    Проверяет одиночные непарные сканы. Если со времени сканирования
-    прошло >= 2 часов (т.е. за следующий часовой интервал не пришел парный скан),
-    скан помечается как устаревший (isOutdated = True).
-    """
     now_msk = datetime.now(MSK_TZ)
     now_hour_start = now_msk.replace(minute=0, second=0, microsecond=0)
     changed = False
@@ -378,12 +373,10 @@ def get_server_season_info(server: str) -> dict:
 def get_latest_confirmed_scan(scans: List[dict]) -> Optional[dict]:
     if not scans:
         return None
-    # Приоритет: последний скан из АКТУАЛЬНОЙ (зеленой) пары
     current_pair_scans = [s for s in scans if s.get("isCurrentPair", False) and s.get("hasPair", False)]
     if current_pair_scans:
         return current_pair_scans[-1]
     
-    # Фолбэк: любой скан, входящий в подтвержденную пару
     confirmed_scans = [s for s in scans if s.get("hasPair", False) or s.get("isConfirmed", False)]
     if confirmed_scans:
         return confirmed_scans[-1]
@@ -758,13 +751,11 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
 
         scans = server_data[srv]["scans"]
         
-        # Находим предыдущий скан, который ЕЩЁ НЕ имеет пары и НЕ устарел
         other_scans = [s for s in scans if s["scanId"] != scan_id]
         
         prev_scan = None
         if other_scans:
             last_s = other_scans[-1]
-            # Новая пара формируется только если предыдущий скан был НЕПАРНЫМ и НЕ УСТАРЕВШИМ!
             if not last_s.get("hasPair", False) and not last_s.get("isOutdated", False):
                 prev_scan = last_s
 
@@ -854,12 +845,9 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
         houses = sorted(houses, key=lambda x: x["pos"])
         businesses = sorted(businesses, key=lambda x: x["pos"])
 
-        # Пара считается сформированной, только если есть непарный предыдущий скан
         is_pair_found = (prev_scan is not None)
 
         if is_pair_found and prev_scan:
-            # Сформирована новая актуальная пара!
-            # Все предыдущие сканы помечаем как устаревшие (isCurrentPair = False, isOutdated = True)
             for s in scans:
                 s["isCurrentPair"] = False
                 s["isOutdated"] = True
@@ -903,7 +891,6 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
             }
             scans.append(new_scan)
 
-        # Автоматическая очистка: оставляем максимум последние 4 скана (2 пары)
         if len(server_data[srv]["scans"]) > 4:
             server_data[srv]["scans"] = server_data[srv]["scans"][-4:]
 
@@ -1037,7 +1024,6 @@ DASHBOARD_HTML = """
             min-height: 100vh;
         }
 
-        /* Custom Scrollbar */
         ::-webkit-scrollbar { width: 8px; height: 8px; }
         ::-webkit-scrollbar-track { background: var(--bg-color); }
         ::-webkit-scrollbar-thumb { background: #263043; border-radius: 4px; }
@@ -1054,6 +1040,67 @@ DASHBOARD_HTML = """
             background: linear-gradient(135deg, #fff 30%, var(--accent-orange));
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
+        }
+
+        /* Баннер Лотереи */
+        .lottery-banner {
+            background: linear-gradient(135deg, rgba(255, 152, 0, 0.15), rgba(156, 39, 176, 0.2));
+            border: 1px solid rgba(255, 152, 0, 0.4);
+            border-radius: 12px;
+            padding: 14px 20px;
+            margin: 0 auto 20px auto;
+            max-width: 1600px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 15px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+        }
+        .lottery-info {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+        .lottery-icon {
+            font-size: 2.2rem;
+            line-height: 1;
+        }
+        .lottery-title {
+            font-size: 1.05rem;
+            font-weight: 800;
+            color: #ffb74d;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .lottery-sub {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            margin-top: 2px;
+        }
+        .lottery-sub b {
+            color: #ffffff;
+        }
+        .lottery-countdown {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: rgba(15, 18, 26, 0.7);
+            padding: 8px 16px;
+            border-radius: 8px;
+            border: 1px solid var(--card-border);
+        }
+        .lottery-label {
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: var(--text-muted);
+        }
+        .lottery-timer {
+            font-size: 1.25rem;
+            font-weight: 800;
+            color: #00e676;
+            font-family: monospace;
+            letter-spacing: 1px;
         }
 
         /* Auth Screen */
@@ -1225,7 +1272,7 @@ DASHBOARD_HTML = """
         }
         .fav-btn:hover { transform: scale(1.3); }
 
-        /* GRID FOR SERVERS (3-4 per row) */
+        /* GRID FOR SERVERS */
         .servers-container { 
             display: grid; 
             grid-template-columns: repeat(1, 1fr); 
@@ -1284,7 +1331,6 @@ DASHBOARD_HTML = """
             white-space: nowrap;
         }
         
-        /* Scan Tabs Inside Card */
         .scan-tabs-bar { 
             display: flex; 
             justify-content: space-between; 
@@ -1311,7 +1357,6 @@ DASHBOARD_HTML = """
             gap: 4px;
         }
 
-        /* Подсветка сканов */
         .scan-subtab.current-pair { 
             background-color: rgba(46, 125, 50, 0.2); 
             color: #81c784; 
@@ -1364,7 +1409,6 @@ DASHBOARD_HTML = """
         }
         .btn-delete-scan:hover { background-color: #d32f2f; color: #fff; }
 
-        /* Tables Grid inside Card */
         .tables-grid { 
             display: grid; 
             grid-template-columns: 1fr 1fr; 
@@ -1389,7 +1433,6 @@ DASHBOARD_HTML = """
         }
         .btn-add:hover { background-color: #0277bd; }
 
-        /* Compact Modern Tables */
         table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
         th, td { padding: 4px 6px; text-align: left; border-bottom: 1px solid #1a202c; }
         th { background-color: var(--table-header); color: var(--text-muted); font-weight: 600; font-size: 0.72rem; }
@@ -1472,6 +1515,30 @@ DASHBOARD_HTML = """
         let favoriteServers = JSON.parse(localStorage.getItem('fav_servers') || '[]');
         let globalServerData = {};
         let selectedUpcomingHours = 1;
+
+        function updateLotteryTimer() {
+            const now = new Date();
+            const utcMs = now.getTime() + (now.getTimezoneOffset() * 60000);
+            const mskNow = new Date(utcMs + (3 * 3600000));
+
+            let target = new Date(mskNow);
+            target.setHours(21, 10, 0, 0);
+
+            if (mskNow >= target) {
+                target.setDate(target.getDate() + 1);
+            }
+
+            const diffMs = target - mskNow;
+            const hours = Math.floor(diffMs / (1000 * 60 * 60));
+            const minutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+            const seconds = Math.floor((diffMs % (1000 * 60)) / 1000);
+
+            const pad = n => String(n).padStart(2, '0');
+            const timerElem = document.getElementById('lottery-timer');
+            if (timerElem) {
+                timerElem.innerText = `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+            }
+        }
 
         function getPropRules(info, type) {
             const defaultRules = { insured: 2, uninsured_min: 2, uninsured_max: 3 };
@@ -2199,7 +2266,7 @@ DASHBOARD_HTML = """
                         <div class="server-card">
                             <div class="server-header">
                                 <div class="server-title">
-                                    <span>${srv}</span>
+                                    <span>${getServerDisplayName(srv)}</span>
                                     <span class="season-badge season-badge-${srv}">Загрузка...</span>
                                 </div>
                             </div>
@@ -2231,6 +2298,9 @@ DASHBOARD_HTML = """
             renderViewTab();
             loadData();
             setInterval(loadData, 10000);
+            
+            updateLotteryTimer();
+            setInterval(updateLotteryTimer, 1000);
         }
 
         document.addEventListener('DOMContentLoaded', checkAuth);
@@ -2255,20 +2325,35 @@ DASHBOARD_HTML = """
         </div>
 
         <div class="tabs">
-            <button id="btn-tab-view" class="tab-btn active" onclick="switchTab('view')">👁️ Общий вид</button>
+            <button id="btn-tab-view" class="tab-btn active" onclick="switchTab('view')">👁️️ Общий вид</button>
             <button id="btn-tab-upcoming" class="tab-btn" onclick="switchTab('upcoming')">🔥 Ближайшие слёты</button>
             <button id="btn-tab-manage" class="tab-btn" style="display: none;" onclick="switchTab('manage')">🛠️ Управление сканами</button>
             <button id="btn-tab-admin" class="tab-btn" style="display: none;" onclick="switchTab('admin')">👑 Админ-панель</button>
         </div>
 
         <div id="tab-view" class="tab-content active">
+            <!-- Баннер Лотерейных Билетов -->
+            <div class="lottery-banner">
+                <div class="lottery-info">
+                    <span class="lottery-icon">🎟️</span>
+                    <div>
+                        <div class="lottery-title">Ежедневный розыгрыш лотереи</div>
+                        <div class="lottery-sub">Розыгрыш лотерейных билетов проходит каждый день в <b>21:10 МСК</b></div>
+                    </div>
+                </div>
+                <div class="lottery-countdown">
+                    <span class="lottery-label">До розыгрыша:</span>
+                    <span id="lottery-timer" class="lottery-timer">00:00:00</span>
+                </div>
+            </div>
+
             <div class="filter-panel">
                 <div class="filter-group">
                     <label for="filter-season">Сезон слётов:</label>
                     <select id="filter-season" class="filter-select" onchange="renderViewTab()">
                         <option value="all">Все сезоны</option>
                         <option value="1">1 — 📱 По инфе</option>
-                        <option value="2">2 — ⌨️ Скорострелы</option>
+                        <option value="2">2 — ⌨️️ Скорострелы</option>
                         <option value="3">3 — 🏎️ Автогонки</option>
                         <option value="4">4 — ✈️ По новому</option>
                         <option value="5">5 — 🏍️ Мотогонки</option>
@@ -2304,18 +2389,18 @@ DASHBOARD_HTML = """
             <div style="max-width: 1200px; margin: 0 auto; background: var(--card-bg); padding: 20px; border-radius: 10px; border: 1px solid var(--card-border);">
                 <h3 style="color: var(--accent-orange); margin-top: 0;">Управление пользователями</h3>
                 <div style="display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap;">
-                    <input type="text" id="new-username" placeholder="Логин" style="background: #0f121a; border: 1px solid #263043; color: #fff; padding: 8px; border-radius: 6px;">
-                    <input type="password" id="new-password" placeholder="Пароль" style="background: #0f121a; border: 1px solid #263043; color: #fff; padding: 8px; border-radius: 6px;">
-                    <select id="new-role" class="select-role" style="padding: 8px;">
+                    <input type="text" id="new-username" placeholder="Логин" style="padding: 8px; background: #0f121a; border: 1px solid #263043; color: #fff; border-radius: 4px;">
+                    <input type="password" id="new-password" placeholder="Пароль" style="padding: 8px; background: #0f121a; border: 1px solid #263043; color: #fff; border-radius: 4px;">
+                    <select id="new-role" style="padding: 8px; background: #0f121a; border: 1px solid #263043; color: #fff; border-radius: 4px;">
                         <option value="user">User</option>
                         <option value="support">Support</option>
                         <option value="admin">Admin</option>
                     </select>
-                    <button class="btn-add" style="padding: 8px 16px; font-size: 0.9rem;" onclick="handleCreateUser()">Создать пользователя</button>
+                    <button class="btn-add" style="padding: 8px 16px;" onclick="handleCreateUser()">Создать пользователя</button>
                 </div>
                 <div id="admin-users-table"></div>
 
-                <h3 style="color: var(--accent-orange); margin-top: 30px;">Логи сканирований (последние 200)</h3>
+                <h3 style="color: var(--accent-orange); margin-top: 30px;">Логи сканирований за сегодня</h3>
                 <div id="admin-scan-logs-table"></div>
             </div>
         </div>
