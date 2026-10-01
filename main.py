@@ -457,7 +457,6 @@ async def process_hourly_payday():
     now_msk = datetime.now(MSK_TZ)
     is_restart_hour = (now_msk.hour == 5)
 
-    # Ежедневная очистка логов сканирований и ручных действий в 00:00 МСК
     if now_msk.hour == 0 and db_pool:
         try:
             async with db_pool.acquire() as conn:
@@ -1166,7 +1165,6 @@ DASHBOARD_HTML = """
             -webkit-text-fill-color: transparent;
         }
 
-        /* Баннер Лотереи */
         .lottery-banner {
             background: linear-gradient(135deg, rgba(255, 152, 0, 0.15), rgba(156, 39, 176, 0.2));
             border: 1px solid rgba(255, 152, 0, 0.4);
@@ -1181,55 +1179,15 @@ DASHBOARD_HTML = """
             gap: 15px;
             box-shadow: 0 4px 15px rgba(0,0,0,0.3);
         }
-        .lottery-info {
-            display: flex;
-            align-items: center;
-            gap: 14px;
-        }
-        .lottery-icon {
-            font-size: 2.2rem;
-            line-height: 1;
-            color: #ffd700;
-            filter: drop-shadow(0 0 8px rgba(255, 215, 0, 0.8));
-        }
-        .lottery-title {
-            font-size: 1.05rem;
-            font-weight: 800;
-            color: #ffb74d;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-        .lottery-sub {
-            font-size: 0.85rem;
-            color: var(--text-muted);
-            margin-top: 2px;
-        }
-        .lottery-sub b {
-            color: #ffffff;
-        }
-        .lottery-countdown {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            background: rgba(15, 18, 26, 0.7);
-            padding: 8px 16px;
-            border-radius: 8px;
-            border: 1px solid var(--card-border);
-        }
-        .lottery-label {
-            font-size: 0.85rem;
-            font-weight: 600;
-            color: var(--text-muted);
-        }
-        .lottery-timer {
-            font-size: 1.25rem;
-            font-weight: 800;
-            color: #00e676;
-            font-family: monospace;
-            letter-spacing: 1px;
-        }
+        .lottery-info { display: flex; align-items: center; gap: 14px; }
+        .lottery-icon { font-size: 2.2rem; line-height: 1; color: #ffd700; filter: drop-shadow(0 0 8px rgba(255, 215, 0, 0.8)); }
+        .lottery-title { font-size: 1.05rem; font-weight: 800; color: #ffb74d; text-transform: uppercase; letter-spacing: 0.5px; }
+        .lottery-sub { font-size: 0.85rem; color: var(--text-muted); margin-top: 2px; }
+        .lottery-sub b { color: #ffffff; }
+        .lottery-countdown { display: flex; align-items: center; gap: 10px; background: rgba(15, 18, 26, 0.7); padding: 8px 16px; border-radius: 8px; border: 1px solid var(--card-border); }
+        .lottery-label { font-size: 0.85rem; font-weight: 600; color: var(--text-muted); }
+        .lottery-timer { font-size: 1.25rem; font-weight: 800; color: #00e676; font-family: monospace; letter-spacing: 1px; }
 
-        /* Auth Screen */
         .login-box { 
             max-width: 380px; 
             margin: 80px auto; 
@@ -1240,323 +1198,104 @@ DASHBOARD_HTML = """
             text-align: center; 
             box-shadow: 0 10px 30px rgba(0,0,0,0.5);
         }
-        .login-box h2 {
-            margin-top: 0;
-            margin-bottom: 20px;
-            color: var(--text-main);
-            font-size: 1.4rem;
-        }
+        .login-box h2 { margin-top: 0; margin-bottom: 20px; color: var(--text-main); font-size: 1.4rem; }
         .login-box input { 
-            width: 100%; 
-            padding: 12px; 
-            margin: 8px 0; 
-            background: #0f121a; 
-            border: 1px solid #263043; 
-            color: #fff; 
-            border-radius: 6px; 
-            font-size: 0.95rem;
-            outline: none;
-            transition: 0.2s;
+            width: 100%; padding: 12px; margin: 8px 0; background: #0f121a; border: 1px solid #263043; color: #fff; border-radius: 6px; font-size: 0.95rem; outline: none; transition: 0.2s;
         }
-        .login-box input:focus {
-            border-color: var(--accent-orange);
-            box-shadow: 0 0 8px var(--accent-orange-glow);
-        }
+        .login-box input:focus { border-color: var(--accent-orange); box-shadow: 0 0 8px var(--accent-orange-glow); }
         .login-box button { 
-            width: 100%; 
-            padding: 12px; 
-            margin-top: 15px;
-            background: linear-gradient(135deg, #ff9800, #f57c00); 
-            border: none; 
-            font-weight: 700; 
-            cursor: pointer; 
-            border-radius: 6px; 
-            color: #121212; 
-            font-size: 1rem;
-            transition: transform 0.1s, box-shadow 0.2s;
+            width: 100%; padding: 12px; margin-top: 15px; background: linear-gradient(135deg, #ff9800, #f57c00); border: none; font-weight: 700; cursor: pointer; border-radius: 6px; color: #121212; font-size: 1rem; transition: transform 0.1s, box-shadow 0.2s;
         }
-        .login-box button:hover {
-            transform: translateY(-1px);
-            box-shadow: 0 4px 15px var(--accent-orange-glow);
-        }
+        .login-box button:hover { transform: translateY(-1px); box-shadow: 0 4px 15px var(--accent-orange-glow); }
 
-        /* Top Navigation */
         .user-nav { 
-            display: flex; 
-            justify-content: space-between; 
-            align-items: center; 
-            max-width: 1600px; 
-            margin: 0 auto 20px auto; 
-            background: var(--card-bg);
-            padding: 12px 20px;
-            border-radius: 10px;
-            border: 1px solid var(--card-border);
+            display: flex; justify-content: space-between; align-items: center; max-width: 1600px; margin: 0 auto 20px auto; background: var(--card-bg); padding: 12px 20px; border-radius: 10px; border: 1px solid var(--card-border);
         }
         #user-info { font-weight: 600; font-size: 0.95rem; color: var(--text-muted); }
-        .btn-logout { 
-            background: rgba(229, 57, 53, 0.15); 
-            color: #ef5350; 
-            border: 1px solid rgba(229, 57, 53, 0.3); 
-            padding: 7px 16px; 
-            border-radius: 6px; 
-            cursor: pointer; 
-            font-weight: 600;
-            transition: 0.2s;
-        }
-        .btn-logout:hover {
-            background: #e53935;
-            color: #fff;
-        }
+        .btn-logout { background: rgba(229, 57, 53, 0.15); color: #ef5350; border: 1px solid rgba(229, 57, 53, 0.3); padding: 7px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; transition: 0.2s; }
+        .btn-logout:hover { background: #e53935; color: #fff; }
 
-        /* Tabs Navigation */
-        .tabs { 
-            display: flex; 
-            justify-content: center; 
-            gap: 10px; 
-            margin-bottom: 25px; 
-            flex-wrap: wrap;
-        }
-        .tab-btn { 
-            background-color: var(--card-bg); 
-            color: var(--text-muted); 
-            border: 1px solid var(--card-border); 
-            padding: 10px 22px; 
-            font-size: 0.95rem; 
-            font-weight: 700; 
-            border-radius: 8px; 
-            cursor: pointer; 
-            transition: all 0.2s ease; 
-        }
-        .tab-btn.active { 
-            background: linear-gradient(135deg, #ff9800, #f57c00); 
-            color: #121212; 
-            border-color: #ff9800; 
-            box-shadow: 0 4px 15px var(--accent-orange-glow);
-        }
-        .tab-btn:hover:not(.active) { 
-            background-color: #1c2333; 
-            color: #fff; 
-            border-color: #2e384e;
-        }
+        .tabs { display: flex; justify-content: center; gap: 10px; margin-bottom: 25px; flex-wrap: wrap; }
+        .tab-btn { background-color: var(--card-bg); color: var(--text-muted); border: 1px solid var(--card-border); padding: 10px 22px; font-size: 0.95rem; font-weight: 700; border-radius: 8px; cursor: pointer; transition: all 0.2s ease; }
+        .tab-btn.active { background: linear-gradient(135deg, #ff9800, #f57c00); color: #121212; border-color: #ff9800; box-shadow: 0 4px 15px var(--accent-orange-glow); }
+        .tab-btn:hover:not(.active) { background-color: #1c2333; color: #fff; border-color: #2e384e; }
 
         .tab-content { display: none; }
         .tab-content.active { display: block; }
 
-        /* Filter Controls */
         .upcoming-filters { display: flex; justify-content: center; gap: 10px; margin-bottom: 20px; }
-        .time-filter-btn { 
-            background-color: var(--card-bg); 
-            color: var(--text-muted); 
-            border: 1px solid var(--card-border); 
-            padding: 8px 18px; 
-            font-size: 0.85rem; 
-            font-weight: 700; 
-            border-radius: 20px; 
-            cursor: pointer; 
-            transition: 0.2s; 
-        }
-        .time-filter-btn.active { 
-            background-color: #e53935; 
-            color: #ffffff; 
-            border-color: #ef5350; 
-            box-shadow: 0 0 12px rgba(229, 57, 53, 0.4); 
-        }
+        .time-filter-btn { background-color: var(--card-bg); color: var(--text-muted); border: 1px solid var(--card-border); padding: 8px 18px; font-size: 0.85rem; font-weight: 700; border-radius: 20px; cursor: pointer; transition: 0.2s; }
+        .time-filter-btn.active { background-color: #e53935; color: #ffffff; border-color: #ef5350; box-shadow: 0 0 12px rgba(229, 57, 53, 0.4); }
 
-        .filter-panel { 
-            background: var(--card-bg); 
-            border: 1px solid var(--card-border); 
-            border-radius: 10px; 
-            padding: 14px 20px; 
-            margin: 0 auto 20px auto; 
-            max-width: 1600px;
-            display: flex; 
-            flex-wrap: wrap; 
-            gap: 20px; 
-            align-items: center; 
-            justify-content: center; 
-        }
+        .filter-panel { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 10px; padding: 14px 20px; margin: 0 auto 20px auto; max-width: 1600px; display: flex; flex-wrap: wrap; gap: 20px; align-items: center; justify-content: center; }
         .filter-group { display: flex; align-items: center; gap: 10px; }
         .filter-group label { font-size: 0.85rem; color: var(--accent-orange); font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
-        .filter-select { 
-            background: #0f121a; 
-            color: #fff; 
-            border: 1px solid #263043; 
-            padding: 7px 12px; 
-            border-radius: 6px; 
-            font-size: 0.85rem; 
-            font-weight: 600;
-            outline: none;
-            cursor: pointer;
-        }
-        .fav-btn { 
-            cursor: pointer; 
-            font-size: 1.1rem; 
-            user-select: none; 
-            margin-right: 6px; 
-            transition: transform 0.15s ease; 
-            display: inline-block;
-        }
+        .filter-select { background: #0f121a; color: #fff; border: 1px solid #263043; padding: 7px 12px; border-radius: 6px; font-size: 0.85rem; font-weight: 600; outline: none; cursor: pointer; }
+        .fav-btn { cursor: pointer; font-size: 1.1rem; user-select: none; margin-right: 6px; transition: transform 0.15s ease; display: inline-block; }
         .fav-btn:hover { transform: scale(1.3); }
 
-        /* GRID FOR SERVERS */
-        .servers-container { 
-            display: grid; 
-            grid-template-columns: repeat(1, 1fr); 
-            gap: 16px; 
-            max-width: 1600px; 
-            margin: 0 auto; 
-        }
+        .servers-container { display: grid; grid-template-columns: repeat(1, 1fr); gap: 16px; max-width: 1600px; margin: 0 auto; }
+        @media (min-width: 600px) { .servers-container { grid-template-columns: repeat(2, 1fr); } }
+        @media (min-width: 1100px) { .servers-container { grid-template-columns: repeat(3, 1fr); } }
+        @media (min-width: 1500px) { .servers-container { grid-template-columns: repeat(4, 1fr); } }
 
-        @media (min-width: 600px) {
-            .servers-container { grid-template-columns: repeat(2, 1fr); }
-        }
-        @media (min-width: 1100px) {
-            .servers-container { grid-template-columns: repeat(3, 1fr); }
-        }
-        @media (min-width: 1500px) {
-            .servers-container { grid-template-columns: repeat(4, 1fr); }
-        }
-
-        /* Server Card Styling */
-        .server-card { 
-            background-color: var(--card-bg); 
-            border: 1px solid var(--card-border); 
-            border-radius: 10px; 
-            padding: 14px; 
-            box-shadow: 0 4px 12px rgba(0,0,0,0.25); 
-            display: flex;
-            flex-direction: column;
-            transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
-        }
-        .server-card:hover {
-            border-color: #2e384e;
-            box-shadow: 0 6px 18px rgba(0,0,0,0.4);
-        }
+        .server-card { background-color: var(--card-bg); border: 1px solid var(--card-border); border-radius: 10px; padding: 14px; box-shadow: 0 4px 12px rgba(0,0,0,0.25); display: flex; flex-direction: column; transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease; }
+        .server-card:hover { border-color: #2e384e; box-shadow: 0 6px 18px rgba(0,0,0,0.4); }
         
-        .server-header { 
-            border-bottom: 1px solid #1f2736; 
-            padding-bottom: 8px; 
-            margin-bottom: 10px; 
-        }
-        .server-title { 
-            font-size: 1.05rem; 
-            font-weight: 700; 
-            color: #ffffff; 
-            display: flex; 
-            justify-content: space-between; 
-            align-items: center; 
-        }
-        .season-badge { 
-            font-size: 0.7rem; 
-            background: rgba(255, 152, 0, 0.12); 
-            color: #ffb74d; 
-            border: 1px solid rgba(255, 152, 0, 0.3); 
-            padding: 2px 8px; 
-            border-radius: 12px; 
-            font-weight: 600; 
-            white-space: nowrap;
-        }
+        .server-header { border-bottom: 1px solid #1f2736; padding-bottom: 8px; margin-bottom: 10px; }
+        .server-title { font-size: 1.05rem; font-weight: 700; color: #ffffff; display: flex; justify-content: space-between; align-items: center; }
+        .season-badge { font-size: 0.7rem; background: rgba(255, 152, 0, 0.12); color: #ffb74d; border: 1px solid rgba(255, 152, 0, 0.3); padding: 2px 8px; border-radius: 12px; font-weight: 600; white-space: nowrap; }
         
-        .scan-tabs-bar { 
-            display: flex; 
-            justify-content: space-between; 
-            align-items: center; 
-            margin-bottom: 10px; 
-            border-bottom: 1px solid #1f2736; 
-            padding-bottom: 6px; 
-            gap: 8px;
-        }
+        .scan-tabs-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; border-bottom: 1px solid #1f2736; padding-bottom: 6px; gap: 8px; }
         .scan-tabs-container { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
         .scan-subtab { 
-            background-color: #0f121a; 
-            color: var(--text-muted); 
-            border: 1px solid #232b3c; 
-            padding: 4px 8px; 
-            font-size: 0.75rem; 
-            border-radius: 4px; 
-            cursor: pointer; 
-            white-space: nowrap; 
-            transition: 0.2s; 
-            font-weight: 600;
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
+            background-color: #0f121a; color: var(--text-muted); border: 1px solid #232b3c; padding: 4px 8px; font-size: 0.75rem; border-radius: 4px; cursor: pointer; white-space: nowrap; transition: 0.2s; font-weight: 600; display: inline-flex; align-items: center; gap: 4px;
         }
 
-        .scan-subtab.current-pair { 
-            background-color: rgba(46, 125, 50, 0.2); 
-            color: #81c784; 
-            border-color: #4caf50; 
+        /* 1. Подтвержденная пара (зеленая окраска плашки у обоих) */
+        .scan-subtab.pair-current { 
+            background-color: rgba(46, 125, 50, 0.25); color: #81c784; border: 1px solid #4caf50; 
         }
-        .scan-subtab.current-pair.active { 
-            background-color: #2e7d32; 
-            color: #ffffff; 
-            border-color: #66bb6a; 
-            box-shadow: 0 0 8px rgba(76, 175, 80, 0.4);
+        .scan-subtab.pair-current.active { 
+            background-color: #2e7d32; color: #ffffff; border-color: #66bb6a; box-shadow: 0 0 10px rgba(76, 175, 80, 0.5);
         }
 
-        .scan-subtab.old-pair { 
-            background-color: rgba(55, 71, 79, 0.25); 
-            color: #78909c; 
-            border-color: #37474f; 
-            opacity: 0.75;
+        /* 2. Устаревшая пара сканов (серая плашка у обоих) */
+        .scan-subtab.pair-outdated { 
+            background-color: rgba(55, 71, 79, 0.3); color: #b0bec5; border: 1px solid #546e7a; 
         }
-        .scan-subtab.old-pair.active { 
-            background-color: #37474f; 
-            color: #cfd8dc; 
-            border-color: #546e7a; 
-            opacity: 1;
+        .scan-subtab.pair-outdated.active { 
+            background-color: #455a64; color: #ffffff; border-color: #78909c; 
         }
 
-        .scan-subtab.single { 
-            background-color: rgba(255, 152, 0, 0.15); 
-            color: #ffb74d; 
-            border-color: #ff9800; 
+        /* 3. Скан в ожидании / Новый (оранжевая плашка) */
+        .scan-subtab.single-pending { 
+            background-color: rgba(255, 152, 0, 0.2); color: #ffb74d; border: 1px solid #ff9800; 
         }
-        .scan-subtab.single.active { 
-            background-color: #f57c00; 
-            color: #ffffff; 
-            border-color: #ffb74d; 
+        .scan-subtab.single-pending.active { 
+            background-color: #f57c00; color: #ffffff; border-color: #ffe082; box-shadow: 0 0 10px rgba(255, 152, 0, 0.5);
+        }
+
+        /* 4. Одиночный не подтвержденный скан, который не нашел пару (красная плашка) */
+        .scan-subtab.single-failed { 
+            background-color: rgba(211, 47, 47, 0.25); color: #ff8a80; border: 1px solid #ef5350; 
+        }
+        .scan-subtab.single-failed.active { 
+            background-color: #c62828; color: #ffffff; border-color: #ff8a80; box-shadow: 0 0 10px rgba(239, 83, 80, 0.5);
         }
 
         .scan-subtab:hover:not(.active) { opacity: 1; filter: brightness(1.2); }
 
-        .btn-delete-scan { 
-            background-color: rgba(183, 28, 28, 0.2); 
-            color: #ef5350; 
-            border: 1px solid rgba(239, 83, 80, 0.4); 
-            padding: 3px 6px; 
-            border-radius: 4px; 
-            font-size: 0.7rem; 
-            font-weight: 700; 
-            cursor: pointer; 
-            transition: 0.2s; 
-            white-space: nowrap;
-        }
+        .btn-delete-scan { background-color: rgba(183, 28, 28, 0.2); color: #ef5350; border: 1px solid rgba(239, 83, 80, 0.4); padding: 3px 6px; border-radius: 4px; font-size: 0.7rem; font-weight: 700; cursor: pointer; transition: 0.2s; white-space: nowrap; }
         .btn-delete-scan:hover { background-color: #d32f2f; color: #fff; }
 
-        .tables-grid { 
-            display: grid; 
-            grid-template-columns: 1fr 1fr; 
-            gap: 10px; 
-            flex-grow: 1;
-        }
+        .tables-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; flex-grow: 1; }
         @media (max-width: 480px) { .tables-grid { grid-template-columns: 1fr; } }
         
         .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
         .section-title { font-size: 0.8rem; font-weight: 700; color: #00e5ff; text-transform: uppercase; letter-spacing: 0.5px; }
         
-        .btn-add { 
-            background-color: #0288d1; 
-            color: white; 
-            border: none; 
-            border-radius: 4px; 
-            padding: 2px 6px; 
-            font-size: 0.75rem; 
-            font-weight: 700; 
-            cursor: pointer; 
-            transition: 0.2s; 
-        }
+        .btn-add { background-color: #0288d1; color: white; border: none; border-radius: 4px; padding: 2px 6px; font-size: 0.75rem; font-weight: 700; cursor: pointer; transition: 0.2s; }
         .btn-add:hover { background-color: #0277bd; }
 
         table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
@@ -1578,17 +1317,7 @@ DASHBOARD_HTML = """
         }
 
         .btn-group { display: flex; gap: 2px; flex-wrap: wrap; }
-        .btn-opt { 
-            background-color: #0f121a; 
-            color: #78909c; 
-            border: 1px solid #232b3c; 
-            padding: 2px 5px; 
-            font-size: 0.68rem; 
-            border-radius: 3px; 
-            cursor: pointer; 
-            transition: 0.15s; 
-            font-weight: 600;
-        }
+        .btn-opt { background-color: #0f121a; color: #78909c; border: 1px solid #232b3c; padding: 2px 5px; font-size: 0.68rem; border-radius: 3px; cursor: pointer; transition: 0.15s; font-weight: 600; }
         .btn-opt.active-insured { background-color: #2e7d32; color: #fff; border-color: #4caf50; }
         .btn-opt.active-uninsured { background-color: #c62828; color: #fff; border-color: #ef5350; }
         .btn-opt.active-noact { background-color: #b71c1c; color: #fff; border-color: #ff1744; font-weight: bold; }
@@ -1599,7 +1328,7 @@ DASHBOARD_HTML = """
         .status-uninsured { color: #e57373; }
         .status-noact { color: #ff5252; }
         .status-frozen { color: #64b5f6; }
-        .status-pending { color: #ffb74d; font-style: italic; font-size: 0.72rem; }
+        .status-pending { color: #ffb74d; font-weight: 700; font-size: 0.75rem; }
 
         .btn-del { background-color: transparent; color: #ef5350; border: 1px solid rgba(239, 83, 80, 0.4); padding: 1px 5px; font-size: 0.75rem; border-radius: 3px; cursor: pointer; transition: 0.2s; }
         .btn-del:hover { background-color: #ef5350; color: #fff; }
@@ -1623,13 +1352,11 @@ DASHBOARD_HTML = """
 
     <!-- ОСНОВНОЙ ДАШБОРД -->
     <div id="main-dashboard" style="display: none;">
-        <!-- Верхняя навигация пользователя -->
         <div class="user-nav">
             <span id="user-info">Загрузка...</span>
             <button class="btn-logout" onclick="handleLogout()">Выйти</button>
         </div>
 
-        <!-- БАННЕР ЛОТЕРЕИ -->
         <div class="lottery-banner">
             <div class="lottery-info">
                 <div class="lottery-icon">🎫</div>
@@ -1646,7 +1373,6 @@ DASHBOARD_HTML = """
 
         <h1>Arizona RP — Мониторинг Слётов</h1>
 
-        <!-- Навигация по вкладкам -->
         <div class="tabs">
             <button id="btn-tab-view" class="tab-btn active" onclick="switchTab('view')">📊 Слёты</button>
             <button id="btn-tab-upcoming" class="tab-btn" onclick="switchTab('upcoming')">🔥 Ближайшие слеты</button>
@@ -1691,7 +1417,6 @@ DASHBOARD_HTML = """
 
         <!-- Вкладка: Управление -->
         <div id="tab-manage" class="tab-content">
-            <!-- Блок лога ручных действий с возможностью сворачивания -->
             <div id="admin-manual-logs-card" class="server-card" style="display: none; max-width: 1600px; margin: 0 auto 20px auto;">
                 <div style="display: flex; justify-content: space-between; align-items: center; cursor: pointer;" onclick="toggleManualLogs()">
                     <h3 style="margin: 0; color: var(--accent-orange); font-size: 1.1rem; display: flex; align-items: center; gap: 8px;">
@@ -1768,12 +1493,42 @@ DASHBOARD_HTML = """
         let globalServerData = {};
         let selectedUpcomingHours = 1;
 
-        function getScanStatusText(s) {
-            if (!s) return 'Нет данных';
-            if (s.isCurrentPair) return 'Актуальный скан (Текущая пара)';
-            if (s.hasPair || s.isConfirmed) return 'Подтверждённый скан (Пара)';
-            if (s.isOutdated) return 'Устаревший скан';
-            return 'Одиночный скан (в ожидании пары)';
+        // Вспомогательная функция определения эмодзи, стиля и метки для скана
+        function getScanBadgeInfo(scan) {
+            if (!scan) return { emoji: '', cssClass: '', label: 'Нет данных' };
+
+            const hasPair = !!(scan.hasPair || scan.isConfirmed);
+            const isOutdated = !!scan.isOutdated;
+
+            if (hasPair && !isOutdated) {
+                // 1. Подтверждённая пара (актуальная, зелёный цвет)
+                return {
+                    emoji: '📎',
+                    cssClass: 'scan-subtab pair-current',
+                    label: 'Подтверждённая пара'
+                };
+            } else if (hasPair && isOutdated) {
+                // 2. Устаревшая пара сканов (серый цвет)
+                return {
+                    emoji: '✔',
+                    cssClass: 'scan-subtab pair-outdated',
+                    label: 'Устаревшая пара'
+                };
+            } else if (!hasPair && !isOutdated) {
+                // 3. Скан в ожидании / Новый (оранжевый цвет)
+                return {
+                    emoji: '⏳',
+                    cssClass: 'scan-subtab single-pending',
+                    label: '⏳ Новый'
+                };
+            } else {
+                // 4. Одиночный не подтвержденный скан, который не нашел пару (красный цвет)
+                return {
+                    emoji: '❌',
+                    cssClass: 'scan-subtab single-failed',
+                    label: 'Не нашел пару'
+                };
+            }
         }
 
         function toggleManualLogs() {
@@ -1810,12 +1565,6 @@ DASHBOARD_HTML = """
             if (timerElem) {
                 timerElem.innerText = `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
             }
-        }
-
-        function getPropRules(info, type) {
-            const defaultRules = { insured: 2, uninsured_min: 2, uninsured_max: 3 };
-            if (!info || !info.dropRules) return defaultRules;
-            return info.dropRules[type] || defaultRules;
         }
 
         function toggleFavorite(srv) {
@@ -2254,320 +2003,296 @@ DASHBOARD_HTML = """
             return { text: timeStr, isFrozen: false, paydays: neededPayDays, hourSteps: hourSteps };
         }
 
-        function calculateDropTime(pd, status, typeRules) {
-            return calculateDropInfo(pd, status, typeRules);
-        }
+        function renderTable(items, propType, server, scanId, isManageMode, dropRules) {
+            if (!items || items.length === 0) {
+                return `<span class="empty">Список пуст</span>`;
+            }
 
-        function renderTable(items, server, scanId, type, interactive = true, isDropTab = false, info = {}) {
-            if (!items || items.length === 0) return '<span class="empty">Нет данных</span>';
-            
-            let html = '<table><tr><th>№</th><th>ID</th><th>PD</th><th>Статус</th>' + 
-                       (!interactive ? '<th>Слёт</th>' : '') + 
-                       (interactive ? '<th></th>' : '') + '</tr>';
-            
-            items.forEach((item) => {
-                const st = item.status || 'insured';
-                const isPending = item.isPendingPair;
-                const displayPd = interactive ? (item.basePd !== undefined ? item.basePd : item.pd) : item.pd;
-                const badgeClass = interactive ? 'pd-badge-fixed' : (isDropTab ? 'pd-badge-drop' : 'pd-badge');
+            const rules = dropRules ? dropRules[propType] : { insured: 2, uninsured_min: 2, uninsured_max: 3 };
 
-                let statusControl = '';
-                if (interactive) {
-                    statusControl = `
-                        <div class="btn-group">
-                            <button class="btn-opt ${st === 'insured' && !isPending ? 'active-insured' : ''}" onclick="setStatus('${server}', '${scanId}', '${type}', ${item.pos}, 'insured')">Страх.</button>
-                            <button class="btn-opt ${st === 'uninsured' && !isPending ? 'active-uninsured' : ''}" onclick="setStatus('${server}', '${scanId}', '${type}', ${item.pos}, 'uninsured')">Не страх.</button>
-                            ${type === 'biz' ? `<button class="btn-opt ${st === 'no_activity' && !isPending ? 'active-noact' : ''}" onclick="setStatus('${server}', '${scanId}', 'biz',${item.pos}, 'no_activity')">Без зан.</button>` : ''}
-                            <button class="btn-opt ${st === 'frozen' && !isPending ? 'active-frozen' : ''}" onclick="setStatus('${server}', '${scanId}', '${type}', ${item.pos}, 'frozen')">Замор.</button>
-                        </div>
-                    `;
+            let html = `<table>
+                <thead>
+                    <tr>
+                        <th>№</th>
+                        <th>ID</th>
+                        <th>PD</th>
+                        <th>Слёт через</th>
+                        <th>Статус</th>
+                        ${isManageMode ? '<th>Действия</th>' : ''}
+                    </tr>
+                </thead>
+                <tbody>`;
+
+            items.forEach(item => {
+                const dropInfo = calculateDropInfo(item.pd, item.status, rules);
+                const dropLimit = (item.status === 'uninsured' || item.status === 'no_activity') 
+                    ? rules.uninsured_min : rules.insured;
+                
+                let pdBadgeClass = 'pd-badge';
+                if (item.pd < dropLimit) {
+                    pdBadgeClass = 'pd-badge-drop';
+                } else if (item.status === 'frozen') {
+                    pdBadgeClass = 'pd-badge-fixed';
+                }
+
+                const propIdText = item.propId !== null && item.propId !== undefined ? `#${item.propId}` : '—';
+                
+                let statusHtml = '';
+                if (item.isPendingPair) {
+                    statusHtml = `<span class="status-text status-pending">⏳ Новый</span>`;
                 } else {
-                    let stLabel = 'Страх.';
-                    let stClass = 'status-insured';
-                    if (isPending) { stLabel = 'В ожид.'; stClass = 'status-pending'; }
-                    else if (st === 'uninsured') { stLabel = 'Не страх.'; stClass = 'status-uninsured'; }
-                    else if (st === 'no_activity') { stLabel = 'Без зан.'; stClass = 'status-noact'; }
-                    else if (st === 'frozen') { stLabel = 'Замор.'; stClass = 'status-frozen'; }
-                    statusControl = `<span class="status-text ${stClass}">${stLabel}</span>`;
+                    if (item.status === 'insured') statusHtml = `<span class="status-text status-insured">Страх.</span>`;
+                    else if (item.status === 'uninsured') statusHtml = `<span class="status-text status-uninsured">Без страх.</span>`;
+                    else if (item.status === 'no_activity') statusHtml = `<span class="status-text status-noact">Без биз.</span>`;
+                    else if (item.status === 'frozen') statusHtml = `<span class="status-text status-frozen">❄️ Замороз.</span>`;
+                    else statusHtml = `<span class="status-text status-insured">${item.status}</span>`;
                 }
 
-                let dropCell = '';
-                if (!interactive) {
-                    const dropInfo = calculateDropTime(item.pd, st, getPropRules(info, type));
-                    if (dropInfo.isFrozen) {
-                        dropCell = `<td><span class="time-left-frozen">${dropInfo.text}</span></td>`;
-                    } else {
-                        dropCell = `<td><span class="time-left-badge">${dropInfo.text}</span></td>`;
-                    }
-                }
-
-                let deleteCell = interactive ? `<td><button class="btn-del" onclick="deleteItem('${server}', '${scanId}', '${type}', ${item.pos})">✕</button></td>` : '';
-
-                const propIdDisplay = item.propId ? `<b>${item.propId}</b>` : '-';
+                let timeHtml = dropInfo.isFrozen 
+                    ? `<span class="time-left-frozen">❄️ Заморожен</span>` 
+                    : `<span class="time-left-badge">${dropInfo.text}</span>`;
 
                 html += `<tr>
                     <td>${item.pos}</td>
-                    <td>${propIdDisplay}</td>
-                    <td><span class="${badgeClass}">${displayPd}</span></td>
-                    <td>${statusControl}</td>
-                    ${dropCell}
-                    ${deleteCell}
-                </tr>`;
+                    <td><b>${propIdText}</b></td>
+                    <td><span class="${pdBadgeClass}">${item.pd}</span></td>
+                    <td>${timeHtml}</td>
+                    <td>${statusHtml}</td>`;
+
+                if (isManageMode) {
+                    const st = item.status;
+                    const btnInsured = `<button class="btn-opt ${st==='insured' && !item.isPendingPair ? 'active-insured' : ''}" onclick="setStatus('${server}', '${scanId}', '${propType}', ${item.pos}, 'insured')">1PD</button>`;
+                    const btnUninsured = `<button class="btn-opt ${st==='uninsured' && !item.isPendingPair ? 'active-uninsured' : ''}" onclick="setStatus('${server}', '${scanId}', '${propType}', ${item.pos}, 'uninsured')">2PD</button>`;
+                    const btnNoAct = propType === 'biz' ? `<button class="btn-opt ${st==='no_activity' && !item.isPendingPair ? 'active-noact' : ''}" onclick="setStatus('${server}', '${scanId}', '${propType}', ${item.pos}, 'no_activity')">4PD</button>` : '';
+                    const btnFrozen = `<button class="btn-opt ${st==='frozen' && !item.isPendingPair ? 'active-frozen' : ''}" onclick="setStatus('${server}', '${scanId}', '${propType}', ${item.pos}, 'frozen')">❄️</button>`;
+                    const btnDel = `<button class="btn-del" onclick="deleteItem('${server}', '${scanId}', '${propType}', ${item.pos})">✕</button>`;
+
+                    html += `<td>
+                        <div class="btn-group">
+                            ${btnInsured}
+                            ${btnUninsured}
+                            ${btnNoAct}
+                            ${btnFrozen}
+                            ${btnDel}
+                        </div>
+                    </td>`;
+                }
+
+                html += `</tr>`;
             });
 
-            return html + '</table>';
+            html += `</tbody></table>`;
+            return html;
         }
 
-        async function loadData() {
-            try {
-                const res = await fetch('/api/paydays');
-                if (!res.ok) return;
-                globalServerData = await res.json();
-                
-                renderViewTab();
-                renderUpcomingTab();
-                renderManageTab();
-            } catch (e) {
-                console.error("Ошибка загрузки данных:", e);
+        function renderServerCard(srv, isManageMode = false) {
+            const srvData = globalServerData[srv] || { scans: [], season: { display: '—' }, dropRules: {} };
+            const scans = srvData.scans || [];
+            const isFav = favoriteServers.includes(srv);
+
+            if (scans.length > 0 && !activeServerScans[srv]) {
+                activeServerScans[srv] = scans[scans.length - 1].scanId;
             }
+
+            const activeScanId = activeServerScans[srv];
+            const currentScan = scans.find(s => s.scanId === activeScanId) || scans[scans.length - 1];
+
+            let tabsHtml = '';
+            if (scans.length > 0) {
+                tabsHtml = `<div class="scan-tabs-container">`;
+                scans.forEach(s => {
+                    const badge = getScanBadgeInfo(s);
+                    const isActive = s.scanId === (currentScan ? currentScan.scanId : '');
+                    tabsHtml += `<button class="${badge.cssClass} ${isActive ? 'active' : ''}" 
+                                         onclick="selectScanTab('${srv}', '${s.scanId}')" 
+                                         title="${badge.label}">
+                                    ${badge.emoji} ${s.hourLabel || s.scanId.split(' ')[1] || s.scanId}
+                                </button>`;
+                });
+                tabsHtml += `</div>`;
+            } else {
+                tabsHtml = `<span class="empty">Сканов нет</span>`;
+            }
+
+            let deleteScanBtn = '';
+            if (isManageMode && currentScan) {
+                deleteScanBtn = `<button class="btn-delete-scan" onclick="deleteWholeScan('${srv}')">Удалить скан</button>`;
+            }
+
+            let houseTableHtml = currentScan ? renderTable(currentScan.houses, 'house', srv, currentScan.scanId, isManageMode, srvData.dropRules) : '<span class="empty">Нет данных</span>';
+            let bizTableHtml = currentScan ? renderTable(currentScan.businesses, 'biz', srv, currentScan.scanId, isManageMode, srvData.dropRules) : '<span class="empty">Нет данных</span>';
+
+            const displayName = getServerDisplayName(srv);
+            const seasonText = srvData.season ? srvData.season.display : '';
+
+            return `
+            <div class="server-card">
+                <div class="server-header">
+                    <div class="server-title">
+                        <span>
+                            <span class="fav-btn" onclick="toggleFavorite('${srv}')">${isFav ? '⭐' : '☆'}</span>
+                            ${displayName}
+                        </span>
+                        <span class="season-badge">${seasonText}</span>
+                    </div>
+                </div>
+
+                <div class="scan-tabs-bar">
+                    ${tabsHtml}
+                    ${deleteScanBtn}
+                </div>
+
+                <div class="tables-grid">
+                    <div>
+                        <div class="section-header">
+                            <span class="section-title">🏠 Дома</span>
+                            ${isManageMode && currentScan ? `<button class="btn-add" onclick="addItemPrompt('${srv}', 'house')">+ Дом</button>` : ''}
+                        </div>
+                        ${houseTableHtml}
+                    </div>
+                    <div>
+                        <div class="section-header">
+                            <span class="section-title">🏢 Бизнесы</span>
+                            ${isManageMode && currentScan ? `<button class="btn-add" onclick="addItemPrompt('${srv}', 'biz')">+ Бизнес</button>` : ''}
+                        </div>
+                        ${bizTableHtml}
+                    </div>
+                </div>
+            </div>`;
         }
 
         function renderViewTab() {
             const seasonFilter = document.getElementById('filter-season').value;
             const favFilter = document.getElementById('filter-fav').value;
-            const container = document.getElementById('servers-view');
-            if (!container) return;
 
+            let container = document.getElementById('servers-view');
             let html = '';
-            let count = 0;
 
             ALL_SERVERS.forEach(srv => {
-                const srvInfo = globalServerData[srv] || { scans: [], season: { id: 1, display: 'По инфе (1)' } };
-                const seasonId = String(srvInfo.season ? srvInfo.season.id : 1);
-                const isFav = favoriteServers.includes(srv);
+                if (favFilter === 'fav_only' && !favoriteServers.includes(srv)) return;
 
-                if (seasonFilter !== 'all' && seasonId !== seasonFilter) return;
-                if (favFilter === 'fav_only' && !isFav) return;
-
-                count++;
-                const scans = srvInfo.scans || [];
-                const activeScanId = activeServerScans[srv] || (scans.length > 0 ? scans[scans.length - 1].scanId : null);
-                const activeScan = scans.find(s => s.scanId === activeScanId) || (scans.length > 0 ? scans[scans.length - 1] : null);
-
-                let subtabsHtml = '';
-                if (scans.length > 0) {
-                    scans.forEach(s => {
-                        let subtabClass = 'scan-subtab';
-                        if (s.isCurrentPair) subtabClass += ' current-pair';
-                        else if (s.hasPair || s.isConfirmed) subtabClass += ' old-pair';
-                        else subtabClass += ' single';
-
-                        if (activeScan && activeScan.scanId === s.scanId) subtabClass += ' active';
-
-                        const scanTooltip = `Точное время и дата скана: ${s.scanTime || s.scanId}\nСтатус скана: ${getScanStatusText(s)}`;
-
-                        subtabsHtml += `<button class="${subtabClass}" title="${scanTooltip}" onclick="selectScanTab('${srv}', '${s.scanId}')">${s.hourLabel || s.scanId.split(' ')[1] || s.scanId}</button>`;
-                    });
+                const srvData = globalServerData[srv];
+                if (seasonFilter !== 'all' && srvData && srvData.season) {
+                    if (String(srvData.season.id) !== String(seasonFilter)) return;
                 }
 
-                const favStar = isFav ? '⭐' : '☆';
-                const displayName = getServerDisplayName(srv);
-                const seasonDisplay = srvInfo.season ? srvInfo.season.display : '';
-
-                let housesTable = '<span class="empty">Нет данных</span>';
-                let bizTable = '<span class="empty">Нет данных</span>';
-
-                if (activeScan) {
-                    housesTable = renderTable(activeScan.houses, srv, activeScan.scanId, 'house', false, false, srvInfo);
-                    bizTable = renderTable(activeScan.businesses, srv, activeScan.scanId, 'biz', false, false, srvInfo);
-                }
-
-                const activeScanTooltip = activeScan ? `title="Точное время и дата скана: ${activeScan.scanTime || activeScan.scanId}\nСтатус: ${getScanStatusText(activeScan)}"` : '';
-
-                html += `
-                <div class="server-card">
-                    <div class="server-header">
-                        <div class="server-title">
-                            <span><span class="fav-btn" onclick="toggleFavorite('${srv}')">${favStar}</span>${displayName}</span>
-                            <span class="season-badge">${seasonDisplay}</span>
-                        </div>
-                    </div>
-                    ${scans.length > 0 ? `
-                    <div class="scan-tabs-bar" ${activeScanTooltip}>
-                        <div class="scan-tabs-container">${subtabsHtml}</div>
-                    </div>` : ''}
-                    <div class="tables-grid">
-                        <div>
-                            <div class="section-header"><span class="section-title">🏠 Дома</span></div>
-                            ${housesTable}
-                        </div>
-                        <div>
-                            <div class="section-header"><span class="section-title">🏢 Бизнесы</span></div>
-                            ${bizTable}
-                        </div>
-                    </div>
-                </div>`;
+                html += renderServerCard(srv, false);
             });
 
-            if (count === 0) {
-                container.innerHTML = '<div class="empty-center">Нет серверов, соответствующих выбранным фильтрам</div>';
-            } else {
-                container.innerHTML = html;
+            if (!html) {
+                html = `<div class="empty-center">Нет серверов, соответствующих выбранным фильтрам</div>`;
             }
-        }
 
-        function renderUpcomingTab() {
-            const container = document.getElementById('servers-upcoming');
-            if (!container) return;
-
-            let html = '';
-            let count = 0;
-
-            ALL_SERVERS.forEach(srv => {
-                const srvInfo = globalServerData[srv];
-                if (!srvInfo) return;
-
-                const latestScan = srvInfo.latestConfirmedScan;
-                if (!latestScan) return;
-
-                const dropRules = srvInfo.dropRules || {};
-
-                const matchingHouses = (latestScan.houses || []).filter(h => {
-                    const dropInfo = calculateDropTime(h.pd, h.status, dropRules.house);
-                    return !dropInfo.isFrozen && dropInfo.hourSteps === selectedUpcomingHours;
-                });
-
-                const matchingBiz = (latestScan.businesses || []).filter(b => {
-                    const dropInfo = calculateDropTime(b.pd, b.status, dropRules.biz);
-                    return !dropInfo.isFrozen && dropInfo.hourSteps === selectedUpcomingHours;
-                });
-
-                if (matchingHouses.length === 0 && matchingBiz.length === 0) return;
-
-                count++;
-                const displayName = getServerDisplayName(srv);
-                const seasonDisplay = srvInfo.season ? srvInfo.season.display : '';
-
-                const housesTable = renderTable(matchingHouses, srv, latestScan.scanId, 'house', false, true, srvInfo);
-                const bizTable = renderTable(matchingBiz, srv, latestScan.scanId, 'biz', false, true, srvInfo);
-
-                const scanTooltip = `Точное время и дата скана: ${latestScan.scanTime || latestScan.scanId}\nСтатус скана: ${getScanStatusText(latestScan)}`;
-
-                html += `
-                <div class="server-card">
-                    <div class="server-header">
-                        <div class="server-title">
-                            <span>${displayName}</span>
-                            <span class="season-badge">${seasonDisplay}</span>
-                        </div>
-                    </div>
-                    <div class="scan-tabs-bar" title="${scanTooltip}">
-                        <span style="font-size: 0.75rem; color: var(--text-muted); font-weight: 600;">Скан: ${latestScan.hourLabel || latestScan.scanId}</span>
-                    </div>
-                    <div class="tables-grid">
-                        <div>
-                            <div class="section-header"><span class="section-title">🏠 Дома (${matchingHouses.length})</span></div>
-                            ${housesTable}
-                        </div>
-                        <div>
-                            <div class="section-header"><span class="section-title">🏢 Бизнесы (${matchingBiz.length})</span></div>
-                            ${bizTable}
-                        </div>
-                    </div>
-                </div>`;
-            });
-
-            if (count === 0) {
-                const hourLabel = selectedUpcomingHours === 1 ? 'в этот час' : `через ${selectedUpcomingHours} ч.`;
-                container.innerHTML = `<div class="empty-center">Нет слётов ${hourLabel}</div>`;
-            } else {
-                container.innerHTML = html;
-            }
+            container.innerHTML = html;
         }
 
         function renderManageTab() {
-            const container = document.getElementById('servers-manage');
-            if (!container) return;
-
+            let container = document.getElementById('servers-manage');
             let html = '';
 
             ALL_SERVERS.forEach(srv => {
-                const srvInfo = globalServerData[srv] || { scans: [], season: { display: '' } };
-                const scans = srvInfo.scans || [];
-                const activeScanId = activeServerScans[srv] || (scans.length > 0 ? scans[scans.length - 1].scanId : null);
-                const activeScan = scans.find(s => s.scanId === activeScanId) || (scans.length > 0 ? scans[scans.length - 1] : null);
-
-                let subtabsHtml = '';
-                if (scans.length > 0) {
-                    scans.forEach(s => {
-                        let subtabClass = 'scan-subtab';
-                        if (s.isCurrentPair) subtabClass += ' current-pair';
-                        else if (s.hasPair || s.isConfirmed) subtabClass += ' old-pair';
-                        else subtabClass += ' single';
-
-                        if (activeScan && activeScan.scanId === s.scanId) subtabClass += ' active';
-
-                        const scanTooltip = `Точное время и дата скана: ${s.scanTime || s.scanId}\nСтатус скана: ${getScanStatusText(s)}`;
-
-                        subtabsHtml += `<button class="${subtabClass}" title="${scanTooltip}" onclick="selectScanTab('${srv}', '${s.scanId}')">${s.hourLabel || s.scanId.split(' ')[1] || s.scanId}</button>`;
-                    });
-                }
-
-                const displayName = getServerDisplayName(srv);
-                const seasonDisplay = srvInfo.season ? srvInfo.season.display : '';
-
-                let housesTable = '<span class="empty">Нет сканов</span>';
-                let bizTable = '<span class="empty">Нет сканов</span>';
-
-                if (activeScan) {
-                    housesTable = renderTable(activeScan.houses, srv, activeScan.scanId, 'house', true, false, srvInfo);
-                    bizTable = renderTable(activeScan.businesses, srv, activeScan.scanId, 'biz', true, false, srvInfo);
-                }
-
-                const activeScanTooltip = activeScan ? `title="Точное время и дата скана: ${activeScan.scanTime || activeScan.scanId}\nСтатус: ${getScanStatusText(activeScan)}"` : '';
-
-                html += `
-                <div class="server-card">
-                    <div class="server-header">
-                        <div class="server-title">
-                            <span>${displayName}</span>
-                            <span class="season-badge">${seasonDisplay}</span>
-                        </div>
-                    </div>
-                    ${scans.length > 0 ? `
-                    <div class="scan-tabs-bar" ${activeScanTooltip}>
-                        <div class="scan-tabs-container">${subtabsHtml}</div>${activeScan ? `<button class="btn-delete-scan" onclick="deleteWholeScan('${srv}')">🗑 Удалить скан</button>` : ''}
-                    </div>` : ''}
-                    <div class="tables-grid">
-                        <div>
-                            <div class="section-header">
-                                <span class="section-title">🏠 Дома</span>
-                                ${activeScan ? `<button class="btn-add" onclick="addItemPrompt('${srv}', 'house')">+ Добавить</button>` : ''}
-                            </div>
-                            ${housesTable}
-                        </div>
-                        <div>
-                            <div class="section-header">
-                                <span class="section-title">🏢 Бизнесы</span>
-                                ${activeScan ? `<button class="btn-add" onclick="addItemPrompt('${srv}', 'biz')">+ Добавить</button>` : ''}
-                            </div>
-                            ${bizTable}
-                        </div>
-                    </div>
-                </div>`;
+                html += renderServerCard(srv, true);
             });
 
             container.innerHTML = html;
         }
 
-        function initDashboard() {
-            updateLotteryTimer();
-            setInterval(updateLotteryTimer, 1000);
-            loadData();
-            setInterval(loadData, 30000);
+        function renderUpcomingTab() {
+            let container = document.getElementById('servers-upcoming');
+            let html = '';
+
+            ALL_SERVERS.forEach(srv => {
+                const srvData = globalServerData[srv];
+                if (!srvData) return;
+
+                const scan = srvData.latestConfirmedScan || (srvData.scans && srvData.scans.length > 0 ? srvData.scans[srvData.scans.length - 1] : null);
+                if (!scan) return;
+
+                const rules = srvData.dropRules || { house: { insured: 2, uninsured_min: 2, uninsured_max: 3 }, biz: { insured: 2, uninsured_min: 2, uninsured_max: 3 } };
+
+                const upcomingHouses = (scan.houses || []).filter(h => {
+                    const info = calculateDropInfo(h.pd, h.status, rules.house);
+                    return !info.isFrozen && info.hourSteps <= selectedUpcomingHours;
+                });
+
+                const upcomingBiz = (scan.businesses || []).filter(b => {
+                    const info = calculateDropInfo(b.pd, b.status, rules.biz);
+                    return !info.isFrozen && info.hourSteps <= selectedUpcomingHours;
+                });
+
+                if (upcomingHouses.length === 0 && upcomingBiz.length === 0) return;
+
+                const displayName = getServerDisplayName(srv);
+                const seasonText = srvData.season ? srvData.season.display : '';
+                const badge = getScanBadgeInfo(scan);
+
+                let houseTableHtml = upcomingHouses.length > 0 ? renderTable(upcomingHouses, 'house', srv, scan.scanId, false, rules) : '<span class="empty">Нет слётов</span>';
+                let bizTableHtml = upcomingBiz.length > 0 ? renderTable(upcomingBiz, 'biz', srv, scan.scanId, false, rules) : '<span class="empty">Нет слётов</span>';
+
+                html += `
+                <div class="server-card">
+                    <div class="server-header">
+                        <div class="server-title">
+                            <span>${displayName}</span>
+                            <span class="season-badge">${seasonText}</span>
+                        </div>
+                    </div>
+                    <div class="scan-tabs-bar">
+                        <span class="${badge.cssClass}">${badge.emoji} Скан: ${scan.hourLabel || scan.scanId}</span>
+                    </div>
+                    <div class="tables-grid">
+                        <div>
+                            <div class="section-header"><span class="section-title">🏠 Дома</span></div>
+                            ${houseTableHtml}
+                        </div>
+                        <div>
+                            <div class="section-header"><span class="section-title">🏢 Бизнесы</span></div>
+                            ${bizTableHtml}
+                        </div>
+                    </div>
+                </div>`;
+            });
+
+            if (!html) {
+                html = `<div class="empty-center">Нет слётов в ближайшие ${selectedUpcomingHours} ч.</div>`;
+            }
+
+            container.innerHTML = html;
         }
 
-        checkAuth();
+        async function loadData() {
+            try {
+                const res = await fetch('/api/paydays');
+                if (res.status === 401 || res.status === 403) {
+                    checkAuth();
+                    return;
+                }
+                if (!res.ok) return;
+
+                globalServerData = await res.json();
+
+                const activeViewTab = document.querySelector('.tab-btn.active');
+                if (activeViewTab) {
+                    const tabId = activeViewTab.id;
+                    if (tabId === 'btn-tab-view') renderViewTab();
+                    else if (tabId === 'btn-tab-upcoming') renderUpcomingTab();
+                    else if (tabId === 'btn-tab-manage') renderManageTab();
+                }
+            } catch (e) {
+                console.error('Ошибка загрузки данных:', e);
+            }
+        }
+
+        function initDashboard() {
+            loadData();
+            setInterval(loadData, 15000);
+            setInterval(updateLotteryTimer, 1000);
+            updateLotteryTimer();
+        }
+
+        window.onload = function() {
+            checkAuth();
+        };
     </script>
 </body>
 </html>
