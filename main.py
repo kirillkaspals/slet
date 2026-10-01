@@ -1234,7 +1234,6 @@ DASHBOARD_HTML = """
         .fav-btn { cursor: pointer; font-size: 1.1rem; user-select: none; margin-right: 6px; transition: transform 0.15s ease; display: inline-block; }
         .fav-btn:hover { transform: scale(1.3); }
 
-        /* Ограничение: максимум 3 сервера в строку */
         .servers-container { display: grid; grid-template-columns: repeat(1, 1fr); gap: 16px; max-width: 1600px; margin: 0 auto; }
         @media (min-width: 650px) { .servers-container { grid-template-columns: repeat(2, 1fr); } }
         @media (min-width: 1100px) { .servers-container { grid-template-columns: repeat(3, 1fr); } }
@@ -1339,7 +1338,6 @@ DASHBOARD_HTML = """
             border-color: #4a5a7a;
         }
 
-        /* Активные статусы для круглых кнопок */
         .btn-circle.active-insured { 
             background: #2e7d32; 
             border-color: #4caf50; 
@@ -1436,7 +1434,7 @@ DASHBOARD_HTML = """
             <button id="btn-tab-admin" class="tab-btn" onclick="switchTab('admin')" style="display: none;">👑 Админ-панель</button>
         </div>
 
-        <!-- Вкладка: Все слёты -->
+        <!-- Вкладка: Все слёты (Общий вид) -->
         <div id="tab-view" class="tab-content active">
             <div class="filter-panel">
                 <div class="filter-group">
@@ -1548,6 +1546,18 @@ DASHBOARD_HTML = """
         let favoriteServers = JSON.parse(localStorage.getItem('fav_servers') || '[]');
         let globalServerData = {};
         let selectedUpcomingHours = 1;
+
+        function formatScanTime(scanTimeStr) {
+            if (!scanTimeStr) return '';
+            const parts = scanTimeStr.split(' ');
+            if (parts.length === 2) {
+                const dateParts = parts[0].split('-');
+                if (dateParts.length === 3) {
+                    return `${dateParts[2]}.${dateParts[1]}.${dateParts[0]} ${parts[1]}`;
+                }
+            }
+            return scanTimeStr;
+        }
 
         function getScanBadgeInfo(scan) {
             if (!scan) return { emoji: '', cssClass: '', label: 'Нет данных' };
@@ -2045,313 +2055,19 @@ DASHBOARD_HTML = """
         function getDropLimitLocal(server, propType, status, rules) {
             if (!rules) return 2;
             if (status === 'uninsured' || status === 'no_activity' || status === 'frozen') {
-                return rules.uninsured_min !== undefined ? rules.uninsured_min : 2;
+                return rules[propType]?.uninsured_min || 2;
             }
-            return rules.insured !== undefined ? rules.insured : 2;
+            return rules[propType]?.insured || 2;
         }
 
-        function renderTable(items, propType, server, scanId, isManageMode, dropRules) {
-            if (!items || items.length === 0) {
-                return `<span class="empty">Список пуст</span>`;
+        function getStatusLabel(status) {
+            switch (status) {
+                case 'insured': return 'Застрахован';
+                case 'uninsured': return 'Без страх.';
+                case 'no_activity': return 'Нет активн.';
+                case 'frozen': return 'Заморожен';
+                default: return status || '—';
             }
-
-            const rules = dropRules ? dropRules[propType] : { insured: 2, uninsured_min: 2, uninsured_max: 3 };
-
-            let html = `<table>
-                <thead>
-                    <tr>
-                        <th>№</th>
-                        <th>PD</th>
-                        ${isManageMode ? '<th style="text-align:center;">Действия</th>' : '<th>Статус</th><th>До слёта</th>'}
-                    </tr>
-                </thead>
-                <tbody>`;
-
-            items.forEach(item => {
-                const propLabel = item.propId ? `№${item.propId}` : `#${item.pos}`;
-                const currentStatus = item.status || 'insured';
-                const isPending = !!item.isPendingPair;
-
-                const dropInfo = calculateDropInfo(item.pd, currentStatus, rules);
-                let pdBadgeClass = 'pd-badge';
-                const dropLimit = getDropLimitLocal(server, propType, currentStatus, rules);
-                if (item.pd <= dropLimit && !dropInfo.isFrozen) {
-                    pdBadgeClass = 'pd-badge-drop';
-                }
-
-                if (isManageMode) {
-                    let actionsHtml = '';
-                    if (propType === 'house' || propType === 'houses') {
-                        // КНОПКИ ДЛЯ ДОМОВ (4 кружка: 1-страхованный, 2-не страхованный, 3-заморожен, 4-удалить)
-                        actionsHtml = `<div class="btn-circle-group">
-                            <button class="btn-circle ${currentStatus === 'insured' ? 'active-insured' : ''}" title="Страхованный (Зеленый)" onclick="setStatus('${server}', '${scanId}', '${propType}', ${item.pos}, 'insured')">🛡️</button>
-                            <button class="btn-circle ${currentStatus === 'uninsured' ? 'active-uninsured' : ''}" title="Не страхованный (Красный)" onclick="setStatus('${server}', '${scanId}', '${propType}', ${item.pos}, 'uninsured')">🔴</button>
-                            <button class="btn-circle ${currentStatus === 'frozen' ? 'active-frozen' : ''}" title="Заморожен (Синий)" onclick="setStatus('${server}', '${scanId}', '${propType}', ${item.pos}, 'frozen')">❄️</button>
-                            <button class="btn-circle btn-circle-del" title="Удалить" onclick="deleteItem('${server}', '${scanId}', '${propType}', ${item.pos})">❌</button>
-                        </div>`;
-                    } else {
-                        // КНОПКИ ДЛЯ БИЗНЕСОВ (5 кружков: 1-страхованный, 2-не страхованный, 3-без занятости, 4-заморожен, 5-удалить)
-                        actionsHtml = `<div class="btn-circle-group">
-                            <button class="btn-circle ${currentStatus === 'insured' ? 'active-insured' : ''}" title="Страхованный (Зеленый)" onclick="setStatus('${server}', '${scanId}', '${propType}', ${item.pos}, 'insured')">🛡️</button>
-                            <button class="btn-circle ${currentStatus === 'uninsured' ? 'active-uninsured' : ''}" title="Не страхованный (Красный)" onclick="setStatus('${server}', '${scanId}', '${propType}', ${item.pos}, 'uninsured')">🔴</button>
-                            <button class="btn-circle ${currentStatus === 'no_activity' ? 'active-noact' : ''}" title="Без занятости (Оранжевый)" onclick="setStatus('${server}', '${scanId}', '${propType}', ${item.pos}, 'no_activity')">🚫</button>
-                            <button class="btn-circle ${currentStatus === 'frozen' ? 'active-frozen' : ''}" title="Заморожен (Синий)" onclick="setStatus('${server}', '${scanId}', '${propType}', ${item.pos}, 'frozen')">❄️</button>
-                            <button class="btn-circle btn-circle-del" title="Удалить" onclick="deleteItem('${server}', '${scanId}', '${propType}', ${item.pos})">❌</button>
-                        </div>`;
-                    }
-
-                    html += `<tr>
-                        <td style="font-weight: 700; color: #fff;">${propLabel}</td>
-                        <td><span class="${pdBadgeClass}">${item.pd}</span></td>
-                        <td style="text-align:center;">${actionsHtml}</td>
-                    </tr>`;
-                } else {
-                    let statusHtml = '';
-                    if (isPending) {
-                        statusHtml = `<span class="status-pending">⏳ Ожидание</span>`;
-                    } else if (currentStatus === 'insured') {
-                        statusHtml = `<span class="status-text status-insured">Страх.</span>`;
-                    } else if (currentStatus === 'uninsured') {
-                        statusHtml = `<span class="status-text status-uninsured">Не страх.</span>`;
-                    } else if (currentStatus === 'no_activity') {
-                        statusHtml = `<span class="status-text status-noact">Без занят.</span>`;
-                    } else if (currentStatus === 'frozen') {
-                        statusHtml = `<span class="status-text status-frozen">Заморожен</span>`;
-                    } else {
-                        statusHtml = `<span class="status-text">${currentStatus}</span>`;
-                    }
-
-                    let timeLeftHtml = dropInfo.isFrozen ? 
-                        `<span class="time-left-frozen">${dropInfo.text}</span>` : 
-                        `<span class="time-left-badge">${dropInfo.text}</span>`;
-
-                    html += `<tr>
-                        <td style="font-weight: 700; color: #fff;">${propLabel}</td>
-                        <td><span class="${pdBadgeClass}">${item.pd}</span></td>
-                        <td>${statusHtml}</td>
-                        <td>${timeLeftHtml}</td>
-                    </tr>`;
-                }
-            });
-
-            html += `</tbody></table>`;
-            return html;
-        }
-
-        function renderViewTab() {
-            const container = document.getElementById('servers-view');
-            if (!container) return;
-
-            const seasonFilter = document.getElementById('filter-season')?.value || 'all';
-            const favFilter = document.getElementById('filter-fav')?.value || 'all';
-
-            let html = '';
-
-            ALL_SERVERS.forEach(srv => {
-                const srvData = globalServerData[srv];
-                const seasonInfo = srvData?.season || { id: 1, display: 'По инфе (1)' };
-                
-                if (seasonFilter !== 'all' && String(seasonInfo.id) !== String(seasonFilter)) return;
-
-                const isFav = favoriteServers.includes(srv);
-                if (favFilter === 'fav_only' && !isFav) return;
-
-                const scans = srvData?.scans || [];
-                const activeScanId = activeServerScans[srv] || (scans.length > 0 ? scans[scans.length - 1].scanId : null);
-                const activeScan = scans.find(s => s.scanId === activeScanId) || (scans.length > 0 ? scans[scans.length - 1] : null);
-
-                const displayName = getServerDisplayName(srv);
-                const starIcon = isFav ? '⭐' : '☆';
-
-                let scanTabsHtml = '';
-                if (scans.length > 0) {
-                    scanTabsHtml = `<div class="scan-tabs-bar"><div class="scan-tabs-container">`;
-                    scans.forEach(s => {
-                        const badge = getScanBadgeInfo(s);
-                        const isActive = activeScan && s.scanId === activeScan.scanId;
-                        const activeClass = isActive ? ' active' : '';
-                        scanTabsHtml += `<button class="${badge.cssClass}${activeClass}" onclick="selectScanTab('${srv}', '${s.scanId}')">
-                            ${badge.emoji} ${s.hourLabel}
-                        </button>`;
-                    });
-                    scanTabsHtml += `</div></div>`;
-                }
-
-                const houses = activeScan?.houses || [];
-                const biz = activeScan?.businesses || [];
-                const scanTime = activeScan?.scanTime ? activeScan.scanTime.split(' ')[1] : '—';
-                const dropRules = srvData?.dropRules || null;
-
-                html += `<div class="server-card">
-                    <div class="server-header">
-                        <div class="server-title">
-                            <span>
-                                <span class="fav-btn" onclick="toggleFavorite('${srv}')">${starIcon}</span>
-                                ${displayName}
-                            </span>
-                            <span class="season-badge">${seasonInfo.display}</span>
-                        </div>
-                        ${activeScan ? `<span class="scan-time-tag">⏱️ Сканирование: ${scanTime}</span>` : ''}
-                    </div>
-                    ${scanTabsHtml}
-                    <div class="tables-grid">
-                        <div>
-                            <div class="section-header">
-                                <span class="section-title">🏠 Дома (${houses.length})</span>
-                            </div>
-                            ${renderTable(houses, 'house', srv, activeScan?.scanId, false, dropRules)}
-                        </div>
-                        <div>
-                            <div class="section-header">
-                                <span class="section-title">🏢 Бизнесы (${biz.length})</span>
-                            </div>
-                            ${renderTable(biz, 'biz', srv, activeScan?.scanId, false, dropRules)}
-                        </div>
-                    </div>
-                </div>`;
-            });
-
-            if (!html) {
-                html = `<div class="empty-center">Нет серверов, соответствующих выбранным фильтрам</div>`;
-            }
-
-            container.innerHTML = html;
-        }
-
-        function renderUpcomingTab() {
-            const container = document.getElementById('servers-upcoming');
-            if (!container) return;
-
-            let html = '';
-
-            ALL_SERVERS.forEach(srv => {
-                const srvData = globalServerData[srv];
-                const scans = srvData?.scans || [];
-                const activeScanId = activeServerScans[srv] || (scans.length > 0 ? scans[scans.length - 1].scanId : null);
-                const activeScan = scans.find(s => s.scanId === activeScanId) || (scans.length > 0 ? scans[scans.length - 1] : null);
-
-                if (!activeScan) return;
-
-                const dropRules = srvData?.dropRules || null;
-                const houseRules = dropRules?.house;
-                const bizRules = dropRules?.biz;
-
-                const upcomingHouses = (activeScan.houses || []).filter(item => {
-                    const info = calculateDropInfo(item.pd, item.status, houseRules);
-                    return !info.isFrozen && info.hourSteps <= selectedUpcomingHours;
-                });
-
-                const upcomingBiz = (activeScan.businesses || []).filter(item => {
-                    const info = calculateDropInfo(item.pd, item.status, bizRules);
-                    return !info.isFrozen && info.hourSteps <= selectedUpcomingHours;
-                });
-
-                if (upcomingHouses.length === 0 && upcomingBiz.length === 0) return;
-
-                const seasonInfo = srvData?.season || { display: '' };
-                const displayName = getServerDisplayName(srv);
-                const isFav = favoriteServers.includes(srv);
-                const starIcon = isFav ? '⭐' : '☆';
-
-                html += `<div class="server-card">
-                    <div class="server-header">
-                        <div class="server-title">
-                            <span>
-                                <span class="fav-btn" onclick="toggleFavorite('${srv}')">${starIcon}</span>
-                                ${displayName}
-                            </span>
-                            <span class="season-badge">${seasonInfo.display}</span>
-                        </div>
-                        <span class="scan-time-tag">⏱️ Сканирование: ${activeScan.scanTime ? activeScan.scanTime.split(' ')[1] : '—'}</span>
-                    </div>
-                    <div class="tables-grid">
-                        <div>
-                            <div class="section-header">
-                                <span class="section-title">🏠 Дома (${upcomingHouses.length})</span>
-                            </div>
-                            ${renderTable(upcomingHouses, 'house', srv, activeScan.scanId, false, dropRules)}
-                        </div>
-                        <div>
-                            <div class="section-header">
-                                <span class="section-title">🏢 Бизнесы (${upcomingBiz.length})</span>
-                            </div>
-                            ${renderTable(upcomingBiz, 'biz', srv, activeScan.scanId, false, dropRules)}
-                        </div>
-                    </div>
-                </div>`;
-            });
-
-            if (!html) {
-                html = `<div class="empty-center">В ближайшие ${selectedUpcomingHours} ч. слетов не ожидается</div>`;
-            }
-
-            container.innerHTML = html;
-        }
-
-        function renderManageTab() {
-            const container = document.getElementById('servers-manage');
-            if (!container) return;
-
-            let html = '';
-
-            ALL_SERVERS.forEach(srv => {
-                const srvData = globalServerData[srv];
-                const seasonInfo = srvData?.season || { display: '' };
-                const scans = srvData?.scans || [];
-                const activeScanId = activeServerScans[srv] || (scans.length > 0 ? scans[scans.length - 1].scanId : null);
-                const activeScan = scans.find(s => s.scanId === activeScanId) || (scans.length > 0 ? scans[scans.length - 1] : null);
-
-                const displayName = getServerDisplayName(srv);
-
-                let scanTabsHtml = '';
-                if (scans.length > 0) {
-                    scanTabsHtml = `<div class="scan-tabs-bar"><div class="scan-tabs-container">`;
-                    scans.forEach(s => {
-                        const badge = getScanBadgeInfo(s);
-                        const isActive = activeScan && s.scanId === activeScan.scanId;
-                        const activeClass = isActive ? ' active' : '';
-                        scanTabsHtml += `<button class="${badge.cssClass}${activeClass}" onclick="selectScanTab('${srv}', '${s.scanId}')">
-                            ${badge.emoji} ${s.hourLabel}
-                        </button>`;
-                    });
-                    scanTabsHtml += `</div>
-                    <button class="btn-delete-scan" onclick="deleteWholeScan('${srv}')" title="Удалить активный скан">🗑️ Скан</button>
-                    </div>`;
-                }
-
-                const houses = activeScan?.houses || [];
-                const biz = activeScan?.businesses || [];
-                const dropRules = srvData?.dropRules || null;
-
-                html += `<div class="server-card">
-                    <div class="server-header">
-                        <div class="server-title">
-                            <span>${displayName}</span>
-                            <span class="season-badge">${seasonInfo.display}</span>
-                        </div>
-                        ${activeScan ? `<span class="scan-time-tag">⏱️ Сканирование: ${activeScan.scanTime ? activeScan.scanTime.split(' ')[1] : '—'}</span>` : ''}
-                    </div>
-                    ${scanTabsHtml}
-                    <div class="tables-grid">
-                        <div>
-                            <div class="section-header">
-                                <span class="section-title">🏠 Дома (${houses.length})</span>
-                                ${activeScan ? `<button class="btn-add" onclick="addItemPrompt('${srv}', 'house')">+ Дом</button>` : ''}
-                            </div>
-                            ${renderTable(houses, 'house', srv, activeScan?.scanId, true, dropRules)}
-                        </div>
-                        <div>
-                            <div class="section-header">
-                                <span class="section-title">🏢 Бизнесы (${biz.length})</span>
-                                ${activeScan ? `<button class="btn-add" onclick="addItemPrompt('${srv}', 'biz')">+ Бизнес</button>` : ''}
-                            </div>
-                            ${renderTable(biz, 'biz', srv, activeScan?.scanId, true, dropRules)}
-                        </div>
-                    </div>
-                </div>`;
-            });
-
-            container.innerHTML = html;
         }
 
         async function loadData() {
@@ -2359,25 +2075,375 @@ DASHBOARD_HTML = """
                 const res = await fetch('/api/paydays');
                 if (!res.ok) return;
                 globalServerData = await res.json();
-
                 renderViewTab();
+                renderManageTab();
                 renderUpcomingTab();
-                if (currentUser && (currentUser.role === 'admin' || currentUser.role === 'support')) {
-                    renderManageTab();
+            } catch(e) {
+                console.error("Ошибка загрузки данных:", e);
+            }
+        }
+
+        // --- ОТРЕСОВКА: ОБЩИЙ ВИД СЛЁТОВ ---
+        function renderViewTab() {
+            const container = document.getElementById('servers-view');
+            if (!container) return;
+            container.innerHTML = '';
+
+            const seasonFilter = document.getElementById('filter-season')?.value || 'all';
+            const favFilter = document.getElementById('filter-fav')?.value || 'all';
+
+            let count = 0;
+            ALL_SERVERS.forEach(srv => {
+                const srvData = globalServerData[srv];
+                if (!srvData) return;
+
+                const seasonInfo = srvData.season;
+                if (seasonFilter !== 'all' && String(seasonInfo.id) !== seasonFilter) return;
+
+                const isFav = favoriteServers.includes(srv);
+                if (favFilter === 'fav_only' && !isFav) return;
+
+                count++;
+                const card = document.createElement('div');
+                card.className = 'server-card';
+
+                const latestConfirmed = srvData.latestConfirmedScan;
+                const displayName = getServerDisplayName(srv);
+                const star = isFav ? '⭐' : '☆';
+
+                let timeHeaderHtml = '';
+                if (latestConfirmed && latestConfirmed.scanTime) {
+                    timeHeaderHtml = `<div class="scan-time-tag">информация от: ${formatScanTime(latestConfirmed.scanTime)}</div>`;
                 }
-            } catch (e) {
-                console.error('Ошибка загрузки данных:', e);
+
+                let headerHtml = `
+                    <div class="server-header">
+                        <div class="server-title">
+                            <span>
+                                <span class="fav-btn" onclick="toggleFavorite('${srv}')">${star}</span>
+                                ${displayName}
+                            </span>
+                            <span class="season-badge">${seasonInfo.display}</span>
+                        </div>
+                        ${timeHeaderHtml}
+                    </div>
+                `;
+
+                let tablesHtml = '';
+                if (latestConfirmed) {
+                    tablesHtml = renderPropertyTablesView(srv, latestConfirmed, srvData.dropRules);
+                } else {
+                    tablesHtml = `<div class="empty-center" style="padding: 15px;">Нет подтвержденных сканов</div>`;
+                }
+
+                card.innerHTML = headerHtml + tablesHtml;
+                container.appendChild(card);
+            });
+
+            if (count === 0) {
+                container.innerHTML = `<div class="empty-center">Серверы не найдены по выбранным фильтрам</div>`;
+            }
+        }
+
+        function renderPropertyTablesView(srv, scan, dropRules) {
+            const houses = scan.houses || [];
+            const biz = scan.businesses || [];
+
+            let housesRows = '';
+            if (houses.length === 0) {
+                housesRows = `<tr><td colspan="3" class="empty">Нет домов</td></tr>`;
+            } else {
+                houses.forEach(item => {
+                    const dropLimit = getDropLimitLocal(srv, 'house', item.status, dropRules);
+                    const isDrop = item.pd < dropLimit && item.status !== 'frozen';
+                    const badgeClass = isDrop ? 'pd-badge-drop' : 'pd-badge';
+                    
+                    const dropInfo = calculateDropInfo(item.pd, item.status, dropRules?.house);
+                    let timeBadge = '';
+                    if (dropInfo.isFrozen) {
+                        timeBadge = `<span class="time-left-frozen">${dropInfo.text}</span>`;
+                    } else {
+                        timeBadge = `<span class="time-left-badge">⏳ ${dropInfo.text}</span>`;
+                    }
+
+                    const propIdStr = item.propId ? `№${item.propId}` : `#${item.pos}`;
+
+                    housesRows += `<tr>
+                        <td><b>${propIdStr}</b></td>
+                        <td><span class="${badgeClass}">${item.pd} pd</span></td>
+                        <td>${timeBadge}</td>
+                    </tr>`;
+                });
+            }
+
+            let bizRows = '';
+            if (biz.length === 0) {
+                bizRows = `<tr><td colspan="3" class="empty">Нет биз.</td></tr>`;
+            } else {
+                biz.forEach(item => {
+                    const dropLimit = getDropLimitLocal(srv, 'biz', item.status, dropRules);
+                    const isDrop = item.pd < dropLimit && item.status !== 'frozen';
+                    const badgeClass = isDrop ? 'pd-badge-drop' : 'pd-badge';
+                    
+                    const dropInfo = calculateDropInfo(item.pd, item.status, dropRules?.biz);
+                    let timeBadge = '';
+                    if (dropInfo.isFrozen) {
+                        timeBadge = `<span class="time-left-frozen">${dropInfo.text}</span>`;
+                    } else {
+                        timeBadge = `<span class="time-left-badge">⏳ ${dropInfo.text}</span>`;
+                    }
+
+                    const propIdStr = item.propId ? `№${item.propId}` : `#${item.pos}`;
+
+                    bizRows += `<tr>
+                        <td><b>${propIdStr}</b></td>
+                        <td><span class="${badgeClass}">${item.pd} pd</span></td>
+                        <td>${timeBadge}</td>
+                    </tr>`;
+                });
+            }
+
+            return `
+                <div class="tables-grid">
+                    <div>
+                        <div class="section-header">
+                            <span class="section-title">🏠 Дома (${houses.length})</span>
+                        </div>
+                        <table>
+                            <thead><tr><th>ID</th><th>PD</th><th>Слёт</th></tr></thead>
+                            <tbody>${housesRows}</tbody>
+                        </table>
+                    </div>
+                    <div>
+                        <div class="section-header">
+                            <span class="section-title">🏢 Бизнесы (${biz.length})</span>
+                        </div>
+                        <table>
+                            <thead><tr><th>ID</th><th>PD</th><th>Слёт</th></tr></thead>
+                            <tbody>${bizRows}</tbody>
+                        </table>
+                    </div>
+                </div>
+            `;
+        }
+
+        // --- ОТРЕСОВКА: ВКТАДКА УПРАВЛЕНИЯ ---
+        function renderManageTab() {
+            const container = document.getElementById('servers-manage');
+            if (!container) return;
+            container.innerHTML = '';
+
+            ALL_SERVERS.forEach(srv => {
+                const srvData = globalServerData[srv];
+                if (!srvData) return;
+
+                const scans = srvData.scans || [];
+                
+                if (!activeServerScans[srv] && scans.length > 0) {
+                    activeServerScans[srv] = scans[scans.length - 1].scanId;
+                }
+
+                const selectedScanId = activeServerScans[srv];
+                const currentScan = scans.find(s => s.scanId === selectedScanId) || (scans.length > 0 ? scans[scans.length - 1] : null);
+
+                const displayName = getServerDisplayName(srv);
+                const seasonInfo = srvData.season;
+
+                const card = document.createElement('div');
+                card.className = 'server-card';
+
+                // В управлении НЕ выводим время последнего сканирования в заголовок
+                let headerHtml = `
+                    <div class="server-header">
+                        <div class="server-title">
+                            <span>${displayName}</span>
+                            <span class="season-badge">${seasonInfo.display}</span>
+                        </div>
+                    </div>
+                `;
+
+                let subtabsHtml = '';
+                if (scans.length > 0) {
+                    let tabsButtons = '';
+                    scans.forEach(s => {
+                        const badge = getScanBadgeInfo(s);
+                        const isActive = (currentScan && s.scanId === currentScan.scanId) ? 'active' : '';
+                        const displayTime = s.hourLabel || s.scanId;
+                        tabsButtons += `
+                            <button class="${badge.cssClass} ${isActive}" onclick="selectScanTab('${srv}', '${s.scanId}')">
+                                ${badge.emoji} ${displayTime}
+                            </button>
+                        `;
+                    });
+
+                    subtabsHtml = `
+                        <div class="scan-tabs-bar">
+                            <div class="scan-tabs-container">${tabsButtons}</div>
+                            <button class="btn-delete-scan" onclick="deleteWholeScan('${srv}')">🗑️ Удалить скан</button>
+                        </div>
+                    `;
+                }
+
+                let tablesHtml = '';
+                if (currentScan) {
+                    tablesHtml = renderPropertyTablesManage(srv, currentScan, srvData.dropRules);
+                } else {
+                    tablesHtml = `<div class="empty-center" style="padding: 15px;">Нет данных сканирования</div>`;
+                }
+
+                card.innerHTML = headerHtml + subtabsHtml + tablesHtml;
+                container.appendChild(card);
+            });
+        }
+
+        function renderPropertyTablesManage(srv, scan, dropRules) {
+            const houses = scan.houses || [];
+            const biz = scan.businesses || [];
+            const scanId = scan.scanId;
+
+            let housesRows = '';
+            if (houses.length === 0) {
+                housesRows = `<tr><td colspan="4" class="empty">Нет домов</td></tr>`;
+            } else {
+                houses.forEach(item => {
+                    const dropLimit = getDropLimitLocal(srv, 'house', item.status, dropRules);
+                    const isDrop = item.pd < dropLimit && item.status !== 'frozen';
+                    const badgeClass = isDrop ? 'pd-badge-drop' : 'pd-badge';
+                    
+                    const propIdStr = item.propId ? `№${item.propId}` : `#${item.pos}`;
+
+                    const st = item.status;
+                    const btnIns = `<button class="btn-circle ${st === 'insured' ? 'active-insured' : ''}" title="Застрахован" onclick="setStatus('${srv}', '${scanId}', 'house', ${item.pos}, 'insured')">🛡️</button>`;
+                    const btnUnins = `<button class="btn-circle ${st === 'uninsured' ? 'active-uninsured' : ''}" title="Без страховки" onclick="setStatus('${srv}', '${scanId}', 'house', ${item.pos}, 'uninsured')">❌</button>`;
+                    const btnFroz = `<button class="btn-circle ${st === 'frozen' ? 'active-frozen' : ''}" title="Заморожен" onclick="setStatus('${srv}', '${scanId}', 'house', ${item.pos}, 'frozen')">❄️</button>`;
+                    const btnDel = `<button class="btn-circle btn-circle-del" title="Удалить" onclick="deleteItem('${srv}', '${scanId}', 'house', ${item.pos})">🗑️</button>`;
+
+                    housesRows += `<tr>
+                        <td><b>${propIdStr}</b></td>
+                        <td><span class="${badgeClass}">${item.pd} pd</span></td>
+                        <td><span class="status-text status-${st}">${getStatusLabel(st)}</span></td>
+                        <td><div class="btn-circle-group">${btnIns}${btnUnins}${btnFroz}${btnDel}</div></td>
+                    </tr>`;
+                });
+            }
+
+            let bizRows = '';
+            if (biz.length === 0) {
+                bizRows = `<tr><td colspan="4" class="empty">Нет биз.</td></tr>`;
+            } else {
+                biz.forEach(item => {
+                    const dropLimit = getDropLimitLocal(srv, 'biz', item.status, dropRules);
+                    const isDrop = item.pd < dropLimit && item.status !== 'frozen';
+                    const badgeClass = isDrop ? 'pd-badge-drop' : 'pd-badge';
+                    
+                    const propIdStr = item.propId ? `№${item.propId}` : `#${item.pos}`;
+
+                    const st = item.status;
+                    const btnIns = `<button class="btn-circle ${st === 'insured' ? 'active-insured' : ''}" title="Застрахован" onclick="setStatus('${srv}', '${scanId}', 'biz', ${item.pos}, 'insured')">🛡️</button>`;
+                    const btnUnins = `<button class="btn-circle ${st === 'uninsured' ? 'active-uninsured' : ''}" title="Без страховки" onclick="setStatus('${srv}', '${scanId}', 'biz', ${item.pos}, 'uninsured')">❌</button>`;
+                    const btnNoAct = `<button class="btn-circle ${st === 'no_activity' ? 'active-noact' : ''}" title="Нет активности" onclick="setStatus('${srv}', '${scanId}', 'biz', ${item.pos}, 'no_activity')">⛔</button>`;
+                    const btnFroz = `<button class="btn-circle ${st === 'frozen' ? 'active-frozen' : ''}" title="Заморожен" onclick="setStatus('${srv}', '${scanId}', 'biz', ${item.pos}, 'frozen')">❄️</button>`;
+                    const btnDel = `<button class="btn-circle btn-circle-del" title="Удалить" onclick="deleteItem('${srv}', '${scanId}', 'biz', ${item.pos})">🗑️</button>`;
+
+                    bizRows += `<tr>
+                        <td><b>${propIdStr}</b></td>
+                        <td><span class="${badgeClass}">${item.pd} pd</span></td>
+                        <td><span class="status-text status-${st}">${getStatusLabel(st)}</span></td>
+                        <td><div class="btn-circle-group">${btnIns}${btnUnins}${btnNoAct}${btnFroz}${btnDel}</div></td>
+                    </tr>`;
+                });
+            }
+
+            return `
+                <div class="tables-grid">
+                    <div>
+                        <div class="section-header">
+                            <span class="section-title">🏠 Дома (${houses.length})</span>
+                            <button class="btn-add" onclick="addItemPrompt('${srv}', 'house')">+ Дом</button>
+                        </div>
+                        <table>
+                            <thead><tr><th>ID</th><th>PD</th><th>Статус</th><th>Действия</th></tr></thead>
+                            <tbody>${housesRows}</tbody>
+                        </table>
+                    </div>
+                    <div>
+                        <div class="section-header">
+                            <span class="section-title">🏢 Бизнесы (${biz.length})</span>
+                            <button class="btn-add" onclick="addItemPrompt('${srv}', 'biz')">+ Бизнес</button>
+                        </div>
+                        <table>
+                            <thead><tr><th>ID</th><th>PD</th><th>Статус</th><th>Действия</th></tr></thead>
+                            <tbody>${bizRows}</tbody>
+                        </table>
+                    </div>
+                </div>
+            `;
+        }
+
+        // --- ОТРЕСОВКА: БЛИЖАЙШИЕ СЛЕТЫ ---
+        function renderUpcomingTab() {
+            const container = document.getElementById('servers-upcoming');
+            if (!container) return;
+            container.innerHTML = '';
+
+            let count = 0;
+            ALL_SERVERS.forEach(srv => {
+                const srvData = globalServerData[srv];
+                if (!srvData) return;
+
+                const latestConfirmed = srvData.latestConfirmedScan;
+                if (!latestConfirmed) return;
+
+                const dropRules = srvData.dropRules;
+                const houses = (latestConfirmed.houses || []).filter(item => {
+                    if (item.status === 'frozen') return false;
+                    const dropInfo = calculateDropInfo(item.pd, item.status, dropRules?.house);
+                    return dropInfo.hourSteps === selectedUpcomingHours;
+                });
+
+                const biz = (latestConfirmed.businesses || []).filter(item => {
+                    if (item.status === 'frozen') return false;
+                    const dropInfo = calculateDropInfo(item.pd, item.status, dropRules?.biz);
+                    return dropInfo.hourSteps === selectedUpcomingHours;
+                });
+
+                if (houses.length === 0 && biz.length === 0) return;
+
+                count++;
+                const card = document.createElement('div');
+                card.className = 'server-card';
+
+                const displayName = getServerDisplayName(srv);
+                const seasonInfo = srvData.season;
+
+                let headerHtml = `
+                    <div class="server-header">
+                        <div class="server-title">
+                            <span>${displayName}</span>
+                            <span class="season-badge">${seasonInfo.display}</span>
+                        </div>
+                        <div class="scan-time-tag">информация от: ${formatScanTime(latestConfirmed.scanTime)}</div>
+                    </div>
+                `;
+
+                const tablesHtml = renderPropertyTablesView(srv, { houses, businesses: biz }, dropRules);
+                card.innerHTML = headerHtml + tablesHtml;
+                container.appendChild(card);
+            });
+
+            if (count === 0) {
+                const filterText = selectedUpcomingHours === 1 ? 'в этот час' : `через ${selectedUpcomingHours} ч.`;
+                container.innerHTML = `<div class="empty-center">Нет слетов ${filterText}</div>`;
             }
         }
 
         function initDashboard() {
-            updateLotteryTimer();
-            setInterval(updateLotteryTimer, 1000);
             loadData();
-            setInterval(loadData, 15000);
+            setInterval(updateLotteryTimer, 1000);
+            setInterval(loadData, 30000);
         }
 
-        document.addEventListener('DOMContentLoaded', checkAuth);
+        checkAuth();
     </script>
 </body>
 </html>
