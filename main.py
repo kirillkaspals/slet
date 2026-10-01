@@ -40,10 +40,10 @@ ALL_SERVERS = [
 
 SEASONS_MAP = {
     1: "📱 По инфе",
-    2: "⌨️️ Скорострелы",
+    2: "⌨ Скорострелы",
     3: "🏎️ Автогонки",
     4: "✈️ По новому",
-    5: "🏍️ Мотогонки"
+    5: "🏍️️ Мотогонки"
 }
 
 BASE_SERVER_SEASONS = {
@@ -751,12 +751,15 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
 
         scans = server_data[srv]["scans"]
         
+        existing_scan = next((s for s in scans if s["scanId"] == scan_id), None)
         other_scans = [s for s in scans if s["scanId"] != scan_id]
         
         prev_scan = None
         if other_scans:
             last_s = other_scans[-1]
-            if not last_s.get("hasPair", False) and not last_s.get("isOutdated", False):
+            if existing_scan and (existing_scan.get("hasPair", False) or existing_scan.get("isConfirmed", False)):
+                prev_scan = last_s
+            elif not last_s.get("hasPair", False) and not last_s.get("isOutdated", False):
                 prev_scan = last_s
 
         house_entries = [e for e in payload.entries if e.propType == "house"]
@@ -765,27 +768,54 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
         prev_houses = prev_scan.get("houses", []) if prev_scan else []
         prev_biz = prev_scan.get("businesses", []) if prev_scan else []
 
+        existing_houses = existing_scan.get("houses", []) if existing_scan else []
+        existing_biz = existing_scan.get("businesses", []) if existing_scan else []
+
         house_matches = find_pairs_with_offset(prev_houses, house_entries, "house") if prev_scan else {}
         biz_matches = find_pairs_with_offset(prev_biz, biz_entries, "biz") if prev_scan else {}
 
         houses = []
         for idx, item in enumerate(house_entries):
+            matched_existing = None
+            if existing_houses:
+                if item.propId is not None:
+                    matched_existing = next((eh for eh in existing_houses if eh.get("propId") == item.propId), None)
+                if not matched_existing:
+                    matched_existing = next((eh for eh in existing_houses if eh.get("pos") == item.pos), None)
+
             if idx in house_matches:
                 prev_item, auto_status = house_matches[idx]
                 prev_item["isPendingPair"] = False
                 prev_item["status"] = auto_status
+
+                final_status = auto_status
+                if matched_existing and not matched_existing.get("isPendingPair", True):
+                    final_status = matched_existing.get("status", auto_status)
+
                 record = {
                     "basePd": item.pd,
                     "pd": item.pd,
                     "propId": item.propId,
                     "pos": item.pos,
-                    "status": auto_status,
+                    "status": final_status,
+                    "isPendingPair": False,
+                    "updatedAt": now_msk.strftime("%H:%M:%S")
+                }
+            elif matched_existing and not matched_existing.get("isPendingPair", True):
+                record = {
+                    "basePd": item.pd,
+                    "pd": item.pd,
+                    "propId": item.propId,
+                    "pos": item.pos,
+                    "status": matched_existing.get("status", "insured"),
                     "isPendingPair": False,
                     "updatedAt": now_msk.strftime("%H:%M:%S")
                 }
             else:
                 saved_status = "insured"
-                if prev_scan:
+                if matched_existing and "status" in matched_existing:
+                    saved_status = matched_existing["status"]
+                elif prev_scan:
                     matched_prev = None
                     if item.propId is not None:
                         matched_prev = next((ph for ph in prev_houses if ph.get("propId") == item.propId), None)
@@ -807,22 +837,46 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
 
         businesses = []
         for idx, item in enumerate(biz_entries):
+            matched_existing = None
+            if existing_biz:
+                if item.propId is not None:
+                    matched_existing = next((eb for eb in existing_biz if eb.get("propId") == item.propId), None)
+                if not matched_existing:
+                    matched_existing = next((eb for eb in existing_biz if eb.get("pos") == item.pos), None)
+
             if idx in biz_matches:
                 prev_item, auto_status = biz_matches[idx]
                 prev_item["isPendingPair"] = False
                 prev_item["status"] = auto_status
+
+                final_status = auto_status
+                if matched_existing and not matched_existing.get("isPendingPair", True):
+                    final_status = matched_existing.get("status", auto_status)
+
                 record = {
                     "basePd": item.pd,
                     "pd": item.pd,
                     "propId": item.propId,
                     "pos": item.pos,
-                    "status": auto_status,
+                    "status": final_status,
+                    "isPendingPair": False,
+                    "updatedAt": now_msk.strftime("%H:%M:%S")
+                }
+            elif matched_existing and not matched_existing.get("isPendingPair", True):
+                record = {
+                    "basePd": item.pd,
+                    "pd": item.pd,
+                    "propId": item.propId,
+                    "pos": item.pos,
+                    "status": matched_existing.get("status", "insured"),
                     "isPendingPair": False,
                     "updatedAt": now_msk.strftime("%H:%M:%S")
                 }
             else:
                 saved_status = "insured"
-                if prev_scan:
+                if matched_existing and "status" in matched_existing:
+                    saved_status = matched_existing["status"]
+                elif prev_scan:
                     matched_prev = None
                     if item.propId is not None:
                         matched_prev = next((pb for pb in prev_biz if pb.get("propId") == item.propId), None)
@@ -857,7 +911,6 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
             prev_scan["isCurrentPair"] = True
             prev_scan["isOutdated"] = False
 
-        existing_scan = next((s for s in scans if s["scanId"] == scan_id), None)
         has_houses_in_payload = len(house_entries) > 0
         has_biz_in_payload = len(biz_entries) > 0
 
@@ -2325,82 +2378,72 @@ DASHBOARD_HTML = """
         </div>
 
         <div class="tabs">
-            <button id="btn-tab-view" class="tab-btn active" onclick="switchTab('view')">👁️️ Общий вид</button>
-            <button id="btn-tab-upcoming" class="tab-btn" onclick="switchTab('upcoming')">🔥 Ближайшие слёты</button>
-            <button id="btn-tab-manage" class="tab-btn" style="display: none;" onclick="switchTab('manage')">🛠️ Управление сканами</button>
-            <button id="btn-tab-admin" class="tab-btn" style="display: none;" onclick="switchTab('admin')">👑 Админ-панель</button>
+            <button id="btn-tab-view" class="tab-btn active" onclick="switchTab('view')">👁 Общий вид</button>
+            <button id="btn-tab-upcoming" class="tab-btn" onclick="switchTab('upcoming')">🔥 Ближайшие</button>
+            <button id="btn-tab-manage" class="tab-btn" onclick="switchTab('manage')">⚙ Управление</button>
+            <button id="btn-tab-admin" class="tab-btn" onclick="switchTab('admin')">👑 Админ-панель</button>
         </div>
 
+        <!-- Вкладка 1: Общий вид -->
         <div id="tab-view" class="tab-content active">
-            <!-- Баннер Лотерейных Билетов -->
-            <div class="lottery-banner">
-                <div class="lottery-info">
-                    <span class="lottery-icon">🎟️</span>
-                    <div>
-                        <div class="lottery-title">Ежедневный розыгрыш лотереи</div>
-                        <div class="lottery-sub">Розыгрыш лотерейных билетов проходит каждый день в <b>21:10 МСК</b></div>
-                    </div>
-                </div>
-                <div class="lottery-countdown">
-                    <span class="lottery-label">До розыгрыша:</span>
-                    <span id="lottery-timer" class="lottery-timer">00:00:00</span>
-                </div>
-            </div>
-
             <div class="filter-panel">
                 <div class="filter-group">
-                    <label for="filter-season">Сезон слётов:</label>
+                    <label for="filter-season">Сезон:</label>
                     <select id="filter-season" class="filter-select" onchange="renderViewTab()">
                         <option value="all">Все сезоны</option>
-                        <option value="1">1 — 📱 По инфе</option>
-                        <option value="2">2 — ⌨️️ Скорострелы</option>
-                        <option value="3">3 — 🏎️ Автогонки</option>
-                        <option value="4">4 — ✈️ По новому</option>
-                        <option value="5">5 — 🏍️ Мотогонки</option>
+                        <option value="1">📱 По инфе (1)</option>
+                        <option value="2">⌨ Скорострелы (2)</option>
+                        <option value="3">🏎️ Автогонки (3)</option>
+                        <option value="4">✈️ По новому (4)</option>
+                        <option value="5">🏍️ Мотогонки (5)</option>
                     </select>
                 </div>
-
                 <div class="filter-group">
-                    <label for="filter-fav">Серверы:</label>
+                    <label for="filter-fav">Избранное:</label>
                     <select id="filter-fav" class="filter-select" onchange="renderViewTab()">
                         <option value="all">Все серверы</option>
-                        <option value="fav_only">Только избранные ⭐</option>
+                        <option value="fav_only">⭐ Только избранные</option>
                     </select>
                 </div>
             </div>
-
-            <div class="servers-container" id="servers-view"></div>
+            
+            <div id="servers-view" class="servers-container"></div>
         </div>
 
+        <!-- Вкладка 2: Ближайшие -->
         <div id="tab-upcoming" class="tab-content">
             <div class="upcoming-filters">
                 <button id="btn-upcoming-1h" class="time-filter-btn active" onclick="setUpcomingHoursFilter(1)">В этот час</button>
                 <button id="btn-upcoming-2h" class="time-filter-btn" onclick="setUpcomingHoursFilter(2)">Через 2 часа</button>
                 <button id="btn-upcoming-3h" class="time-filter-btn" onclick="setUpcomingHoursFilter(3)">Через 3 часа</button>
             </div>
-            <div class="servers-container" id="servers-upcoming"></div>
+            <div id="servers-upcoming" class="servers-container"></div>
         </div>
 
+        <!-- Вкладка 3: Управление -->
         <div id="tab-manage" class="tab-content">
-            <div class="servers-container" id="servers-manage"></div>
+            <div id="servers-manage" class="servers-container"></div>
         </div>
 
+        <!-- Вкладка 4: Админ-панель -->
         <div id="tab-admin" class="tab-content">
-            <div style="max-width: 1200px; margin: 0 auto; background: var(--card-bg); padding: 20px; border-radius: 10px; border: 1px solid var(--card-border);">
-                <h3 style="color: var(--accent-orange); margin-top: 0;">Управление пользователями</h3>
-                <div style="display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap;">
-                    <input type="text" id="new-username" placeholder="Логин" style="padding: 8px; background: #0f121a; border: 1px solid #263043; color: #fff; border-radius: 4px;">
-                    <input type="password" id="new-password" placeholder="Пароль" style="padding: 8px; background: #0f121a; border: 1px solid #263043; color: #fff; border-radius: 4px;">
-                    <select id="new-role" style="padding: 8px; background: #0f121a; border: 1px solid #263043; color: #fff; border-radius: 4px;">
+            <div class="filter-panel" style="flex-direction: column; align-items: stretch; max-width: 900px;">
+                <h3 style="margin-top:0; color: var(--accent-orange);">Управление пользователями</h3>
+                
+                <div style="display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap;">
+                    <input type="text" id="new-username" placeholder="Логин" style="padding: 8px; border-radius: 4px; border: 1px solid #263043; background: #0f121a; color: #fff;">
+                    <input type="password" id="new-password" placeholder="Пароль" style="padding: 8px; border-radius: 4px; border: 1px solid #263043; background: #0f121a; color: #fff;">
+                    <select id="new-role" class="select-role">
                         <option value="user">User</option>
                         <option value="support">Support</option>
                         <option value="admin">Admin</option>
                     </select>
-                    <button class="btn-add" style="padding: 8px 16px;" onclick="handleCreateUser()">Создать пользователя</button>
+                    <button class="btn-add" onclick="handleCreateUser()">+ Создать аккаунт</button>
                 </div>
+
                 <div id="admin-users-table"></div>
 
-                <h3 style="color: var(--accent-orange); margin-top: 30px;">Логи сканирований за сегодня</h3>
+                <h3 style="margin-top:25px; color: var(--accent-orange);">История сканирований (Логи за сегодня)</h3>
                 <div id="admin-scan-logs-table"></div>
             </div>
         </div>
