@@ -396,12 +396,10 @@ def get_server_season_info(server: str) -> dict:
 def get_latest_confirmed_scan(scans: List[dict]) -> Optional[dict]:
     if not scans:
         return None
-    # Приоритет 1: Свежая подтвержденная пара (2-й скан из пары)
     current_pair_scans = [s for s in scans if s.get("isCurrentPair", False) and s.get("hasPair", False)]
     if current_pair_scans:
         return current_pair_scans[-1]
     
-    # Приоритет 2: Любой подтвержденный скан
     confirmed_scans = [s for s in scans if s.get("hasPair", False) or s.get("isConfirmed", False)]
     if confirmed_scans:
         return confirmed_scans[-1]
@@ -1487,11 +1485,12 @@ DASHBOARD_HTML = """
             return num ? `${num}. ${srv}` : srv;
         }
 
-        const activeServerScans = {};
+        let currentTab = 'view';
         let currentUser = null;
         let favoriteServers = JSON.parse(localStorage.getItem('fav_servers') || '[]');
         let globalServerData = {};
         let selectedUpcomingHours = 1;
+        const activeServerScans = {};
 
         function formatScanTime(scanTimeStr) {
             if (!scanTimeStr) return '';
@@ -1523,7 +1522,7 @@ DASHBOARD_HTML = """
             } else {
                 statusText = 'не подтвержденный';
             }
-            return `Дата: ${dateStr}, Время: ${timeStr}\nСтатус: ${statusText}`;
+            return `Дата: ${dateStr}, Время: ${timeStr}\\nСтатус: ${statusText}`;
         }
 
         function getScanBadgeInfo(scan) {
@@ -1586,13 +1585,46 @@ DASHBOARD_HTML = """
                 const mskNow = getMskNowDate();
                 
                 const scanHourStart = new Date(Date.UTC(scanDate.getUTCFullYear(), scanDate.getUTCMonth(), scanDate.getUTCDate(), scanDate.getUTCHours(), 0, 0));
-                const nowHourStart = new Date(Date.UTC(mskNow.getFullYear(), mskNow.getMonth(), mskNow.getDate(), mskNow.getHours(), 0, 0));
+                const nowHourStart = new Date(Date.UTC(mskNow.getUTCFullYear(), mskNow.getUTCMonth(), mskNow.getUTCDate(), mskNow.getUTCHours(), 0, 0));
                 
-                const diffHours = Math.floor((nowHourStart.getTime() - scanHourStart.getTime()) / (3600 * 1000));
-                return Math.max(0, diffHours);
+                if (nowHourStart <= scanHourStart) return 0;
+
+                let paydays = 0;
+                let cur = new Date(scanHourStart.getTime());
+                while (cur < nowHourStart) {
+                    cur.setUTCHours(cur.getUTCHours() + 1);
+                    if (cur.getUTCHours() !== 5) { // Пропускаем рестарт в 5:00 МСК
+                        paydays++;
+                    }
+                }
+                return paydays;
             } catch (e) {
                 return 0;
             }
+        }
+
+        function getDropDateForProperty(scanDate, basePd, dropLimit, decrement) {
+            if (!decrement || decrement <= 0) return null;
+            
+            let paydaysNeeded = 0;
+            if (basePd <= dropLimit) {
+                paydaysNeeded = 1;
+            } else {
+                paydaysNeeded = Math.ceil((basePd - dropLimit) / decrement);
+            }
+
+            let hoursAdded = 0;
+            for (let i = 1; i <= paydaysNeeded; i++) {
+                hoursAdded++;
+                let targetHour = (scanDate.getUTCHours() + hoursAdded) % 24;
+                if (targetHour === 5) {
+                    hoursAdded++; // 5:00 МСК рестарт -> слёт происходит в 6:00 МСК
+                }
+            }
+            
+            const dropDate = new Date(scanDate.getTime());
+            dropDate.setUTCHours(scanDate.getUTCHours() + hoursAdded, 0, 0, 0);
+            return dropDate;
         }
 
         function calculateItemDropInfo(item, scanTimeStr, propType, dropRules) {
@@ -1637,42 +1669,38 @@ DASHBOARD_HTML = """
                 dropLimit = rules.uninsured_min;
             }
 
-            const paydaysLeftToDrop = Math.max(0, Math.ceil((currentPd - (dropLimit - 1)) / (decrement || 1)));
-
+            const scanDate = parseScanTimeMSK(scanTimeStr);
+            const dropDate = getDropDateForProperty(scanDate, basePd, dropLimit, decrement);
             const mskNow = getMskNowDate();
-            
-            // Вычисление точной даты/времени слета
-            let dropDate = new Date(mskNow.getTime());
-            if (paydaysLeftToDrop === 0) {
-                const nextHourDate = new Date(Date.UTC(mskNow.getFullYear(), mskNow.getMonth(), mskNow.getDate(), mskNow.getHours() + 1, 0, 0));
-                if (nextHourDate.getUTCHours() === 5) {
-                    nextHourDate.setUTCHours(6); // Рестарт в 5:00 МСК -> слёт переносится на 6:00 МСК
-                }
-                dropDate = nextHourDate;
-            } else {
-                let currentCalcHour = mskNow.getHours();
-                let hoursToAdd = 0;
-                for (let i = 1; i <= paydaysLeftToDrop; i++) {
-                    hoursToAdd++;
-                    let targetHour = (currentCalcHour + i) % 24;
-                    if (targetHour === 5) {
-                        hoursToAdd++; // Пропускаем слеты в 5:00 МСК, слёт происходит в 6:00 МСК
-                    }
-                }
-                const nextPayday = new Date(Date.UTC(mskNow.getFullYear(), mskNow.getMonth(), mskNow.getDate(), mskNow.getHours() + hoursToAdd, 0, 0));
-                dropDate = nextPayday;
+
+            if (!dropDate) {
+                return {
+                    currentPd: currentPd,
+                    timeLeftStr: 'N/A',
+                    isFrozen: false,
+                    isPending: false,
+                    hasDropped: false,
+                    dropDate: null,
+                    paydaysLeftToDrop: 0
+                };
             }
 
-            // Объекты НЕ пропадают до 6:00 МСК и пропадают ТОЛЬКО после 6:00 МСК
-            const hasDropped = (mskNow.getTime() >= dropDate.getTime());
-
             const diffMs = dropDate.getTime() - mskNow.getTime();
+            const hasDropped = (diffMs <= 0);
+
             let timeLeftStr = '0 ч 0 мин';
             if (diffMs > 0) {
                 const totalMin = Math.floor(diffMs / 60000);
                 const hours = Math.floor(totalMin / 60);
                 const minutes = totalMin % 60;
                 timeLeftStr = `${hours} ч ${minutes} мин`;
+            } else {
+                timeLeftStr = 'Слетел!';
+            }
+
+            let paydaysLeftToDrop = 0;
+            if (currentPd > dropLimit && decrement > 0) {
+                paydaysLeftToDrop = Math.ceil((currentPd - dropLimit) / decrement);
             }
 
             return {
@@ -1701,14 +1729,13 @@ DASHBOARD_HTML = """
 
         function updateLotteryTimer() {
             const mskNow = getMskNowDate();
-            let target = new Date(mskNow);
-            target.setHours(21, 10, 0, 0);
+            let target = new Date(Date.UTC(mskNow.getUTCFullYear(), mskNow.getUTCMonth(), mskNow.getUTCDate(), 21, 10, 0, 0));
 
-            if (mskNow >= target) {
-                target.setDate(target.getDate() + 1);
+            if (mskNow.getTime() >= target.getTime()) {
+                target.setUTCDate(target.getUTCDate() + 1);
             }
 
-            const diffMs = target - mskNow;
+            const diffMs = target.getTime() - mskNow.getTime();
             const hours = Math.floor(diffMs / (1000 * 60 * 60));
             const minutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
             const seconds = Math.floor((diffMs % (1000 * 60)) / 1000);
@@ -1789,11 +1816,14 @@ DASHBOARD_HTML = """
         }
 
         function switchTab(tab) {
+            currentTab = tab;
             document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-
-            document.getElementById(`btn-tab-${tab}`).classList.add('active');
-            document.getElementById(`tab-${tab}`).classList.add('active');
+            
+            const btn = document.getElementById(`btn-tab-${tab}`);
+            const content = document.getElementById(`tab-${tab}`);
+            if (btn) btn.classList.add('active');
+            if (content) content.classList.add('active');
 
             if (tab === 'view') renderViewTab();
             else if (tab === 'upcoming') renderUpcomingTab();
@@ -1803,28 +1833,39 @@ DASHBOARD_HTML = """
 
         function setUpcomingHoursFilter(hours) {
             selectedUpcomingHours = hours;
-            document.querySelectorAll('.time-filter-btn').forEach(btn => btn.classList.remove('active'));
-            document.getElementById(`btn-upcoming-${hours}h`).classList.add('active');
+            document.querySelectorAll('.time-filter-btn').forEach(b => b.classList.remove('active'));
+            const btn = document.getElementById(`btn-upcoming-${hours}h`);
+            if (btn) btn.classList.add('active');
             renderUpcomingTab();
         }
 
         async function initDashboard() {
+            await loadData();
             updateLotteryTimer();
+            setInterval(loadData, 15000);
             setInterval(updateLotteryTimer, 1000);
-            await loadPaydaysData();
-            setInterval(loadPaydaysData, 15000);
+            setInterval(() => {
+                if (currentTab === 'view') renderViewTab();
+                else if (currentTab === 'upcoming') renderUpcomingTab();
+            }, 10000);
         }
 
-        async function loadPaydaysData() {
+        async function loadData() {
             try {
                 const res = await fetch('/api/paydays');
                 if (!res.ok) return;
                 globalServerData = await res.json();
+                
+                ALL_SERVERS.forEach(srv => {
+                    if (activeServerScans[srv] === undefined) {
+                        const scans = globalServerData[srv]?.scans || [];
+                        activeServerScans[srv] = scans.length > 0 ? scans.length - 1 : 0;
+                    }
+                });
 
-                const activeTab = document.querySelector('.tab-content.active')?.id;
-                if (activeTab === 'tab-view') renderViewTab();
-                else if (activeTab === 'tab-upcoming') renderUpcomingTab();
-                else if (activeTab === 'tab-manage') renderManageTab();
+                if (currentTab === 'view') renderViewTab();
+                else if (currentTab === 'upcoming') renderUpcomingTab();
+                else if (currentTab === 'manage') renderManageTab();
             } catch (e) {
                 console.error("Ошибка загрузки данных paydays:", e);
             }
@@ -1833,443 +1874,277 @@ DASHBOARD_HTML = """
         function renderViewTab() {
             const container = document.getElementById('servers-view');
             if (!container) return;
-            container.innerHTML = '';
 
-            const seasonFilter = document.getElementById('filter-season').value;
-            const favFilter = document.getElementById('filter-fav').value;
+            const seasonFilter = document.getElementById('filter-season')?.value || 'all';
+            const favFilter = document.getElementById('filter-fav')?.value || 'all';
+
+            let html = '';
+            let renderedCount = 0;
 
             ALL_SERVERS.forEach(srv => {
-                const sData = globalServerData[srv] || { scans: [], latestConfirmedScan: null, season: { id: 1, display: '📱 По инфе (1)' }, dropRules: {} };
-                
-                if (seasonFilter !== 'all' && String(sData.season?.id) !== String(seasonFilter)) return;
-                
+                const srvData = globalServerData[srv];
+                if (!srvData) return;
+
                 const isFav = favoriteServers.includes(srv);
                 if (favFilter === 'fav_only' && !isFav) return;
 
-                const scan = sData.latestConfirmedScan;
-                const dropRules = sData.dropRules || {};
+                const seasonId = String(srvData.season?.id || 1);
+                if (seasonFilter !== 'all' && seasonFilter !== seasonId) return;
 
-                const card = document.createElement('div');
-                card.className = 'server-card';
-
-                const starIcon = isFav ? '⭐' : '☆';
-                const headerHTML = `
-                    <div class="server-header">
-                        <div class="server-title">
-                            <span>
-                                <span class="fav-btn" onclick="toggleFavorite('${srv}')">${starIcon}</span>
-                                ${getServerDisplayName(srv)}
-                            </span>
-                            <span class="season-badge">${sData.season?.display || ''}</span>
-                        </div>
-                        ${scan ? `<span class="scan-info-tag">Последняя пара: ${formatScanTime(scan.scanTime)}</span>` : '<span class="scan-info-tag" style="color: var(--text-muted)">Нет подтвержденных пар</span>'}
-                    </div>
-                `;
-
-                let housesRows = '';
-                if (scan && scan.houses && scan.houses.length > 0) {
-                    scan.houses.forEach(h => {
-                        const dropInfo = calculateItemDropInfo(h, scan.scanTime, 'house', dropRules);
-                        if (dropInfo.hasDropped) return; // Не показываем слетевшие после 6:00 МСК
-
-                        const pdClass = dropInfo.currentPd <= (dropRules?.house?.insured || 2) ? 'pd-badge-drop' : 'pd-badge';
-                        const timeBadge = dropInfo.isFrozen ? '<span class="time-left-frozen">❄️ Заморожен</span>' : `<span class="time-left-badge">${dropInfo.timeLeftStr}</span>`;
-
-                        housesRows += `
-                            <tr>
-                                <td>${h.propId ? `№${h.propId}` : `поз. ${h.pos}`}</td>
-                                <td><span class="${pdClass}">${dropInfo.currentPd} PD</span></td>
-                                <td>${timeBadge}</td>
-                                <td>${getStatusHTML(h.status, h.isPendingPair)}</td>
-                            </tr>
-                        `;
-                    });
-                }
-
-                let bizRows = '';
-                if (scan && scan.businesses && scan.businesses.length > 0) {
-                    scan.businesses.forEach(b => {
-                        const dropInfo = calculateItemDropInfo(b, scan.scanTime, 'biz', dropRules);
-                        if (dropInfo.hasDropped) return;
-
-                        const pdClass = dropInfo.currentPd <= (dropRules?.biz?.insured || 2) ? 'pd-badge-drop' : 'pd-badge';
-                        const timeBadge = dropInfo.isFrozen ? '<span class="time-left-frozen">❄️ Заморожен</span>' : `<span class="time-left-badge">${dropInfo.timeLeftStr}</span>`;
-
-                        bizRows += `
-                            <tr>
-                                <td>${b.propId ? `№${b.propId}` : `поз. ${b.pos}`}</td>
-                                <td><span class="${pdClass}">${dropInfo.currentPd} PD</span></td>
-                                <td>${timeBadge}</td>
-                                <td>${getStatusHTML(b.status, b.isPendingPair)}</td>
-                            </tr>
-                        `;
-                    });
-                }
-
-                const tablesHTML = `
-                    <div class="tables-grid">
-                        <div>
-                            <div class="section-header"><span class="section-title">🏠 Дома</span></div>
-                            ${housesRows ? `<table><thead><tr><th>Объект</th><th>PD</th><th>Слёт</th><th>Статус</th></tr></thead><tbody>${housesRows}</tbody></table>` : '<span class="empty">Нет данных</span>'}
-                        </div>
-                        <div>
-                            <div class="section-header"><span class="section-title">🏢 Бизнесы</span></div>
-                            ${bizRows ? `<table><thead><tr><th>Объект</th><th>PD</th><th>Слёт</th><th>Статус</th></tr></thead><tbody>${bizRows}</tbody></table>` : '<span class="empty">Нет данных</span>'}
-                        </div>
-                    </div>
-                `;
-
-                card.innerHTML = headerHTML + tablesHTML;
-                container.appendChild(card);
+                html += renderServerCardView(srv, srvData);
+                renderedCount++;
             });
 
-            if (container.children.length === 0) {
-                container.innerHTML = '<div class="empty-center">Нет серверов, соответствующих выбранным фильтрам</div>';
+            if (renderedCount === 0) {
+                html = '<div class="empty-center">Нет серверов, соответствующих выбранным фильтрам.</div>';
             }
+
+            container.innerHTML = html;
+        }
+
+        function renderServerCardView(srv, srvData) {
+            const isFav = favoriteServers.includes(srv);
+            const favIcon = isFav ? '⭐' : '☆';
+            const displayName = getServerDisplayName(srv);
+            const seasonDisplay = srvData.season?.display || 'Сезон ?';
+            const scans = srvData.scans || [];
+
+            let selectedScanIdx = activeServerScans[srv];
+            if (selectedScanIdx === undefined || selectedScanIdx >= scans.length) {
+                selectedScanIdx = scans.length > 0 ? scans.length - 1 : 0;
+                activeServerScans[srv] = selectedScanIdx;
+            }
+
+            let tabsHtml = '';
+            if (scans.length > 0) {
+                tabsHtml += '<div class="scan-tabs-bar"><div class="scan-tabs-container">';
+                scans.forEach((sc, idx) => {
+                    const badge = getScanBadgeInfo(sc);
+                    const isActive = idx === selectedScanIdx ? 'active' : '';
+                    const tooltip = getScanTooltip(sc);
+                    tabsHtml += `<button class="${badge.cssClass} ${isActive}" title="${tooltip}" onclick="selectScanTab('${srv}', ${idx})">${badge.emoji} ${sc.hourLabel || 'Скан'}</button>`;
+                });
+                tabsHtml += '</div></div>';
+            } else {
+                tabsHtml = '<span class="scan-info-tag" style="color: var(--text-muted);">Сканов пока нет</span>';
+            }
+
+            const activeScan = scans[selectedScanIdx];
+            let tablesHtml = '';
+
+            if (activeScan) {
+                const scanTimeStr = activeScan.scanTime;
+                const dropRules = srvData.dropRules;
+
+                let housesRows = '';
+                const houses = activeScan.houses || [];
+                houses.forEach(h => {
+                    const propIdStr = h.propId ? `№${h.propId}` : `pos ${h.pos}`;
+                    const dropInfo = calculateItemDropInfo(h, scanTimeStr, 'house', dropRules);
+                    const statusHtml = getStatusHTML(h.status, h.isPendingPair);
+
+                    let pdBadge = `<span class="pd-badge">${dropInfo.currentPd} pd</span>`;
+                    if (dropInfo.hasDropped) {
+                        pdBadge = `<span class="pd-badge-drop">0 pd</span>`;
+                    }
+
+                    let timeBadge = '';
+                    if (dropInfo.isFrozen) {
+                        timeBadge = '<span class="time-left-frozen">❄️ Заморожен</span>';
+                    } else if (dropInfo.isPending) {
+                        timeBadge = '<span class="status-pending">🔍 Новый</span>';
+                    } else if (dropInfo.hasDropped) {
+                        timeBadge = '<span class="pd-badge-drop">Слетел!</span>';
+                    } else {
+                        timeBadge = `<span class="time-left-badge">⏳ ${dropInfo.timeLeftStr}</span>`;
+                    }
+
+                    housesRows += `<tr>
+                        <td><b>${propIdStr}</b></td>
+                        <td>${pdBadge}</td>
+                        <td>${statusHtml}</td>
+                        <td>${timeBadge}</td>
+                    </tr>`;
+                });
+
+                let bizRows = '';
+                const businesses = activeScan.businesses || [];
+                businesses.forEach(b => {
+                    const propIdStr = b.propId ? `№${b.propId}` : `pos ${b.pos}`;
+                    const dropInfo = calculateItemDropInfo(b, scanTimeStr, 'biz', dropRules);
+                    const statusHtml = getStatusHTML(b.status, b.isPendingPair);
+
+                    let pdBadge = `<span class="pd-badge">${dropInfo.currentPd} pd</span>`;
+                    if (dropInfo.hasDropped) {
+                        pdBadge = `<span class="pd-badge-drop">0 pd</span>`;
+                    }
+
+                    let timeBadge = '';
+                    if (dropInfo.isFrozen) {
+                        timeBadge = '<span class="time-left-frozen">❄️ Заморожен</span>';
+                    } else if (dropInfo.isPending) {
+                        timeBadge = '<span class="status-pending">🔍 Новый</span>';
+                    } else if (dropInfo.hasDropped) {
+                        timeBadge = '<span class="pd-badge-drop">Слетел!</span>';
+                    } else {
+                        timeBadge = `<span class="time-left-badge">⏳ ${dropInfo.timeLeftStr}</span>`;
+                    }
+
+                    bizRows += `<tr>
+                        <td><b>${propIdStr}</b></td>
+                        <td>${pdBadge}</td>
+                        <td>${statusHtml}</td>
+                        <td>${timeBadge}</td>
+                    </tr>`;
+                });
+
+                tablesHtml = `<div class="tables-grid">
+                    <div>
+                        <div class="section-header">
+                            <span class="section-title">🏠 Дома (${houses.length})</span>
+                        </div>
+                        ${houses.length > 0 ? `<table><thead><tr><th>ID</th><th>PD</th><th>Статус</th><th>Слёт</th></tr></thead><tbody>${housesRows}</tbody></table>` : '<span class="empty">Нет домов</span>'}
+                    </div>
+                    <div>
+                        <div class="section-header">
+                            <span class="section-title">🏢 Бизнесы (${businesses.length})</span>
+                        </div>
+                        ${businesses.length > 0 ? `<table><thead><tr><th>ID</th><th>PD</th><th>Статус</th><th>Слёт</th></tr></thead><tbody>${bizRows}</tbody></table>` : '<span class="empty">Нет бизнесов</span>'}
+                    </div>
+                </div>`;
+            } else {
+                tablesHtml = '<div class="empty">Нет данных для отображения</div>';
+            }
+
+            return `<div class="server-card">
+                <div class="server-header">
+                    <div class="server-title">
+                        <span><span class="fav-btn" onclick="toggleFavorite('${srv}')">${favIcon}</span> ${displayName}</span>
+                        <span class="season-badge">${seasonDisplay}</span>
+                    </div>
+                </div>
+                ${tabsHtml}
+                ${tablesHtml}
+            </div>`;
+        }
+
+        function selectScanTab(srv, idx) {
+            activeServerScans[srv] = idx;
+            if (currentTab === 'view') renderViewTab();
+            else if (currentTab === 'manage') renderManageTab();
         }
 
         function renderUpcomingTab() {
             const container = document.getElementById('servers-upcoming');
             if (!container) return;
-            container.innerHTML = '';
 
-            let hasItems = false;
+            let html = '';
+            let renderedCount = 0;
 
             ALL_SERVERS.forEach(srv => {
-                const sData = globalServerData[srv] || { scans: [], latestConfirmedScan: null, dropRules: {} };
-                const scan = sData.latestConfirmedScan;
-                if (!scan) return;
+                const srvData = globalServerData[srv];
+                if (!srvData) return;
 
-                const dropRules = sData.dropRules || {};
-                let matchingHouses = [];
-                let matchingBiz = [];
+                const scans = srvData.scans || [];
+                const latestConfirmed = srvData.latestConfirmedScan || (scans.length > 0 ? scans[scans.length - 1] : null);
+                if (!latestConfirmed) return;
 
-                if (scan.houses) {
-                    scan.houses.forEach(h => {
-                        const dropInfo = calculateItemDropInfo(h, scan.scanTime, 'house', dropRules);
-                        if (!dropInfo.hasDropped && !dropInfo.isFrozen && !dropInfo.isPending) {
-                            if (dropInfo.paydaysLeftToDrop < selectedUpcomingHours) {
-                                matchingHouses.push({ item: h, dropInfo });
-                            }
-                        }
-                    });
-                }
+                const scanTimeStr = latestConfirmed.scanTime;
+                const dropRules = srvData.dropRules;
 
-                if (scan.businesses) {
-                    scan.businesses.forEach(b => {
-                        const dropInfo = calculateItemDropInfo(b, scan.scanTime, 'biz', dropRules);
-                        if (!dropInfo.hasDropped && !dropInfo.isFrozen && !dropInfo.isPending) {
-                            if (dropInfo.paydaysLeftToDrop < selectedUpcomingHours) {
-                                matchingBiz.push({ item: b, dropInfo });
-                            }
-                        }
-                    });
-                }
+                const upcomingHouses = (latestConfirmed.houses || []).filter(h => {
+                    if (h.status === 'frozen' || h.status === 'pending' || h.isPendingPair) return false;
+                    const dropInfo = calculateItemDropInfo(h, scanTimeStr, 'house', dropRules);
+                    return !dropInfo.hasDropped && dropInfo.paydaysLeftToDrop <= selectedUpcomingHours;
+                });
 
-                if (matchingHouses.length === 0 && matchingBiz.length === 0) return;
-                hasItems = true;
+                const upcomingBiz = (latestConfirmed.businesses || []).filter(b => {
+                    if (b.status === 'frozen' || b.status === 'pending' || b.isPendingPair) return false;
+                    const dropInfo = calculateItemDropInfo(b, scanTimeStr, 'biz', dropRules);
+                    return !dropInfo.hasDropped && dropInfo.paydaysLeftToDrop <= selectedUpcomingHours;
+                });
 
-                const card = document.createElement('div');
-                card.className = 'server-card';
+                if (upcomingHouses.length === 0 && upcomingBiz.length === 0) return;
 
-                const headerHTML = `
-                    <div class="server-header">
-                        <div class="server-title">
-                            <span>${getServerDisplayName(srv)}</span>
-                            <span class="season-badge">${sData.season?.display || ''}</span>
-                        </div>
-                        <span class="scan-info-tag">Ожидается слёт в ближайшее время</span>
-                    </div>
-                `;
+                const displayName = getServerDisplayName(srv);
+                const seasonDisplay = srvData.season?.display || 'Сезон ?';
 
                 let housesRows = '';
-                matchingHouses.forEach(({ item, dropInfo }) => {
-                    housesRows += `
-                        <tr>
-                            <td>${item.propId ? `№${item.propId}` : `поз. ${item.pos}`}</td>
-                            <td><span class="pd-badge-drop">${dropInfo.currentPd} PD</span></td>
-                            <td><span class="time-left-badge">${dropInfo.timeLeftStr}</span></td>
-                            <td>${getStatusHTML(item.status, item.isPendingPair)}</td>
-                        </tr>
-                    `;
+                upcomingHouses.forEach(h => {
+                    const propIdStr = h.propId ? `№${h.propId}` : `pos ${h.pos}`;
+                    const dropInfo = calculateItemDropInfo(h, scanTimeStr, 'house', dropRules);
+                    const statusHtml = getStatusHTML(h.status, h.isPendingPair);
+                    housesRows += `<tr>
+                        <td><b>${propIdStr}</b></td>
+                        <td><span class="pd-badge">${dropInfo.currentPd} pd</span></td>
+                        <td>${statusHtml}</td>
+                        <td><span class="time-left-badge">⏳ ${dropInfo.timeLeftStr}</span></td>
+                    </tr>`;
                 });
 
                 let bizRows = '';
-                matchingBiz.forEach(({ item, dropInfo }) => {
-                    bizRows += `
-                        <tr>
-                            <td>${item.propId ? `№${item.propId}` : `поз. ${item.pos}`}</td>
-                            <td><span class="pd-badge-drop">${dropInfo.currentPd} PD</span></td>
-                            <td><span class="time-left-badge">${dropInfo.timeLeftStr}</span></td>
-                            <td>${getStatusHTML(item.status, item.isPendingPair)}</td>
-                        </tr>
-                    `;
+                upcomingBiz.forEach(b => {
+                    const propIdStr = b.propId ? `№${b.propId}` : `pos ${b.pos}`;
+                    const dropInfo = calculateItemDropInfo(b, scanTimeStr, 'biz', dropRules);
+                    const statusHtml = getStatusHTML(b.status, b.isPendingPair);
+                    bizRows += `<tr>
+                        <td><b>${propIdStr}</b></td>
+                        <td><span class="pd-badge">${dropInfo.currentPd} pd</span></td>
+                        <td>${statusHtml}</td>
+                        <td><span class="time-left-badge">⏳ ${dropInfo.timeLeftStr}</span></td>
+                    </tr>`;
                 });
 
-                const tablesHTML = `
-                    <div class="tables-grid">
-                        <div>
-                            <div class="section-header"><span class="section-title">🏠 Дома</span></div>
-                            ${housesRows ? `<table><thead><tr><th>Объект</th><th>PD</th><th>Слёт</th><th>Статус</th></tr></thead><tbody>${housesRows}</tbody></table>` : '<span class="empty">Нет</span>'}
-                        </div>
-                        <div>
-                            <div class="section-header"><span class="section-title">🏢 Бизнесы</span></div>
-                            ${bizRows ? `<table><thead><tr><th>Объект</th><th>PD</th><th>Слёт</th><th>Статус</th></tr></thead><tbody>${bizRows}</tbody></table>` : '<span class="empty">Нет</span>'}
+                html += `<div class="server-card">
+                    <div class="server-header">
+                        <div class="server-title">
+                            <span>${displayName}</span>
+                            <span class="season-badge">${seasonDisplay}</span>
                         </div>
                     </div>
-                `;
+                    <div class="tables-grid">
+                        <div>
+                            <div class="section-header">
+                                <span class="section-title">🏠 Дома (${upcomingHouses.length})</span>
+                            </div>
+                            ${upcomingHouses.length > 0 ? `<table><thead><tr><th>ID</th><th>PD</th><th>Статус</th><th>Слёт</th></tr></thead><tbody>${housesRows}</tbody></table>` : '<span class="empty">Нет слетающих домов</span>'}
+                        </div>
+                        <div>
+                            <div class="section-header">
+                                <span class="section-title">🏢 Бизнесы (${upcomingBiz.length})</span>
+                            </div>
+                            ${upcomingBiz.length > 0 ? `<table><thead><tr><th>ID</th><th>PD</th><th>Статус</th><th>Слёт</th></tr></thead><tbody>${bizRows}</tbody></table>` : '<span class="empty">Нет слетающих бизнесов</span>'}
+                        </div>
+                    </div>
+                </div>`;
 
-                card.innerHTML = headerHTML + tablesHTML;
-                container.appendChild(card);
+                renderedCount++;
             });
 
-            if (!hasItems) {
-                container.innerHTML = '<div class="empty-center">В ближайшее время слётов не ожидается</div>';
+            if (renderedCount === 0) {
+                html = `<div class="empty-center">Нет объектов, слетающих в ближайшие ${selectedUpcomingHours} ч.</div>`;
             }
+
+            container.innerHTML = html;
         }
 
-        function renderManageTab() {
-            if (currentUser && (currentUser.role === 'admin' || currentUser.role === 'support')) {
+        async function renderManageTab() {
+            if (currentUser?.role === 'admin' || currentUser?.role === 'support') {
                 document.getElementById('admin-manual-logs-card').style.display = 'block';
                 loadManualLogs();
-            } else {
-                document.getElementById('admin-manual-logs-card').style.display = 'none';
             }
 
             const container = document.getElementById('servers-manage');
             if (!container) return;
-            container.innerHTML = '';
 
+            let html = '';
             ALL_SERVERS.forEach(srv => {
-                const sData = globalServerData[srv] || { scans: [], season: {} };
-                const scans = sData.scans || [];
-
-                if (!activeServerScans[srv] && scans.length > 0) {
-                    activeServerScans[srv] = scans[scans.length - 1].scanId;
-                }
-
-                const activeScanId = activeServerScans[srv];
-                const activeScan = scans.find(s => s.scanId === activeScanId) || scans[scans.length - 1];
-
-                const card = document.createElement('div');
-                card.className = 'server-card';
-
-                let tabsHTML = '<div class="scan-tabs-container">';
-                if (scans.length > 0) {
-                    scans.forEach(s => {
-                        const badgeInfo = getScanBadgeInfo(s);
-                        const isActive = (activeScan && s.scanId === activeScan.scanId) ? 'active' : '';
-                        const tooltip = getScanTooltip(s);
-                        tabsHTML += `
-                            <button class="${badgeInfo.cssClass} ${isActive}" title="${tooltip}" onclick="setActiveScan('${srv}', '${s.scanId}')">
-                                ${badgeInfo.emoji} ${s.hourLabel || s.scanId}
-                            </button>
-                        `;
-                    });
-                } else {
-                    tabsHTML += '<span class="empty">Нет сканов</span>';
-                }
-                tabsHTML += '</div>';
-
-                const deleteScanBtnHTML = (activeScan && (currentUser.role === 'admin' || currentUser.role === 'support')) ? 
-                    `<button class="btn-delete-scan" onclick="handleDeleteScan('${srv}', '${activeScan.scanId}')">Удалить скан</button>` : '';
-
-                const scanBarHTML = `
-                    <div class="scan-tabs-bar">
-                        ${tabsHTML}
-                        ${deleteScanBtnHTML}
-                    </div>
-                `;
-
-                const canEdit = currentUser && (currentUser.role === 'admin' || currentUser.role === 'support');
-
-                let housesRows = '';
-                if (activeScan && activeScan.houses) {
-                    activeScan.houses.forEach(h => {
-                        const isPending = h.isPendingPair || h.status === 'pending';
-                        
-                        let actionsHTML = '';
-                        if (canEdit) {
-                            actionsHTML = `
-                                <div class="btn-circle-group">
-                                    <button class="btn-circle ${h.status === 'insured' && !isPending ? 'active-insured' : ''}" title="Страхованный" onclick="updateItemStatus('${srv}', '${activeScan.scanId}', 'house', ${h.pos}, 'insured')">🛡️</button>
-                                    <button class="btn-circle ${h.status === 'uninsured' && !isPending ? 'active-uninsured' : ''}" title="Не страхованный" onclick="updateItemStatus('${srv}', '${activeScan.scanId}', 'house', ${h.pos}, 'uninsured')">❌</button>
-                                    <button class="btn-circle ${h.status === 'frozen' && !isPending ? 'active-frozen' : ''}" title="Заморожен" onclick="updateItemStatus('${srv}', '${activeScan.scanId}', 'house', ${h.pos}, 'frozen')">❄️</button>
-                                    <button class="btn-circle btn-circle-del" title="Удалить" onclick="deleteItem('${srv}', '${activeScan.scanId}', 'house', ${h.pos})">🗑️</button>
-                                </div>
-                            `;
-                        }
-
-                        // В управлении НЕ вычитаются пейдеи, все остается так же, как при сканировании (h.pd или h.basePd)
-                        const displayPd = h.basePd !== undefined ? h.basePd : h.pd;
-
-                        housesRows += `
-                            <tr>
-                                <td>${h.propId ? `№${h.propId}` : `поз. ${h.pos}`}</td>
-                                <td><span class="pd-badge">${displayPd} PD</span></td>
-                                <td>${getStatusHTML(h.status, isPending)}</td>
-                                ${canEdit ? `<td>${actionsHTML}</td>` : ''}
-                            </tr>
-                        `;
-                    });
-                }
-
-                let bizRows = '';
-                if (activeScan && activeScan.businesses) {
-                    activeScan.businesses.forEach(b => {
-                        const isPending = b.isPendingPair || b.status === 'pending';
-
-                        let actionsHTML = '';
-                        if (canEdit) {
-                            actionsHTML = `
-                                <div class="btn-circle-group">
-                                    <button class="btn-circle ${b.status === 'insured' && !isPending ? 'active-insured' : ''}" title="Страхованный" onclick="updateItemStatus('${srv}', '${activeScan.scanId}', 'biz', ${b.pos}, 'insured')">🛡️</button>
-                                    <button class="btn-circle ${b.status === 'uninsured' && !isPending ? 'active-uninsured' : ''}" title="Не страхованный" onclick="updateItemStatus('${srv}', '${activeScan.scanId}', 'biz', ${b.pos}, 'uninsured')">❌</button>
-                                    <button class="btn-circle ${b.status === 'no_activity' && !isPending ? 'active-noact' : ''}" title="Без активности" onclick="updateItemStatus('${srv}', '${activeScan.scanId}', 'biz', ${b.pos}, 'no_activity')">🚫</button>
-                                    <button class="btn-circle ${b.status === 'frozen' && !isPending ? 'active-frozen' : ''}" title="Заморожен" onclick="updateItemStatus('${srv}', '${activeScan.scanId}', 'biz', ${b.pos}, 'frozen')">❄️️</button>
-                                    <button class="btn-circle btn-circle-del" title="Удалить" onclick="deleteItem('${srv}', '${activeScan.scanId}', 'biz', ${b.pos})">🗑️</button>
-                                </div>
-                            `;
-                        }
-
-                        const displayPd = b.basePd !== undefined ? b.basePd : b.pd;
-
-                        bizRows += `
-                            <tr>
-                                <td>${b.propId ? `№${b.propId}` : `поз. ${b.pos}`}</td>
-                                <td><span class="pd-badge">${displayPd} PD</span></td>
-                                <td>${getStatusHTML(b.status, isPending)}</td>
-                                ${canEdit ? `<td>${actionsHTML}</td>` : ''}
-                            </tr>
-                        `;
-                    });
-                }
-
-                const addHouseBtn = (canEdit && activeScan) ? `<button class="btn-add" onclick="addItem('${srv}', '${activeScan.scanId}', 'house')">+ Добавить</button>` : '';
-                const addBizBtn = (canEdit && activeScan) ? `<button class="btn-add" onclick="addItem('${srv}', '${activeScan.scanId}', 'biz')">+ Добавить</button>` : '';
-
-                const headerHTML = `
-                    <div class="server-header">
-                        <div class="server-title">
-                            <span>${getServerDisplayName(srv)}</span>
-                            <span class="season-badge">${sData.season?.display || ''}</span>
-                        </div>
-                    </div>
-                `;
-
-                const tablesHTML = `
-                    <div class="tables-grid">
-                        <div>
-                            <div class="section-header">
-                                <span class="section-title">🏠 Дома</span>
-                                ${addHouseBtn}
-                            </div>
-                            ${housesRows ? `<table><thead><tr><th>Объект</th><th>PD</th><th>Статус</th>${canEdit ? '<th>Действия</th>' : ''}</tr></thead><tbody>${housesRows}</tbody></table>` : '<span class="empty">Нет данных</span>'}
-                        </div>
-                        <div>
-                            <div class="section-header">
-                                <span class="section-title">🏢 Бизнесы</span>
-                                ${addBizBtn}
-                            </div>
-                            ${bizRows ? `<table><thead><tr><th>Объект</th><th>PD</th><th>Статус</th>${canEdit ? '<th>Действия</th>' : ''}</tr></thead><tbody>${bizRows}</tbody></table>` : '<span class="empty">Нет данных</span>'}
-                        </div>
-                    </div>
-                `;
-
-                card.innerHTML = headerHTML + scanBarHTML + tablesHTML;
-                container.appendChild(card);
+                const srvData = globalServerData[srv];
+                if (!srvData) return;
+                html += renderServerCardManage(srv, srvData);
             });
-        }
 
-        function setActiveScan(srv, scanId) {
-            activeServerScans[srv] = scanId;
-            renderManageTab();
-        }
-
-        async function updateItemStatus(srv, scanId, propType, pos, newStatus) {
-            try {
-                const res = await fetch('/api/update_status', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ server: srv, scanId: scanId, propType: propType, pos: pos, status: newStatus })
-                });
-                if (res.ok) {
-                    await loadPaydaysData();
-                } else {
-                    const err = await res.json();
-                    alert(err.detail || 'Ошибка изменения статуса');
-                }
-            } catch (e) {
-                alert('Ошибка соединения с сервером');
-            }
-        }
-
-        async function deleteItem(srv, scanId, propType, pos) {
-            if (!confirm('Вы уверены, что хотите удалить этот объект?')) return;
-            try {
-                const res = await fetch('/api/delete_item', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ server: srv, scanId: scanId, propType: propType, pos: pos })
-                });
-                if (res.ok) {
-                    await loadPaydaysData();
-                } else {
-                    alert('Ошибка удаления объекта');
-                }
-            } catch (e) {
-                alert('Ошибка соединения с сервером');
-            }
-        }
-
-        async function handleDeleteScan(srv, scanId) {
-            if (!confirm(`Удалить весь скан ${scanId}?`)) return;
-            try {
-                const res = await fetch('/api/delete_scan', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ server: srv, scanId: scanId })
-                });
-                if (res.ok) {
-                    delete activeServerScans[srv];
-                    await loadPaydaysData();
-                } else {
-                    alert('Ошибка удаления скана');
-                }
-            } catch (e) {
-                alert('Ошибка соединения с сервером');
-            }
-        }
-
-        async function addItem(srv, scanId, propType) {
-            const propIdStr = prompt('Введите номер дома/бизнеса (или оставьте пустым):');
-            const pdStr = prompt('Введите количество PayDay:');
-            if (pdStr === null) return;
-            const pd = parseInt(pdStr);
-            if (isNaN(pd)) return alert('Некорректный PayDay');
-
-            const propId = propIdStr && !isNaN(parseInt(propIdStr)) ? parseInt(propIdStr) : null;
-
-            try {
-                const res = await fetch('/api/add_item', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ server: srv, scanId: scanId, propType: propType, pd: pd, propId: propId })
-                });
-                if (res.ok) {
-                    await loadPaydaysData();
-                } else {
-                    alert('Ошибка добавления объекта');
-                }
-            } catch (e) {
-                alert('Ошибка соединения с сервером');
-            }
-        }
-
-        async function renderAdminTab() {
-            if (!currentUser || currentUser.role !== 'admin') return;
-            await loadAdminUsers();
-            await loadAdminScanLogs();
+            container.innerHTML = html;
         }
 
         async function loadManualLogs() {
@@ -2281,107 +2156,286 @@ DASHBOARD_HTML = """
                 if (!container) return;
 
                 if (logs.length === 0) {
-                    container.innerHTML = '<span class="empty">Логи действий отсутствуют</span>';
+                    container.innerHTML = '<span class="empty">Логи ручных действий отсутствуют</span>';
                     return;
                 }
 
                 let rows = '';
                 logs.forEach(l => {
-                    rows += `
-                        <tr>
-                            <td>${l.created_at}</td>
-                            <td><b>${l.username}</b></td>
-                            <td>${getServerDisplayName(l.server)}</td>
-                            <td>${l.details}</td>
-                        </tr>
-                    `;
+                    rows += `<tr>
+                        <td>${l.created_at || ''}</td>
+                        <td><b>${l.username || ''}</b></td>
+                        <td><span class="season-badge">${l.server || ''}</span></td>
+                        <td>${l.details || ''}</td>
+                    </tr>`;
                 });
 
-                container.innerHTML = `
-                    <table>
-                        <thead>
-                            <tr><th>Время</th><th>Пользователь</th><th>Сервер</th><th>Детали действия</th></tr>
-                        </thead>
-                        <tbody>${rows}</tbody>
-                    </table>
-                `;
+                container.innerHTML = `<table>
+                    <thead><tr><th>Время</th><th>Пользователь</th><th>Сервер</th><th>Действие</th></tr></thead>
+                    <tbody>${rows}</tbody>
+                </table>`;
             } catch (e) {
                 console.error("Ошибка загрузки логов ручных действий:", e);
             }
         }
 
-        async function loadAdminUsers() {
+        function renderServerCardManage(srv, srvData) {
+            const displayName = getServerDisplayName(srv);
+            const seasonDisplay = srvData.season?.display || 'Сезон ?';
+            const scans = srvData.scans || [];
+
+            let selectedScanIdx = activeServerScans[srv];
+            if (selectedScanIdx === undefined || selectedScanIdx >= scans.length) {
+                selectedScanIdx = scans.length > 0 ? scans.length - 1 : 0;
+                activeServerScans[srv] = selectedScanIdx;
+            }
+
+            let tabsHtml = '';
+            if (scans.length > 0) {
+                tabsHtml += '<div class="scan-tabs-bar"><div class="scan-tabs-container">';
+                scans.forEach((sc, idx) => {
+                    const badge = getScanBadgeInfo(sc);
+                    const isActive = idx === selectedScanIdx ? 'active' : '';
+                    const tooltip = getScanTooltip(sc);
+                    tabsHtml += `<button class="${badge.cssClass} ${isActive}" title="${tooltip}" onclick="selectScanTab('${srv}', ${idx})">${badge.emoji} ${sc.hourLabel || 'Скан'}</button>`;
+                });
+                tabsHtml += '</div>';
+
+                const activeScan = scans[selectedScanIdx];
+                if (activeScan) {
+                    tabsHtml += `<button class="btn-delete-scan" title="Удалить весь скан" onclick="deleteScan('${srv}', '${activeScan.scanId}')">❌ Удалить скан</button>`;
+                }
+                tabsHtml += '</div>';
+            } else {
+                tabsHtml = '<span class="scan-info-tag" style="color: var(--text-muted);">Сканов пока нет</span>';
+            }
+
+            const activeScan = scans[selectedScanIdx];
+            let tablesHtml = '';
+
+            if (activeScan) {
+                const scanId = activeScan.scanId;
+
+                let housesRows = '';
+                const houses = activeScan.houses || [];
+                houses.forEach(h => {
+                    const propIdStr = h.propId ? `№${h.propId}` : `pos ${h.pos}`;
+                    housesRows += `<tr>
+                        <td><b>${propIdStr}</b></td>
+                        <td><span class="pd-badge">${h.pd} pd</span></td>
+                        <td>
+                            <div class="btn-circle-group">
+                                <button class="btn-circle ${h.status === 'insured' ? 'active-insured' : ''}" title="Страховка (1 pd/h)" onclick="updateStatus('${srv}', '${scanId}', 'house', ${h.pos}, 'insured')">🛡️</button>
+                                <button class="btn-circle ${h.status === 'uninsured' ? 'active-uninsured' : ''}" title="Без страховки (2 pd/h)" onclick="updateStatus('${srv}', '${scanId}', 'house', ${h.pos}, 'uninsured')">❌</button>
+                                <button class="btn-circle ${h.status === 'frozen' ? 'active-frozen' : ''}" title="Заморожен (0 pd/h)" onclick="updateStatus('${srv}', '${scanId}', 'house', ${h.pos}, 'frozen')">❄️</button>
+                                <button class="btn-circle ${h.status === 'pending' ? 'active-pending' : ''}" title="Новый (ожидает)" onclick="updateStatus('${srv}', '${scanId}', 'house', ${h.pos}, 'pending')">🔍</button>
+                                <button class="btn-circle btn-circle-del" title="Удалить" onclick="deleteItem('${srv}', '${scanId}', 'house', ${h.pos})">🗑️</button>
+                            </div>
+                        </td>
+                    </tr>`;
+                });
+
+                let bizRows = '';
+                const businesses = activeScan.businesses || [];
+                businesses.forEach(b => {
+                    const propIdStr = b.propId ? `№${b.propId}` : `pos ${b.pos}`;
+                    bizRows += `<tr>
+                        <td><b>${propIdStr}</b></td>
+                        <td><span class="pd-badge">${b.pd} pd</span></td>
+                        <td>
+                            <div class="btn-circle-group">
+                                <button class="btn-circle ${b.status === 'insured' ? 'active-insured' : ''}" title="Страховка (1 pd/h)" onclick="updateStatus('${srv}', '${scanId}', 'biz', ${b.pos}, 'insured')">🛡️</button>
+                                <button class="btn-circle ${b.status === 'uninsured' ? 'active-uninsured' : ''}" title="Без страховки (2 pd/h)" onclick="updateStatus('${srv}', '${scanId}', 'biz', ${b.pos}, 'uninsured')">❌</button>
+                                <button class="btn-circle ${b.status === 'no_activity' ? 'active-noact' : ''}" title="Без актива (4 pd/h)" onclick="updateStatus('${srv}', '${scanId}', 'biz', ${b.pos}, 'no_activity')">🚫</button>
+                                <button class="btn-circle ${b.status === 'frozen' ? 'active-frozen' : ''}" title="Заморожен (0 pd/h)" onclick="updateStatus('${srv}', '${scanId}', 'biz', ${b.pos}, 'frozen')">❄️</button>
+                                <button class="btn-circle ${b.status === 'pending' ? 'active-pending' : ''}" title="Новый (ожидает)" onclick="updateStatus('${srv}', '${scanId}', 'biz', ${b.pos}, 'pending')">🔍</button>
+                                <button class="btn-circle btn-circle-del" title="Удалить" onclick="deleteItem('${srv}', '${scanId}', 'biz', ${b.pos})">🗑️</button>
+                            </div>
+                        </td>
+                    </tr>`;
+                });
+
+                tablesHtml = `<div class="tables-grid">
+                    <div>
+                        <div class="section-header">
+                            <span class="section-title">🏠 Дома (${houses.length})</span>
+                            <button class="btn-add" onclick="addItem('${srv}', '${scanId}', 'house')">+ Дом</button>
+                        </div>
+                        ${houses.length > 0 ? `<table><thead><tr><th>ID</th><th>PD</th><th>Управление</th></tr></thead><tbody>${housesRows}</tbody></table>` : '<span class="empty">Нет домов</span>'}
+                    </div>
+                    <div>
+                        <div class="section-header">
+                            <span class="section-title">🏢 Бизнесы (${businesses.length})</span>
+                            <button class="btn-add" onclick="addItem('${srv}', '${scanId}', 'biz')">+ Бизнес</button>
+                        </div>
+                        ${businesses.length > 0 ? `<table><thead><tr><th>ID</th><th>PD</th><th>Управление</th></tr></thead><tbody>${bizRows}</tbody></table>` : '<span class="empty">Нет бизнесов</span>'}
+                    </div>
+                </div>`;
+            } else {
+                tablesHtml = '<div class="empty">Нет данных для редактирования</div>';
+            }
+
+            return `<div class="server-card">
+                <div class="server-header">
+                    <div class="server-title">
+                        <span>${displayName}</span>
+                        <span class="season-badge">${seasonDisplay}</span>
+                    </div>
+                </div>
+                ${tabsHtml}
+                ${tablesHtml}
+            </div>`;
+        }
+
+        async function updateStatus(server, scanId, propType, pos, newStatus) {
+            try {
+                const res = await fetch('/api/update_status', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ server, scanId, propType, pos, status: newStatus })
+                });
+                if (res.ok) {
+                    await loadData();
+                } else {
+                    const err = await res.json();
+                    alert(err.detail || 'Ошибка изменения статуса');
+                }
+            } catch (e) {
+                alert('Ошибка соединения');
+            }
+        }
+
+        async function deleteItem(server, scanId, propType, pos) {
+            if (!confirm('Вы уверены, что хотите удалить этот объект?')) return;
+            try {
+                const res = await fetch('/api/delete_item', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ server, scanId, propType, pos })
+                });
+                if (res.ok) {
+                    await loadData();
+                } else {
+                    const err = await res.json();
+                    alert(err.detail || 'Ошибка удаления');
+                }
+            } catch (e) {
+                alert('Ошибка соединения');
+            }
+        }
+
+        async function deleteScan(server, scanId) {
+            if (!confirm(`Удалить весь скан ${scanId} для сервера ${server}?`)) return;
+            try {
+                const res = await fetch('/api/delete_scan', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ server, scanId })
+                });
+                if (res.ok) {
+                    await loadData();
+                } else {
+                    const err = await res.json();
+                    alert(err.detail || 'Ошибка удаления скана');
+                }
+            } catch (e) {
+                alert('Ошибка соединения');
+            }
+        }
+
+        async function addItem(server, scanId, propType) {
+            const pdStr = prompt('Введите значение PD (пейдеев):');
+            if (pdStr === null) return;
+            const pd = parseInt(pdStr.trim());
+            if (isNaN(pd)) return alert('Некорректное значение PD');
+
+            const idStr = prompt('Введите номер объекта (ID) или оставьте пустым:');
+            const propId = (idStr && idStr.trim()) ? parseInt(idStr.trim()) : null;
+
+            try {
+                const res = await fetch('/api/add_item', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ server, scanId, propType, pd, propId })
+                });
+                if (res.ok) {
+                    await loadData();
+                } else {
+                    const err = await res.json();
+                    alert(err.detail || 'Ошибка добавления объекта');
+                }
+            } catch (e) {
+                alert('Ошибка соединения');
+            }
+        }
+
+        async function renderAdminTab() {
+            if (currentUser?.role !== 'admin') return;
+            loadUsersList();
+            loadScanLogs();
+        }
+
+        async function loadUsersList() {
             try {
                 const res = await fetch('/api/admin/users');
                 if (!res.ok) return;
                 const users = await res.json();
                 const container = document.getElementById('admin-users-table');
+                if (!container) return;
 
                 let rows = '';
                 users.forEach(u => {
-                    rows += `
-                        <tr>
-                            <td>${u.id}</td>
-                            <td><b>${u.username}</b></td>
-                            <td>
-                                <select class="select-role" onchange="changeUserRole(${u.id}, this.value)">
-                                    <option value="user" ${u.role === 'user' ? 'selected' : ''}>User</option>
-                                    <option value="support" ${u.role === 'support' ? 'selected' : ''}>Support</option>
-                                    <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin</option>
-                                </select>
-                            </td>
-                            <td>
-                                <input type="checkbox" ${u.is_allowed ? 'checked' : ''} onchange="toggleUserAccess(${u.id}, this.checked)"> Доступ
-                            </td>
-                            <td>
-                                <button class="btn-add" onclick="promptChangePassword(${u.id})">Сменить пароль</button>
-                                <button class="btn-user-del" onclick="deleteUser(${u.id})">Удалить</button>
-                            </td>
-                        </tr>
-                    `;
+                    const allowedChecked = u.is_allowed ? 'checked' : '';
+                    rows += `<tr>
+                        <td>${u.id}</td>
+                        <td><b>${u.username}</b></td>
+                        <td>
+                            <select class="select-role" onchange="handleUpdateRole(${u.id}, this.value)">
+                                <option value="user" ${u.role === 'user' ? 'selected' : ''}>User</option>
+                                <option value="support" ${u.role === 'support' ? 'selected' : ''}>Support</option>
+                                <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin</option>
+                            </select>
+                        </td>
+                        <td>
+                            <input type="checkbox" ${allowedChecked} onchange="handleToggleAccess(${u.id}, this.checked)"> Доступ
+                        </td>
+                        <td>
+                            <button class="btn-add" style="padding: 2px 6px; font-size: 0.75rem;" onclick="handleChangePassword(${u.id})">🔑 Пароль</button>
+                            <button class="btn-user-del" onclick="handleDeleteUser(${u.id})">🗑️ Удалить</button>
+                        </td>
+                    </tr>`;
                 });
 
-                container.innerHTML = `
-                    <table>
-                        <thead>
-                            <tr><th>ID</th><th>Логин</th><th>Роль</th><th>Статус</th><th>Действия</th></tr>
-                        </thead>
-                        <tbody>${rows}</tbody>
-                    </table>
-                `;
+                container.innerHTML = `<table>
+                    <thead><tr><th>ID</th><th>Логин</th><th>Роль</th><th>Доступ</th><th>Действия</th></tr></thead>
+                    <tbody>${rows}</tbody>
+                </table>`;
             } catch (e) {
                 console.error("Ошибка загрузки пользователей:", e);
             }
         }
 
-        async function loadAdminScanLogs() {
+        async function loadScanLogs() {
             try {
                 const res = await fetch('/api/admin/scan_logs');
                 if (!res.ok) return;
                 const logs = await res.json();
                 const container = document.getElementById('admin-scan-logs-table');
+                if (!container) return;
 
                 let rows = '';
                 logs.forEach(l => {
-                    rows += `
-                        <tr>
-                            <td>${l.created_at}</td>
-                            <td>${getServerDisplayName(l.server)}</td>
-                            <td>${l.scanner}</td>
-                        </tr>
-                    `;
+                    rows += `<tr>
+                        <td>${l.created_at || ''}</td>
+                        <td><span class="season-badge">${l.server || ''}</span></td>
+                        <td>${l.scanner || ''}</td>
+                    </tr>`;
                 });
 
-                container.innerHTML = `
-                    <div style="max-height: 250px; overflow-y: auto;">
-                        <table>
-                            <thead>
-                                <tr><th>Время</th><th>Сервер</th><th>Скрипт / Сканер</th></tr>
-                            </thead>
-                            <tbody>${rows}</tbody>
-                        </table>
-                    </div>
-                `;
+                container.innerHTML = `<table>
+                    <thead><tr><th>Время</th><th>Сервер</th><th>Сканнер</th></tr></thead>
+                    <tbody>${rows}</tbody>
+                </table>`;
             } catch (e) {
                 console.error("Ошибка загрузки логов сканирования:", e);
             }
@@ -2392,7 +2446,7 @@ DASHBOARD_HTML = """
             const p = document.getElementById('new-password').value.trim();
             const r = document.getElementById('new-role').value;
 
-            if (!u || !p) return alert('Заполните логин и пароль');
+            if (!u || !p) return alert('Укажите логин и пароль');
 
             try {
                 const res = await fetch('/api/admin/create_user', {
@@ -2401,73 +2455,94 @@ DASHBOARD_HTML = """
                     body: JSON.stringify({ username: u, password: p, role: r })
                 });
                 if (res.ok) {
+                    alert('Пользователь успешно создан');
                     document.getElementById('new-username').value = '';
                     document.getElementById('new-password').value = '';
-                    loadAdminUsers();
+                    loadUsersList();
                 } else {
                     const err = await res.json();
-                    alert(err.detail || 'Ошибка создания пользователя');
+                    alert(err.detail || 'Ошибка создания');
                 }
             } catch (e) {
                 alert('Ошибка соединения');
             }
         }
 
-        async function toggleUserAccess(userId, isAllowed) {
-            await fetch('/api/admin/toggle_access', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ user_id: userId, is_allowed: isAllowed })
-            });
-            loadAdminUsers();
-        }
-
-        async function changeUserRole(userId, newRole) {
-            const res = await fetch('/api/admin/update_role', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ user_id: userId, role: newRole })
-            });
-            if (!res.ok) {
-                const err = await res.json();
-                alert(err.detail || 'Ошибка смены роли');
-            }
-            loadAdminUsers();
-        }
-
-        async function promptChangePassword(userId) {
-            const newPassword = prompt('Введите новый пароль:');
-            if (!newPassword) return;
-
-            const res = await fetch('/api/admin/change_password', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ user_id: userId, new_password: newPassword })
-            });
-            if (res.ok) {
-                alert('Пароль успешно изменен');
-            } else {
-                const err = await res.json();
-                alert(err.detail || 'Ошибка изменения пароля');
+        async function handleDeleteUser(userId) {
+            if (!confirm('Удалить этого пользователя?')) return;
+            try {
+                const res = await fetch('/api/admin/delete_user', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: userId })
+                });
+                if (res.ok) {
+                    loadUsersList();
+                } else {
+                    const err = await res.json();
+                    alert(err.detail || 'Ошибка удаления');
+                }
+            } catch (e) {
+                alert('Ошибка соединения');
             }
         }
 
-        async function deleteUser(userId) {
-            if (!confirm('Вы уверены, что хотите удалить пользователя?')) return;
-            const res = await fetch('/api/admin/delete_user', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ user_id: userId })
-            });
-            if (res.ok) {
-                loadAdminUsers();
-            } else {
-                const err = await res.json();
-                alert(err.detail || 'Ошибка удаления пользователя');
+        async function handleToggleAccess(userId, isAllowed) {
+            try {
+                const res = await fetch('/api/admin/toggle_access', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: userId, is_allowed: isAllowed })
+                });
+                if (!res.ok) {
+                    const err = await res.json();
+                    alert(err.detail || 'Ошибка доступа');
+                }
+            } catch (e) {
+                alert('Ошибка соединения');
             }
         }
 
-        checkAuth();
+        async function handleUpdateRole(userId, newRole) {
+            try {
+                const res = await fetch('/api/admin/update_role', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: userId, role: newRole })
+                });
+                if (!res.ok) {
+                    const err = await res.json();
+                    alert(err.detail || 'Ошибка роли');
+                }
+            } catch (e) {
+                alert('Ошибка соединения');
+            }
+        }
+
+        async function handleChangePassword(userId) {
+            const newPassword = prompt('Введите новый пароль для пользователя:');
+            if (!newPassword || !newPassword.trim()) return;
+
+            try {
+                const res = await fetch('/api/admin/change_password', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: userId, new_password: newPassword.trim() })
+                });
+                if (res.ok) {
+                    alert('Пароль успешно изменен');
+                } else {
+                    const err = await res.json();
+                    alert(err.detail || 'Ошибка смены пароля');
+                }
+            } catch (e) {
+                alert('Ошибка соединения');
+            }
+        }
+
+        window.addEventListener('DOMContentLoaded', () => {
+            checkAuth();
+        });
     </script>
 </body>
 </html>
