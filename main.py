@@ -9,7 +9,7 @@ from typing import Dict, List, Optional
 import asyncpg
 from fastapi import FastAPI, Header, HTTPException, Request, Response, status, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 from passlib.context import CryptContext
 from pydantic import BaseModel
 
@@ -99,7 +99,7 @@ def get_drop_limit(server: str, prop_type: str, status: str) -> int:
         "biz": {"insured": 2, "uninsured_min": 2, "uninsured_max": 3}
     })
     rules = srv_rules.get(prop_type, {"insured": 2, "uninsured_min": 2, "uninsured_max": 3})
-    if status in ["uninsured", "no_activity", "frozen"]:
+    if status in ["uninsured", "no_activity", "frozen", "pending"]:
         return rules.get("uninsured_min", 2)
     return rules.get("insured", 2)
 
@@ -396,10 +396,12 @@ def get_server_season_info(server: str) -> dict:
 def get_latest_confirmed_scan(scans: List[dict]) -> Optional[dict]:
     if not scans:
         return None
+    # Приоритет 1: Свежая подтвержденная пара, являющаяся 2-м сканом из пары
     current_pair_scans = [s for s in scans if s.get("isCurrentPair", False) and s.get("hasPair", False)]
     if current_pair_scans:
         return current_pair_scans[-1]
     
+    # Приоритет 2: Любой подтвержденный скан
     confirmed_scans = [s for s in scans if s.get("hasPair", False) or s.get("isConfirmed", False)]
     if confirmed_scans:
         return confirmed_scans[-1]
@@ -461,13 +463,13 @@ async def process_hourly_payday():
             async with db_pool.acquire() as conn:
                 await conn.execute("TRUNCATE TABLE scan_logs;")
                 await conn.execute("TRUNCATE TABLE manual_action_logs;")
-                print(f"[{now_msk.strftime('%Y-%m-%d %H:%M:%S')}] Логи сканов и ручных действий успешно очищены (00:00 МСК).")
+                print(f"[{now_msk.strftime('%Y-%m-%d %H:%M:%S')}] Логи сканов и ручных действий очищены (00:00 МСК).")
         except Exception as e:
             print(f"Ошибка очистки логов: {e}")
 
     async with data_lock:
         check_and_update_outdated_scans()
-        print(f"[{now_msk.strftime('%Y-%m-%d %H:%M:%S')}] Проверка актуальности сканирований...")
+        print(f"[{now_msk.strftime('%Y-%m-%d %H:%M:%S')}] Выполнен почасовой PayDay...")
         await save_data_to_file_async()
 
 async def hourly_loop():
@@ -611,7 +613,7 @@ async def get_scan_logs(username: str = Depends(verify_admin)):
         return result
 
 @app.get("/api/admin/manual_action_logs")
-async def get_manual_action_logs(username: str = Depends(verify_admin)):
+async def get_manual_action_logs(username: str = Depends(verify_editor)):
     if not db_pool:
         return []
     async with db_pool.acquire() as conn:
@@ -788,7 +790,7 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
                 prev_item["status"] = auto_status
 
                 final_status = auto_status
-                if matched_existing and not matched_existing.get("isPendingPair", True):
+                if matched_existing and not matched_existing.get("isPendingPair", True) and matched_existing.get("status") != "pending":
                     final_status = matched_existing.get("status", auto_status)
 
                 record = {
@@ -800,7 +802,7 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
                     "isPendingPair": False,
                     "updatedAt": now_msk.strftime("%H:%M:%S")
                 }
-            elif matched_existing and not matched_existing.get("isPendingPair", True):
+            elif matched_existing and not matched_existing.get("isPendingPair", True) and matched_existing.get("status") != "pending":
                 record = {
                     "basePd": item.pd,
                     "pd": item.pd,
@@ -811,24 +813,12 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
                     "updatedAt": now_msk.strftime("%H:%M:%S")
                 }
             else:
-                saved_status = "insured"
-                if matched_existing and "status" in matched_existing:
-                    saved_status = matched_existing["status"]
-                elif prev_scan:
-                    matched_prev = None
-                    if item.propId is not None:
-                        matched_prev = next((ph for ph in prev_houses if ph.get("propId") == item.propId), None)
-                    if not matched_prev and idx < len(prev_houses):
-                        matched_prev = prev_houses[idx]
-                    if matched_prev and "status" in matched_prev:
-                        saved_status = matched_prev["status"]
-
                 record = {
                     "basePd": item.pd,
                     "pd": item.pd,
                     "propId": item.propId,
                     "pos": item.pos,
-                    "status": saved_status,
+                    "status": "pending",
                     "isPendingPair": True,
                     "updatedAt": now_msk.strftime("%H:%M:%S")
                 }
@@ -849,7 +839,7 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
                 prev_item["status"] = auto_status
 
                 final_status = auto_status
-                if matched_existing and not matched_existing.get("isPendingPair", True):
+                if matched_existing and not matched_existing.get("isPendingPair", True) and matched_existing.get("status") != "pending":
                     final_status = matched_existing.get("status", auto_status)
 
                 record = {
@@ -861,7 +851,7 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
                     "isPendingPair": False,
                     "updatedAt": now_msk.strftime("%H:%M:%S")
                 }
-            elif matched_existing and not matched_existing.get("isPendingPair", True):
+            elif matched_existing and not matched_existing.get("isPendingPair", True) and matched_existing.get("status") != "pending":
                 record = {
                     "basePd": item.pd,
                     "pd": item.pd,
@@ -872,24 +862,12 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
                     "updatedAt": now_msk.strftime("%H:%M:%S")
                 }
             else:
-                saved_status = "insured"
-                if matched_existing and "status" in matched_existing:
-                    saved_status = matched_existing["status"]
-                elif prev_scan:
-                    matched_prev = None
-                    if item.propId is not None:
-                        matched_prev = next((pb for pb in prev_biz if pb.get("propId") == item.propId), None)
-                    if not matched_prev and idx < len(prev_biz):
-                        matched_prev = prev_biz[idx]
-                    if matched_prev and "status" in matched_prev:
-                        saved_status = matched_prev["status"]
-
                 record = {
                     "basePd": item.pd,
                     "pd": item.pd,
                     "propId": item.propId,
                     "pos": item.pos,
-                    "status": saved_status,
+                    "status": "pending",
                     "isPendingPair": True,
                     "updatedAt": now_msk.strftime("%H:%M:%S")
                 }
@@ -907,8 +885,8 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
 
             prev_scan["hasPair"] = True
             prev_scan["isConfirmed"] = True
-            prev_scan["isCurrentPair"] = True
-            prev_scan["isOutdated"] = False
+            prev_scan["isCurrentPair"] = False
+            prev_scan["isOutdated"] = True
 
         has_houses_in_payload = len(house_entries) > 0
         has_biz_in_payload = len(biz_entries) > 0
@@ -966,9 +944,9 @@ async def update_status(data: UpdateStatusModel, username: str = Depends(verify_
                     target_key = "houses" if data.propType in ["house", "houses"] else "businesses"
                     for item in scan[target_key]:
                         if item["pos"] == data.pos:
-                            old_status = item.get("status", "insured")
+                            old_status = item.get("status", "pending")
                             item["status"] = data.status
-                            item["isPendingPair"] = False
+                            item["isPendingPair"] = (data.status == "pending")
                             await save_data_to_file_async()
 
                             prop_label = "Дом" if data.propType in ["house", "houses"] else "Бизнес"
@@ -1271,13 +1249,13 @@ DASHBOARD_HTML = """
             display: flex; 
             align-items: center; 
             justify-content: center; 
-            gap: 4px; 
+            gap: 3px; 
             flex-wrap: nowrap;
         }
 
         .btn-circle { 
-            width: 24px; 
-            height: 24px; 
+            width: 22px; 
+            height: 22px; 
             border-radius: 50%; 
             border: 1px solid #2e384e; 
             background-color: #0f121a; 
@@ -1285,7 +1263,7 @@ DASHBOARD_HTML = """
             display: inline-flex; 
             align-items: center; 
             justify-content: center; 
-            font-size: 0.7rem; 
+            font-size: 0.65rem; 
             cursor: pointer; 
             transition: all 0.2s ease; 
             padding: 0; 
@@ -1325,6 +1303,13 @@ DASHBOARD_HTML = """
             border-color: #42a5f5; 
             color: #ffffff; 
             box-shadow: 0 0 8px rgba(66, 165, 245, 0.6); 
+        }
+
+        .btn-circle.active-pending {
+            background: #f57c00;
+            border-color: #ffe082;
+            color: #ffffff;
+            box-shadow: 0 0 8px rgba(255, 152, 0, 0.6);
         }
 
         .btn-circle-del { 
@@ -1560,7 +1545,7 @@ DASHBOARD_HTML = """
 
         function getStatusHTML(status, isPending) {
             if (isPending || status === 'pending') {
-                return '<span class="status-pending">⏳ Новый</span>';
+                return '<span class="status-pending">🔍 Новый</span>';
             }
             switch (status) {
                 case 'insured':
@@ -1582,42 +1567,66 @@ DASHBOARD_HTML = """
             return new Date(utcMs + (3 * 3600000));
         }
 
+        function parseScanTimeMSK(scanTimeStr) {
+            if (!scanTimeStr) return getMskNowDate();
+            try {
+                const parts = scanTimeStr.split(' ');
+                const d = parts[0].split('-');
+                const t = parts[1].split(':');
+                return new Date(Date.UTC(parseInt(d[0]), parseInt(d[1]) - 1, parseInt(d[2]), parseInt(t[0]), parseInt(t[1] || 0), parseInt(t[2] || 0)));
+            } catch (e) {
+                return getMskNowDate();
+            }
+        }
+
         function calculateElapsedPaydays(scanTimeStr) {
             if (!scanTimeStr) return 0;
             try {
-                const parts = scanTimeStr.split(' ');
-                if (parts.length < 2) return 0;
-                const d = parts[0].split('-');
-                const t = parts[1].split(':');
-                const scanDate = new Date(Date.UTC(parseInt(d[0]), parseInt(d[1]) - 1, parseInt(d[2]), parseInt(t[0]), 0, 0));
-                
+                const scanDate = parseScanTimeMSK(scanTimeStr);
                 const mskNow = getMskNowDate();
+                
+                const scanHourStart = new Date(Date.UTC(scanDate.getUTCFullYear(), scanDate.getUTCMonth(), scanDate.getUTCDate(), scanDate.getUTCHours(), 0, 0));
                 const nowHourStart = new Date(Date.UTC(mskNow.getFullYear(), mskNow.getMonth(), mskNow.getDate(), mskNow.getHours(), 0, 0));
                 
-                const diffHours = Math.floor((nowHourStart.getTime() - scanDate.getTime()) / (3600 * 1000));
+                const diffHours = Math.floor((nowHourStart.getTime() - scanHourStart.getTime()) / (3600 * 1000));
                 return Math.max(0, diffHours);
             } catch (e) {
                 return 0;
             }
         }
 
-        function calculateDynamicItemInfo(item, scanTimeStr, propType, dropRules) {
-            const basePd = item.pd;
+        function calculateItemDropInfo(item, scanTimeStr, propType, dropRules) {
+            const basePd = item.basePd !== undefined ? item.basePd : item.pd;
             const status = item.status || 'insured';
-            const elapsed = calculateElapsedPaydays(scanTimeStr);
 
             let decrement = 1;
             if (status === 'uninsured') decrement = 2;
             else if (status === 'no_activity') decrement = 4;
-            else if (status === 'frozen') decrement = 0;
+            else if (status === 'frozen' || status === 'pending') decrement = 0;
 
-            const currentPd = Math.max(0, basePd - (elapsed * decrement));
+            const elapsedPaydays = calculateElapsedPaydays(scanTimeStr);
+            const currentPd = Math.max(0, basePd - (elapsedPaydays * decrement));
 
             if (status === 'frozen') {
                 return {
                     currentPd: currentPd,
                     timeLeftStr: '❄️ Заморожен',
                     isFrozen: true,
+                    isPending: false,
+                    hasDropped: false,
+                    dropDate: null,
+                    paydaysLeftToDrop: 999
+                };
+            }
+
+            if (status === 'pending' || item.isPendingPair) {
+                return {
+                    currentPd: currentPd,
+                    timeLeftStr: '🔍 Новый',
+                    isFrozen: false,
+                    isPending: true,
+                    hasDropped: false,
+                    dropDate: null,
                     paydaysLeftToDrop: 999
                 };
             }
@@ -1631,26 +1640,52 @@ DASHBOARD_HTML = """
             const paydaysLeftToDrop = Math.max(0, Math.ceil((currentPd - (dropLimit - 1)) / (decrement || 1)));
 
             const mskNow = getMskNowDate();
-            const minutesToNextPayday = 60 - mskNow.getMinutes();
-
-            let totalMinutes = 0;
-            if (paydaysLeftToDrop > 0) {
-                totalMinutes = (paydaysLeftToDrop - 1) * 60 + minutesToNextPayday;
+            
+            // Вычисление точной даты/времени слета
+            let dropDate = new Date(mskNow.getTime());
+            if (paydaysLeftToDrop === 0) {
+                // Если PD уже достиг лимита слета, слет происходит на ближайшем пейдее (начале следующего часа)
+                // Но если ближайший пейдей в 5:00 МСК, он переносится на 6:00 МСК!
+                const nextHourDate = new Date(Date.UTC(mskNow.getFullYear(), mskNow.getMonth(), mskNow.getDate(), mskNow.getHours() + 1, 0, 0));
+                if (nextHourDate.getUTCHours() === 5) {
+                    nextHourDate.setUTCHours(6);
+                }
+                dropDate = nextHourDate;
+            } else {
+                let currentCalcHour = mskNow.getHours();
+                let hoursToAdd = 0;
+                for (let i = 1; i <= paydaysLeftToDrop; i++) {
+                    hoursToAdd++;
+                    let targetHour = (currentCalcHour + i) % 24;
+                    if (targetHour === 5) {
+                        hoursToAdd++; // Пропускаем 5:00 МСК, перенося слёт на 6:00 МСК
+                    }
+                }
+                const nextPayday = new Date(Date.UTC(mskNow.getFullYear(), mskNow.getMonth(), mskNow.getDate(), mskNow.getHours() + hoursToAdd, 0, 0));
+                dropDate = nextPayday;
             }
 
-            const hours = Math.floor(totalMinutes / 60);
-            const minutes = totalMinutes % 60;
+            // Дома/бизнесы не пропадают до 6:00 МСК и пропадают ТОЛЬКО после 6:00 МСК
+            const hasDropped = (mskNow.getTime() >= dropDate.getTime());
 
-            let timeLeftStr = `${hours} ч ${minutes} мин`;
-            if (paydaysLeftToDrop === 0) {
-                timeLeftStr = '0 ч 0 мин';
+            const diffMs = dropDate.getTime() - mskNow.getTime();
+            let timeLeftStr = '0 ч 0 мин';
+            if (diffMs > 0) {
+                const totalMin = Math.floor(diffMs / 60000);
+                const hours = Math.floor(totalMin / 60);
+                const minutes = totalMin % 60;
+                timeLeftStr = `${hours} ч ${minutes} мин`;
             }
 
             return {
                 currentPd: currentPd,
                 timeLeftStr: timeLeftStr,
                 isFrozen: false,
-                paydaysLeftToDrop: paydaysLeftToDrop
+                isPending: false,
+                hasDropped: hasDropped,
+                dropDate: dropDate,
+                paydaysLeftToDrop: paydaysLeftToDrop,
+                diffMs: diffMs
             };
         }
 
@@ -1788,7 +1823,7 @@ DASHBOARD_HTML = """
             if (tabName === 'manage') {
                 document.getElementById('btn-tab-manage').classList.add('active');
                 document.getElementById('tab-manage').classList.add('active');
-                if (isAdmin) {
+                if (canManage) {
                     document.getElementById('admin-manual-logs-card').style.display = 'block';
                     loadManualActionLogs();
                 } else {
@@ -1815,7 +1850,7 @@ DASHBOARD_HTML = """
             selectedUpcomingHours = hours;
             document.querySelectorAll('.time-filter-btn').forEach(btn => btn.classList.remove('active'));
             document.getElementById(`btn-upcoming-${hours}h`).classList.add('active');
-            loadData();
+            renderUpcomingTab();
         }
 
         async function handleCreateUser() {
@@ -1906,7 +1941,7 @@ DASHBOARD_HTML = """
         }
 
         async function loadManualActionLogs() {
-            if (!currentUser || currentUser.role !== 'admin') return;
+            if (!currentUser || (currentUser.role !== 'admin' && currentUser.role !== 'support')) return;
             const res = await fetch('/api/admin/manual_action_logs');
             if (!res.ok) return;
             const logs = await res.json();
@@ -1916,7 +1951,7 @@ DASHBOARD_HTML = """
                 return;
             }
 
-            let html = `<table><tr><th>Время (МСК)</th><th>Админ</th><th>Сервер</th><th>Действие / Детали</th></tr>`;
+            let html = `<table><tr><th>Время (МСК)</th><th>Пользователь</th><th>Сервер</th><th>Действие / Детали</th></tr>`;
             logs.forEach(l => {
                 html += `<tr>
                     <td><b>${l.created_at}</b></td>
@@ -2003,7 +2038,7 @@ DASHBOARD_HTML = """
                     body: JSON.stringify({ server, scanId, propType, pos, status })
                 });
                 await loadData();
-                if (currentUser && currentUser.role === 'admin') loadManualActionLogs();
+                if (currentUser && (currentUser.role === 'admin' || currentUser.role === 'support')) loadManualActionLogs();
             } catch(e) { console.error(e); }
         }
 
@@ -2017,7 +2052,7 @@ DASHBOARD_HTML = """
                     body: JSON.stringify({ server, scanId, propType, pos })
                 });
                 await loadData();
-                if (currentUser && currentUser.role === 'admin') loadManualActionLogs();
+                if (currentUser && (currentUser.role === 'admin' || currentUser.role === 'support')) loadManualActionLogs();
             } catch(e) { console.error(e); }
         }
 
@@ -2025,10 +2060,7 @@ DASHBOARD_HTML = """
             const scanId = activeServerScans[server];
             if (!scanId) return;
 
-            const scanObj = globalServerData[server]?.scans?.find(s => s.scanId === scanId);
-            const scanTimeStr = scanObj?.scanTime || scanId;
-
-            if (!confirm(`Вы уверены, что хотите удалить сканирование (${scanTimeStr})?`)) return;
+            if (!confirm(`Вы уверены, что хотите полностью удалить скан [${scanId}] для сервера ${server}?`)) return;
 
             try {
                 await fetch('/api/delete_scan', {
@@ -2038,26 +2070,23 @@ DASHBOARD_HTML = """
                 });
                 delete activeServerScans[server];
                 await loadData();
-                if (currentUser && currentUser.role === 'admin') loadManualActionLogs();
+                if (currentUser && (currentUser.role === 'admin' || currentUser.role === 'support')) loadManualActionLogs();
             } catch(e) { console.error(e); }
         }
 
-        async function addItemPrompt(server, propType) {
-            const scanId = activeServerScans[server];
-            if (!scanId) {
-                alert('Сначала выберите сканирование!');
-                return;
-            }
-            const propLabel = (propType === 'house' || propType === 'houses') ? 'дом' : 'бизнес';
-            const propIdStr = prompt(`Введите ID (${propLabel}):`);
+        async function addItemPrompt(server, scanId, propType) {
+            const propLabel = propType === 'house' ? 'дома' : 'бизнеса';
+            const propIdStr = prompt(`Введите номер (ID) ${propLabel}:`);
             if (propIdStr === null) return;
-            const propId = propIdStr ? parseInt(propIdStr) : null;
             
-            const pdStr = prompt(`Введите значение PayDay (${propLabel}):`);
-            if (!pdStr) return;
-            const pd = parseInt(pdStr);
-            if (isNaN(pd)) {
-                alert('Некорректное значение PayDay');
+            const pdStr = prompt(`Введите значение PayDay (PD):`);
+            if (pdStr === null) return;
+
+            const pdVal = parseInt(pdStr);
+            const propIdVal = propIdStr.trim() === "" ? null : parseInt(propIdStr);
+
+            if (isNaN(pdVal)) {
+                alert('Ошибка: PayDay должен быть числом');
                 return;
             }
 
@@ -2065,11 +2094,341 @@ DASHBOARD_HTML = """
                 await fetch('/api/add_item', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ server, scanId, propType, pd, propId })
+                    body: JSON.stringify({
+                        server: server,
+                        scanId: scanId,
+                        propType: propType,
+                        pd: pdVal,
+                        propId: propIdVal
+                    })
                 });
                 await loadData();
-                if (currentUser && currentUser.role === 'admin') loadManualActionLogs();
+                if (currentUser && (currentUser.role === 'admin' || currentUser.role === 'support')) loadManualActionLogs();
             } catch(e) { console.error(e); }
+        }
+
+        function renderViewTab() {
+            const container = document.getElementById('servers-view');
+            container.innerHTML = '';
+
+            const seasonFilter = document.getElementById('filter-season').value;
+            const favFilter = document.getElementById('filter-fav').value;
+
+            let visibleCount = 0;
+
+            ALL_SERVERS.forEach(srv => {
+                const srvData = globalServerData[srv];
+                if (!srvData) return;
+
+                const isFav = favoriteServers.includes(srv);
+                if (favFilter === 'fav_only' && !isFav) return;
+
+                const seasonInfo = srvData.season || { id: 1, display: '—' };
+                if (seasonFilter !== 'all' && String(seasonInfo.id) !== seasonFilter) return;
+
+                visibleCount++;
+
+                const scan = srvData.latestConfirmedScan;
+                const dropRules = srvData.dropRules;
+
+                let housesRows = '';
+                let bizRows = '';
+
+                if (scan) {
+                    const scanTimeStr = scan.scanTime;
+
+                    (scan.houses || []).forEach(h => {
+                        const dropInfo = calculateItemDropInfo(h, scanTimeStr, 'house', dropRules);
+                        if (dropInfo.hasDropped) return; // Не показываем слетевшие после 6:00 МСК
+
+                        const idStr = h.propId ? `№${h.propId}` : `pos ${h.pos}`;
+                        const statusHTML = getStatusHTML(h.status, h.isPendingPair);
+
+                        housesRows += `<tr>
+                            <td><b>${idStr}</b></td>
+                            <td><span class="pd-badge">${dropInfo.currentPd} pd</span></td>
+                            <td>${statusHTML}</td>
+                            <td><span class="${dropInfo.isFrozen ? 'time-left-frozen' : 'time-left-badge'}">${dropInfo.timeLeftStr}</span></td>
+                        </tr>`;
+                    });
+
+                    (scan.businesses || []).forEach(b => {
+                        const dropInfo = calculateItemDropInfo(b, scanTimeStr, 'biz', dropRules);
+                        if (dropInfo.hasDropped) return; // Не показываем слетевшие после 6:00 МСК
+
+                        const idStr = b.propId ? `№${b.propId}` : `pos ${b.pos}`;
+                        const statusHTML = getStatusHTML(b.status, b.isPendingPair);
+
+                        bizRows += `<tr>
+                            <td><b>${idStr}</b></td>
+                            <td><span class="pd-badge">${dropInfo.currentPd} pd</span></td>
+                            <td>${statusHTML}</td>
+                            <td><span class="${dropInfo.isFrozen ? 'time-left-frozen' : 'time-left-badge'}">${dropInfo.timeLeftStr}</span></td>
+                        </tr>`;
+                    });
+                }
+
+                const favStar = isFav ? '⭐' : '☆';
+                const card = document.createElement('div');
+                card.className = 'server-card';
+                card.innerHTML = `
+                    <div class="server-header">
+                        <div class="server-title">
+                            <span><span class="fav-btn" onclick="toggleFavorite('${srv}')">${favStar}</span> ${getServerDisplayName(srv)}</span>
+                            <span class="season-badge">${seasonInfo.display}</span>
+                        </div>
+                        ${scan ? `<span class="scan-info-tag">Подтвержденная пара: ${formatScanTime(scan.scanTime)}</span>` : '<span class="scan-info-tag" style="color: #ef5350;">Нет подтвержденной пары</span>'}
+                    </div>
+                    <div class="tables-grid">
+                        <div>
+                            <div class="section-header">
+                                <span class="section-title">🏠 Дома</span>
+                            </div>
+                            <table>
+                                <tr><th>Объект</th><th>PD</th><th>Статус</th><th>До слёта</th></tr>
+                                ${housesRows || '<tr><td colspan="4"><span class="empty">Нет активных домов</span></td></tr>'}
+                            </table>
+                        </div>
+                        <div>
+                            <div class="section-header">
+                                <span class="section-title">🏢 Бизнесы</span>
+                            </div>
+                            <table>
+                                <tr><th>Объект</th><th>PD</th><th>Статус</th><th>До слёта</th></tr>
+                                ${bizRows || '<tr><td colspan="4"><span class="empty">Нет активных бизнесов</span></td></tr>'}
+                            </table>
+                        </div>
+                    </div>
+                `;
+                container.appendChild(card);
+            });
+
+            if (visibleCount === 0) {
+                container.innerHTML = `<div class="empty-center">Нет серверов, соответствующих выбранным фильтрам</div>`;
+            }
+        }
+
+        function renderUpcomingTab() {
+            const container = document.getElementById('servers-upcoming');
+            container.innerHTML = '';
+
+            let count = 0;
+
+            ALL_SERVERS.forEach(srv => {
+                const srvData = globalServerData[srv];
+                if (!srvData) return;
+
+                const scan = srvData.latestConfirmedScan;
+                if (!scan) return;
+
+                const dropRules = srvData.dropRules;
+                const scanTimeStr = scan.scanTime;
+                const seasonInfo = srvData.season || { display: '—' };
+
+                let housesRows = '';
+                let bizRows = '';
+
+                (scan.houses || []).forEach(h => {
+                    const dropInfo = calculateItemDropInfo(h, scanTimeStr, 'house', dropRules);
+                    if (dropInfo.isFrozen || dropInfo.isPending || dropInfo.hasDropped) return;
+
+                    const hoursLeft = dropInfo.diffMs / (1000 * 3600);
+                    if (hoursLeft <= selectedUpcomingHours) {
+                        const idStr = h.propId ? `№${h.propId}` : `pos ${h.pos}`;
+                        const statusHTML = getStatusHTML(h.status, h.isPendingPair);
+                        housesRows += `<tr>
+                            <td><b>${idStr}</b></td>
+                            <td><span class="pd-badge-drop">${dropInfo.currentPd} pd</span></td>
+                            <td>${statusHTML}</td>
+                            <td><span class="time-left-badge">${dropInfo.timeLeftStr}</span></td>
+                        </tr>`;
+                    }
+                });
+
+                (scan.businesses || []).forEach(b => {
+                    const dropInfo = calculateItemDropInfo(b, scanTimeStr, 'biz', dropRules);
+                    if (dropInfo.isFrozen || dropInfo.isPending || dropInfo.hasDropped) return;
+
+                    const hoursLeft = dropInfo.diffMs / (1000 * 3600);
+                    if (hoursLeft <= selectedUpcomingHours) {
+                        const idStr = b.propId ? `№${b.propId}` : `pos ${b.pos}`;
+                        const statusHTML = getStatusHTML(b.status, b.isPendingPair);
+                        bizRows += `<tr>
+                            <td><b>${idStr}</b></td>
+                            <td><span class="pd-badge-drop">${dropInfo.currentPd} pd</span></td>
+                            <td>${statusHTML}</td>
+                            <td><span class="time-left-badge">${dropInfo.timeLeftStr}</span></td>
+                        </tr>`;
+                    }
+                });
+
+                if (housesRows || bizRows) {
+                    count++;
+                    const card = document.createElement('div');
+                    card.className = 'server-card';
+                    card.innerHTML = `
+                        <div class="server-header">
+                            <div class="server-title">
+                                <span>${getServerDisplayName(srv)}</span>
+                                <span class="season-badge">${seasonInfo.display}</span>
+                            </div>
+                            <span class="scan-info-tag">Скан: ${formatScanTime(scan.scanTime)}</span>
+                        </div>
+                        <div class="tables-grid">
+                            <div>
+                                <div class="section-header"><span class="section-title">🏠 Дома</span></div>
+                                <table>
+                                    <tr><th>Объект</th><th>PD</th><th>Статус</th><th>До слёта</th></tr>
+                                    ${housesRows || '<tr><td colspan="4"><span class="empty">—</span></td></tr>'}
+                                </table>
+                            </div>
+                            <div>
+                                <div class="section-header"><span class="section-title">🏢 Бизнесы</span></div>
+                                <table>
+                                    <tr><th>Объект</th><th>PD</th><th>Статус</th><th>До слёта</th></tr>
+                                    ${bizRows || '<tr><td colspan="4"><span class="empty">—</span></td></tr>'}
+                                </table>
+                            </div>
+                        </div>
+                    `;
+                    container.appendChild(card);
+                }
+            });
+
+            if (count === 0) {
+                container.innerHTML = `<div class="empty-center">Нет слетающих объектов в ближайшие ${selectedUpcomingHours} ч.</div>`;
+            }
+        }
+
+        function renderManageTab() {
+            const container = document.getElementById('servers-manage');
+            container.innerHTML = '';
+
+            ALL_SERVERS.forEach(srv => {
+                const srvData = globalServerData[srv];
+                if (!srvData) return;
+
+                const scans = srvData.scans || [];
+                if (scans.length === 0) {
+                    const card = document.createElement('div');
+                    card.className = 'server-card';
+                    card.innerHTML = `
+                        <div class="server-header">
+                            <div class="server-title">
+                                <span>${getServerDisplayName(srv)}</span>
+                                <span class="season-badge">${srvData.season?.display || '—'}</span>
+                            </div>
+                        </div>
+                        <span class="empty">Нет сохраненных сканов</span>
+                    `;
+                    container.appendChild(card);
+                    return;
+                }
+
+                let selectedScanId = activeServerScans[srv];
+                if (!selectedScanId || !scans.some(s => s.scanId === selectedScanId)) {
+                    selectedScanId = scans[scans.length - 1].scanId;
+                    activeServerScans[srv] = selectedScanId;
+                }
+
+                const currentScan = scans.find(s => s.scanId === selectedScanId);
+
+                let scanTabsHTML = '<div class="scan-tabs-container">';
+                scans.forEach(s => {
+                    const badge = getScanBadgeInfo(s);
+                    const isActive = s.scanId === selectedScanId ? 'active' : '';
+                    const tooltip = getScanTooltip(s);
+
+                    scanTabsHTML += `
+                        <button title="${tooltip}" class="${badge.cssClass} ${isActive}" onclick="selectScanTab('${srv}', '${s.scanId}')">
+                            ${badge.emoji} ${s.hourLabel}
+                        </button>
+                    `;
+                });
+                scanTabsHTML += '</div>';
+                scanTabsHTML += `<button class="btn-delete-scan" onclick="deleteWholeScan('${srv}')">🗑️ Удалить скан</button>`;
+
+                let housesRows = '';
+                let bizRows = '';
+
+                if (currentScan) {
+                    (currentScan.houses || []).forEach(h => {
+                        const idStr = h.propId ? `№${h.propId}` : `pos ${h.pos}`;
+                        const isPending = h.isPendingPair || h.status === 'pending';
+
+                        housesRows += `<tr>
+                            <td><b>${idStr}</b></td>
+                            <td><span class="pd-badge">${h.basePd !== undefined ? h.basePd : h.pd} pd</span></td>
+                            <td>
+                                <div class="btn-circle-group">
+                                    <button class="btn-circle ${!isPending && h.status === 'insured' ? 'active-insured' : ''}" title="Страховка" onclick="setStatus('${srv}', '${selectedScanId}', 'house', ${h.pos}, 'insured')">🛡️</button>
+                                    <button class="btn-circle ${!isPending && h.status === 'uninsured' ? 'active-uninsured' : ''}" title="Без страховки" onclick="setStatus('${srv}', '${selectedScanId}', 'house', ${h.pos}, 'uninsured')">❌</button>
+                                    <button class="btn-circle ${!isPending && h.status === 'frozen' ? 'active-frozen' : ''}" title="Заморозка" onclick="setStatus('${srv}', '${selectedScanId}', 'house', ${h.pos}, 'frozen')">❄️</button>
+                                    <button class="btn-circle ${isPending ? 'active-pending' : ''}" title="Новый (Ожидает)" onclick="setStatus('${srv}', '${selectedScanId}', 'house', ${h.pos}, 'pending')">🔍</button>
+                                    <button class="btn-circle btn-circle-del" title="Удалить" onclick="deleteItem('${srv}', '${selectedScanId}', 'house', ${h.pos})">🗑️</button>
+                                </div>
+                            </td>
+                        </tr>`;
+                    });
+
+                    (currentScan.businesses || []).forEach(b => {
+                        const idStr = b.propId ? `№${b.propId}` : `pos ${b.pos}`;
+                        const isPending = b.isPendingPair || b.status === 'pending';
+
+                        bizRows += `<tr>
+                            <td><b>${idStr}</b></td>
+                            <td><span class="pd-badge">${b.basePd !== undefined ? b.basePd : b.pd} pd</span></td>
+                            <td>
+                                <div class="btn-circle-group">
+                                    <button class="btn-circle ${!isPending && b.status === 'insured' ? 'active-insured' : ''}" title="Страховка" onclick="setStatus('${srv}', '${selectedScanId}', 'biz', ${b.pos}, 'insured')">🛡️</button>
+                                    <button class="btn-circle ${!isPending && b.status === 'uninsured' ? 'active-uninsured' : ''}" title="Без страховки" onclick="setStatus('${srv}', '${selectedScanId}', 'biz', ${b.pos}, 'uninsured')">❌</button>
+                                    <button class="btn-circle ${!isPending && b.status === 'no_activity' ? 'active-noact' : ''}" title="Без актива (-4 pd)" onclick="setStatus('${srv}', '${selectedScanId}', 'biz', ${b.pos}, 'no_activity')">🚫</button>
+                                    <button class="btn-circle ${!isPending && b.status === 'frozen' ? 'active-frozen' : ''}" title="Заморозка" onclick="setStatus('${srv}', '${selectedScanId}', 'biz', ${b.pos}, 'frozen')">❄️</button>
+                                    <button class="btn-circle ${isPending ? 'active-pending' : ''}" title="Новый (Ожидает)" onclick="setStatus('${srv}', '${selectedScanId}', 'biz', ${b.pos}, 'pending')">🔍</button>
+                                    <button class="btn-circle btn-circle-del" title="Удалить" onclick="deleteItem('${srv}', '${selectedScanId}', 'biz', ${b.pos})">🗑️</button>
+                                </div>
+                            </td>
+                        </tr>`;
+                    });
+                }
+
+                const card = document.createElement('div');
+                card.className = 'server-card';
+                card.innerHTML = `
+                    <div class="server-header">
+                        <div class="server-title">
+                            <span>${getServerDisplayName(srv)}</span>
+                            <span class="season-badge">${srvData.season?.display || '—'}</span>
+                        </div>
+                    </div>
+                    <div class="scan-tabs-bar">
+                        ${scanTabsHTML}
+                    </div>
+                    <div class="tables-grid">
+                        <div>
+                            <div class="section-header">
+                                <span class="section-title">🏠 Дома</span>
+                                <button class="btn-add" onclick="addItemPrompt('${srv}', '${selectedScanId}', 'house')">+ Дом</button>
+                            </div>
+                            <table>
+                                <tr><th>Объект</th><th>PD</th><th>Действия</th></tr>
+                                ${housesRows || '<tr><td colspan="3"><span class="empty">Пусто</span></td></tr>'}
+                            </table>
+                        </div>
+                        <div>
+                            <div class="section-header">
+                                <span class="section-title">🏢 Бизнесы</span>
+                                <button class="btn-add" onclick="addItemPrompt('${srv}', '${selectedScanId}', 'biz')">+ Бизнес</button>
+                            </div>
+                            <table>
+                                <tr><th>Объект</th><th>PD</th><th>Действия</th></tr>
+                                ${bizRows || '<tr><td colspan="3"><span class="empty">Пусто</span></td></tr>'}
+                            </table>
+                        </div>
+                    </div>
+                `;
+                container.appendChild(card);
+            });
         }
 
         async function loadData() {
@@ -2077,511 +2436,26 @@ DASHBOARD_HTML = """
                 const res = await fetch('/api/paydays');
                 if (!res.ok) return;
                 globalServerData = await res.json();
-                
-                const activeTab = document.querySelector('.tab-btn.active')?.id;
-                if (activeTab === 'btn-tab-manage') {
-                    renderManageTab();
-                } else if (activeTab === 'btn-tab-upcoming') {
-                    renderUpcomingTab();
-                } else {
+
+                if (document.getElementById('tab-view').classList.contains('active')) {
                     renderViewTab();
+                } else if (document.getElementById('tab-upcoming').classList.contains('active')) {
+                    renderUpcomingTab();
+                } else if (document.getElementById('tab-manage').classList.contains('active')) {
+                    renderManageTab();
                 }
-            } catch(e) {
-                console.error("Ошибка загрузки данных:", e);
-            }
-        }
-
-        function renderViewTab() {
-            const container = document.getElementById('servers-view');
-            if (!container) return;
-            container.innerHTML = '';
-
-            const seasonFilter = document.getElementById('filter-season')?.value || 'all';
-            const favFilter = document.getElementById('filter-fav')?.value || 'all';
-
-            let renderedCount = 0;
-
-            ALL_SERVERS.forEach(srv => {
-                const isFav = favoriteServers.includes(srv);
-                if (favFilter === 'fav_only' && !isFav) return;
-
-                const srvData = globalServerData[srv] || { scans: [], season: { id: 1, name: '', display: '' }, dropRules: {} };
-                const seasonId = srvData.season?.id;
-                if (seasonFilter !== 'all' && parseInt(seasonFilter) !== seasonId) return;
-
-                renderedCount++;
-
-                const card = document.createElement('div');
-                card.className = 'server-card';
-
-                const favStar = isFav ? '⭐' : '☆';
-                const seasonDisplay = srvData.season?.display || '';
-                const latestConfirmed = srvData.latestConfirmedScan;
-
-                let scanTimeStr = 'нет данных';
-                if (latestConfirmed && latestConfirmed.scanTime) {
-                    scanTimeStr = formatScanTime(latestConfirmed.scanTime);
-                }
-
-                let housesHTML = '';
-                let bizHTML = '';
-
-                if (latestConfirmed) {
-                    const scanTime = latestConfirmed.scanTime;
-                    const dropRules = srvData.dropRules;
-
-                    // Дома: исключаем уже слетевшие (paydaysLeftToDrop <= 0)
-                    const houses = latestConfirmed.houses || [];
-                    const activeHouses = [];
-                    houses.forEach((h, idx) => {
-                        const info = calculateDynamicItemInfo(h, scanTime, 'house', dropRules);
-                        if (info.paydaysLeftToDrop > 0) {
-                            activeHouses.push({ item: h, info, originalIdx: idx });
-                        }
-                    });
-
-                    if (activeHouses.length > 0) {
-                        housesHTML = `
-                            <table>
-                                <thead>
-                                    <tr>
-                                        <th>#</th>
-                                        <th>ID</th>
-                                        <th>PD</th>
-                                        <th>Статус</th>
-                                        <th>Слёт через</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                        `;
-                        activeHouses.forEach(({ item, info }, i) => {
-                            const pdClass = info.currentPd <= 1 ? 'pd-badge-drop' : 'pd-badge';
-                            housesHTML += `
-                                <tr>
-                                    <td><b>${i + 1}</b></td>
-                                    <td>${item.propId ? '№' + item.propId : '-'}</td>
-                                    <td><span class="${pdClass}">${info.currentPd}</span></td>
-                                    <td>${getStatusHTML(item.status, item.isPendingPair)}</td>
-                                    <td><span class="time-left-badge">${info.timeLeftStr}</span></td>
-                                </tr>
-                            `;
-                        });
-                        housesHTML += `</tbody></table>`;
-                    } else {
-                        housesHTML = '<span class="empty">Нет активных домов</span>';
-                    }
-
-                    // Бизнесы: исключаем уже слетевшие (paydaysLeftToDrop <= 0)
-                    const biz = latestConfirmed.businesses || [];
-                    const activeBiz = [];
-                    biz.forEach((b, idx) => {
-                        const info = calculateDynamicItemInfo(b, scanTime, 'biz', dropRules);
-                        if (info.paydaysLeftToDrop > 0) {
-                            activeBiz.push({ item: b, info, originalIdx: idx });
-                        }
-                    });
-
-                    if (activeBiz.length > 0) {
-                        bizHTML = `
-                            <table>
-                                <thead>
-                                    <tr>
-                                        <th>#</th>
-                                        <th>ID</th>
-                                        <th>PD</th>
-                                        <th>Статус</th>
-                                        <th>Слёт через</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                        `;
-                        activeBiz.forEach(({ item, info }, i) => {
-                            const pdClass = info.currentPd <= 1 ? 'pd-badge-drop' : 'pd-badge';
-                            bizHTML += `
-                                <tr>
-                                    <td><b>${i + 1}</b></td>
-                                    <td>${item.propId ? '№' + item.propId : '-'}</td>
-                                    <td><span class="${pdClass}">${info.currentPd}</span></td>
-                                    <td>${getStatusHTML(item.status, item.isPendingPair)}</td>
-                                    <td><span class="time-left-badge">${info.timeLeftStr}</span></td>
-                                </tr>
-                            `;
-                        });
-                        bizHTML += `</tbody></table>`;
-                    } else {
-                        bizHTML = '<span class="empty">Нет активных бизнесов</span>';
-                    }
-                } else {
-                    housesHTML = '<span class="empty">Нет подтвержденных данных</span>';
-                    bizHTML = '<span class="empty">Нет подтвержденных данных</span>';
-                }
-
-                card.innerHTML = `
-                    <div class="server-header">
-                        <div class="server-title">
-                            <span>
-                                <span class="fav-btn" onclick="toggleFavorite('${srv}')">${favStar}</span>
-                                ${getServerDisplayName(srv)}
-                            </span>
-                            <span class="season-badge">${seasonDisplay}</span>
-                        </div>
-                        <span class="scan-info-tag">Информация от: ${scanTimeStr}</span>
-                    </div>
-                    <div class="tables-grid">
-                        <div>
-                            <div class="section-header">
-                                <span class="section-title">🏠 Дома</span>
-                            </div>
-                            ${housesHTML}
-                        </div>
-                        <div>
-                            <div class="section-header">
-                                <span class="section-title">🏢 Бизнесы</span>
-                            </div>
-                            ${bizHTML}
-                        </div>
-                    </div>
-                `;
-                container.appendChild(card);
-            });
-
-            if (renderedCount === 0) {
-                container.innerHTML = '<div class="empty-center">Нет серверов, соответствующих выбранным фильтрам</div>';
-            }
-        }
-
-        function renderUpcomingTab() {
-            const container = document.getElementById('servers-upcoming');
-            if (!container) return;
-            container.innerHTML = '';
-
-            let totalUpcomingCount = 0;
-
-            ALL_SERVERS.forEach(srv => {
-                const srvData = globalServerData[srv] || { scans: [], season: { id: 1, name: '', display: '' }, dropRules: {} };
-                const latestConfirmed = srvData.latestConfirmedScan;
-                if (!latestConfirmed) return;
-
-                const scanTime = latestConfirmed.scanTime;
-                const dropRules = srvData.dropRules;
-
-                const upcomingHouses = [];
-                (latestConfirmed.houses || []).forEach(h => {
-                    const info = calculateDynamicItemInfo(h, scanTime, 'house', dropRules);
-                    if (info.paydaysLeftToDrop > 0 && info.paydaysLeftToDrop <= selectedUpcomingHours) {
-                        upcomingHouses.push({ item: h, info });
-                    }
-                });
-
-                const upcomingBiz = [];
-                (latestConfirmed.businesses || []).forEach(b => {
-                    const info = calculateDynamicItemInfo(b, scanTime, 'biz', dropRules);
-                    if (info.paydaysLeftToDrop > 0 && info.paydaysLeftToDrop <= selectedUpcomingHours) {
-                        upcomingBiz.push({ item: b, info });
-                    }
-                });
-
-                if (upcomingHouses.length === 0 && upcomingBiz.length === 0) return;
-
-                totalUpcomingCount++;
-
-                const card = document.createElement('div');
-                card.className = 'server-card';
-
-                let housesHTML = '';
-                if (upcomingHouses.length > 0) {
-                    housesHTML = `
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>#</th>
-                                    <th>ID</th>
-                                    <th>PD</th>
-                                    <th>Статус</th>
-                                    <th>Слёт через</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                    `;
-                    upcomingHouses.forEach(({ item, info }, i) => {
-                        housesHTML += `
-                            <tr>
-                                <td><b>${i + 1}</b></td>
-                                <td>${item.propId ? '№' + item.propId : '-'}</td>
-                                <td><span class="pd-badge-drop">${info.currentPd}</span></td>
-                                <td>${getStatusHTML(item.status, item.isPendingPair)}</td>
-                                <td><span class="time-left-badge">${info.timeLeftStr}</span></td>
-                            </tr>
-                        `;
-                    });
-                    housesHTML += `</tbody></table>`;
-                } else {
-                    housesHTML = '<span class="empty">Нет ближайших слётов</span>';
-                }
-
-                let bizHTML = '';
-                if (upcomingBiz.length > 0) {
-                    bizHTML = `
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>#</th>
-                                    <th>ID</th>
-                                    <th>PD</th>
-                                    <th>Статус</th>
-                                    <th>Слёт через</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                    `;
-                    upcomingBiz.forEach(({ item, info }, i) => {
-                        bizHTML += `
-                            <tr>
-                                <td><b>${i + 1}</b></td>
-                                <td>${item.propId ? '№' + item.propId : '-'}</td>
-                                <td><span class="pd-badge-drop">${info.currentPd}</span></td>
-                                <td>${getStatusHTML(item.status, item.isPendingPair)}</td>
-                                <td><span class="time-left-badge">${info.timeLeftStr}</span></td>
-                            </tr>
-                        `;
-                    });
-                    bizHTML += `</tbody></table>`;
-                } else {
-                    bizHTML = '<span class="empty">Нет ближайших слётов</span>';
-                }
-
-                card.innerHTML = `
-                    <div class="server-header">
-                        <div class="server-title">
-                            <span>${getServerDisplayName(srv)}</span>
-                            <span class="season-badge">${srvData.season?.display || ''}</span>
-                        </div>
-                        <span class="scan-info-tag">Информация от: ${formatScanTime(scanTime)}</span>
-                    </div>
-                    <div class="tables-grid">
-                        <div>
-                            <div class="section-header">
-                                <span class="section-title">🏠 Дома</span>
-                            </div>
-                            ${housesHTML}
-                        </div>
-                        <div>
-                            <div class="section-header">
-                                <span class="section-title">🏢 Бизнесы</span>
-                            </div>
-                            ${bizHTML}
-                        </div>
-                    </div>
-                `;
-                container.appendChild(card);
-            });
-
-            if (totalUpcomingCount === 0) {
-                container.innerHTML = `<div class="empty-center">Нет слётов в ближайшие ${selectedUpcomingHours} ч.</div>`;
-            }
-        }
-
-        function renderManageTab() {
-            const container = document.getElementById('servers-manage');
-            if (!container) return;
-            container.innerHTML = '';
-
-            const canEdit = currentUser && (currentUser.role === 'admin' || currentUser.role === 'support');
-
-            ALL_SERVERS.forEach(srv => {
-                const srvData = globalServerData[srv] || { scans: [], season: { id: 1, name: '', display: '' } };
-                const scans = srvData.scans || [];
-
-                let activeScanId = activeServerScans[srv];
-                if (!activeScanId || !scans.some(s => s.scanId === activeScanId)) {
-                    if (scans.length > 0) {
-                        const latestConfirmed = srvData.latestConfirmedScan;
-                        activeScanId = latestConfirmed ? latestConfirmed.scanId : scans[scans.length - 1].scanId;
-                        activeServerScans[srv] = activeScanId;
-                    }
-                }
-
-                const currentScan = scans.find(s => s.scanId === activeScanId);
-
-                const card = document.createElement('div');
-                card.className = 'server-card';
-
-                // Плашки сканирований с подсказкой при наведении
-                let scanSubtabsHTML = '';
-                if (scans.length > 0) {
-                    scanSubtabsHTML = `<div class="scan-tabs-bar"><div class="scan-tabs-container">`;
-                    scans.forEach(s => {
-                        const badgeInfo = getScanBadgeInfo(s);
-                        const isActive = s.scanId === activeScanId;
-                        const activeClass = isActive ? ' active' : '';
-                        const tooltip = getScanTooltip(s);
-                        const shortTime = s.scanTime ? s.scanTime.split(' ')[1]?.substring(0, 5) : s.scanId;
-
-                        scanSubtabsHTML += `
-                            <button class="${badgeInfo.cssClass}${activeClass}" 
-                                    title="${tooltip}" 
-                                    onclick="selectScanTab('${srv}', '${s.scanId}')">
-                                ${badgeInfo.emoji} ${shortTime}
-                            </button>
-                        `;
-                    });
-                    scanSubtabsHTML += `</div>`;
-                    if (canEdit && activeScanId) {
-                        scanSubtabsHTML += `<button class="btn-delete-scan" onclick="deleteWholeScan('${srv}')">🗑️ Удалить скан</button>`;
-                    }
-                    scanSubtabsHTML += `</div>`;
-                } else {
-                    scanSubtabsHTML = `<div class="scan-tabs-bar"><span class="empty">Нет сканирований</span></div>`;
-                }
-
-                // В управлении отображаются оригинальные статические значения PD скана, без вычитания по времени
-                let housesHTML = '';
-                let bizHTML = '';
-
-                if (currentScan) {
-                    const houses = currentScan.houses || [];
-                    if (houses.length > 0) {
-                        housesHTML = `
-                            <table>
-                                <thead>
-                                    <tr>
-                                        <th>#</th>
-                                        <th>ID</th>
-                                        <th>PD</th>
-                                        <th>Статус</th>
-                                        ${canEdit ? '<th>Действия</th>' : ''}
-                                    </tr>
-                                </thead>
-                                <tbody>
-                        `;
-                        houses.forEach((item, idx) => {
-                            const statusVal = item.status || 'insured';
-                            const isPending = !!item.isPendingPair;
-
-                            let actionsHTML = '';
-                            if (canEdit) {
-                                actionsHTML = `
-                                    <td>
-                                        <div class="btn-circle-group">
-                                            <button class="btn-circle ${statusVal === 'insured' ? 'active-insured' : ''}" title="Страховка" onclick="setStatus('${srv}', '${currentScan.scanId}', 'house', ${item.pos}, 'insured')">🛡️</button>
-                                            <button class="btn-circle ${statusVal === 'uninsured' ? 'active-uninsured' : ''}" title="Без страховки" onclick="setStatus('${srv}', '${currentScan.scanId}', 'house', ${item.pos}, 'uninsured')">❌</button>
-                                            <button class="btn-circle ${statusVal === 'frozen' ? 'active-frozen' : ''}" title="Заморожен" onclick="setStatus('${srv}', '${currentScan.scanId}', 'house', ${item.pos}, 'frozen')">❄️</button>
-                                            <button class="btn-circle btn-circle-del" title="Удалить" onclick="deleteItem('${srv}', '${currentScan.scanId}', 'house', ${item.pos})">🗑️</button>
-                                        </div>
-                                    </td>
-                                `;
-                            }
-
-                            housesHTML += `
-                                <tr>
-                                    <td><b>${idx + 1}</b></td>
-                                    <td>${item.propId ? '№' + item.propId : '-'}</td>
-                                    <td><span class="pd-badge">${item.pd}</span></td>
-                                    <td>${getStatusHTML(statusVal, isPending)}</td>
-                                    ${actionsHTML}
-                                </tr>
-                            `;
-                        });
-                        housesHTML += `</tbody></table>`;
-                    } else {
-                        housesHTML = '<span class="empty">Нет домов в скане</span>';
-                    }
-
-                    const biz = currentScan.businesses || [];
-                    if (biz.length > 0) {
-                        bizHTML = `
-                            <table>
-                                <thead>
-                                    <tr>
-                                        <th>#</th>
-                                        <th>ID</th>
-                                        <th>PD</th>
-                                        <th>Статус</th>
-                                        ${canEdit ? '<th>Действия</th>' : ''}
-                                    </tr>
-                                </thead>
-                                <tbody>
-                        `;
-                        biz.forEach((item, idx) => {
-                            const statusVal = item.status || 'insured';
-                            const isPending = !!item.isPendingPair;
-
-                            let actionsHTML = '';
-                            if (canEdit) {
-                                actionsHTML = `
-                                    <td>
-                                        <div class="btn-circle-group">
-                                            <button class="btn-circle ${statusVal === 'insured' ? 'active-insured' : ''}" title="Страховка" onclick="setStatus('${srv}', '${currentScan.scanId}', 'biz', ${item.pos}, 'insured')">🛡️</button>
-                                            <button class="btn-circle ${statusVal === 'uninsured' ? 'active-uninsured' : ''}" title="Без страховки" onclick="setStatus('${srv}', '${currentScan.scanId}', 'biz', ${item.pos}, 'uninsured')">❌</button>
-                                            <button class="btn-circle ${statusVal === 'no_activity' ? 'active-noact' : ''}" title="Без активности" onclick="setStatus('${srv}', '${currentScan.scanId}', 'biz', ${item.pos}, 'no_activity')">🚫</button>
-                                            <button class="btn-circle ${statusVal === 'frozen' ? 'active-frozen' : ''}" title="Заморожен" onclick="setStatus('${srv}', '${currentScan.scanId}', 'biz', ${item.pos}, 'frozen')">❄️</button>
-                                            <button class="btn-circle btn-circle-del" title="Удалить" onclick="deleteItem('${srv}', '${currentScan.scanId}', 'biz', ${item.pos})">🗑️</button>
-                                        </div>
-                                    </td>
-                                `;
-                            }
-
-                            bizHTML += `
-                                <tr>
-                                    <td><b>${idx + 1}</b></td>
-                                    <td>${item.propId ? '№' + item.propId : '-'}</td>
-                                    <td><span class="pd-badge">${item.pd}</span></td>
-                                    <td>${getStatusHTML(statusVal, isPending)}</td>
-                                    ${actionsHTML}
-                                </tr>
-                            `;
-                        });
-                        bizHTML += `</tbody></table>`;
-                    } else {
-                        bizHTML = '<span class="empty">Нет бизнесов в скане</span>';
-                    }
-                } else {
-                    housesHTML = '<span class="empty">Выберите скан для просмотра</span>';
-                    bizHTML = '<span class="empty">Выберите скан для просмотра</span>';
-                }
-
-                const addHouseBtn = (canEdit && currentScan) ? `<button class="btn-add" onclick="addItemPrompt('${srv}', 'house')">+ Добавить</button>` : '';
-                const addBizBtn = (canEdit && currentScan) ? `<button class="btn-add" onclick="addItemPrompt('${srv}', 'biz')">+ Добавить</button>` : '';
-
-                card.innerHTML = `
-                    <div class="server-header">
-                        <div class="server-title">
-                            <span>${getServerDisplayName(srv)}</span>
-                            <span class="season-badge">${srvData.season?.display || ''}</span>
-                        </div>
-                    </div>
-                    ${scanSubtabsHTML}
-                    <div class="tables-grid">
-                        <div>
-                            <div class="section-header">
-                                <span class="section-title">🏠 Дома</span>
-                                ${addHouseBtn}
-                            </div>
-                            ${housesHTML}
-                        </div>
-                        <div>
-                            <div class="section-header">
-                                <span class="section-title">🏢 Бизнесы</span>
-                                ${addBizBtn}
-                            </div>
-                            ${bizHTML}
-                        </div>
-                    </div>
-                `;
-                container.appendChild(card);
-            });
+            } catch(e) { console.error(e); }
         }
 
         function initDashboard() {
+            updateLotteryTimer();
+            setInterval(updateLotteryTimer, 1000);
+
             loadData();
             setInterval(loadData, 30000);
-            setInterval(updateLotteryTimer, 1000);
-            updateLotteryTimer();
         }
 
-        window.onload = function() {
-            checkAuth();
-        };
+        checkAuth();
     </script>
 </body>
 </html>
