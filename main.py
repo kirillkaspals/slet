@@ -1554,7 +1554,7 @@ DASHBOARD_HTML = """
                         <option value="all">Все сезоны</option>
                         <option value="1">📱 По инфе (1)</option>
                         <option value="2">⌨ Скорострелы (2)</option>
-                        <option value="3">🏎️️ Автогонки (3)</option>
+                        <option value="3">🏎 Автогонки (3)</option>
                         <option value="4">✈️ По новому (4)</option>
                         <option value="5">🏍 Мотогонки (5)</option>
                     </select>
@@ -1696,28 +1696,6 @@ DASHBOARD_HTML = """
             return 1;
         }
 
-        function calculateCurrentPd(scannedPd, status, scanTimeStr) {
-            if (!scanTimeStr || status === 'frozen' || status === 'new' || status === 'новый') return scannedPd;
-            const rate = getStatusRate(status);
-            if (rate === 0) return scannedPd;
-
-            const now = new Date();
-            const utcMs = now.getTime() + (now.getTimezoneOffset() * 60000);
-            const mskNow = new Date(utcMs + (3 * 3600000));
-
-            const parts = scanTimeStr.split(' ');
-            const dateParts = parts[0].split('-');
-            const timeParts = parts[1].split(':');
-            const scanDt = new Date(Date.UTC(dateParts[0], dateParts[1] - 1, dateParts[2], timeParts[0], timeParts[1], timeParts[2]));
-            const scanMsk = new Date(scanDt.getTime() - (3 * 3600000));
-
-            const scanHourStart = new Date(scanMsk.getFullYear(), scanMsk.getMonth(), scanMsk.getDate(), scanMsk.getHours());
-            const nowHourStart = new Date(mskNow.getFullYear(), mskNow.getMonth(), mskNow.getDate(), mskNow.getHours());
-
-            const hoursPassed = Math.max(0, Math.floor((nowHourStart - scanHourStart) / 3600000));
-            return Math.max(0, scannedPd - (hoursPassed * rate));
-        }
-
         function getDropLimit(server, type, status) {
             const info = globalServerData[server];
             const defaultRules = { insured: 2, uninsured_min: 2, uninsured_max: 3 };
@@ -1728,37 +1706,118 @@ DASHBOARD_HTML = """
             return rules.insured || 2;
         }
 
+        function getPropertyInfo(item, srv, propType, scanTimeStr) {
+            const status = item.status;
+            const scannedPd = item.pd;
+            const dropLimit = getDropLimit(srv, propType, status);
+            const rate = getStatusRate(status);
+
+            const now = new Date();
+            const nowMskMs = now.getTime() + (now.getTimezoneOffset() * 60000) + (3 * 3600000);
+            const nowMsk = new Date(nowMskMs);
+
+            let scanHourStartMs = nowMskMs;
+            if (scanTimeStr) {
+                const parts = scanTimeStr.split(' ');
+                const dParts = parts[0].split('-');
+                const tParts = parts[1].split(':');
+                scanHourStartMs = Date.UTC(parseInt(dParts[0]), parseInt(dParts[1]) - 1, parseInt(dParts[2]), parseInt(tParts[0]), 0, 0);
+            }
+
+            const nowHourStartMs = Date.UTC(nowMsk.getUTCFullYear(), nowMsk.getUTCMonth(), nowMsk.getUTCDate(), nowMsk.getUTCHours(), 0, 0);
+            const hoursPassed = Math.max(0, Math.floor((nowHourStartMs - scanHourStartMs) / 3600000));
+
+            let curPd = scannedPd;
+            if (status !== 'frozen' && status !== 'new' && status !== 'новый' && rate > 0) {
+                curPd = Math.max(0, scannedPd - (hoursPassed * rate));
+            }
+
+            let displayPd = curPd;
+            if (curPd < dropLimit) {
+                displayPd = 0;
+            }
+
+            if (status === 'frozen') {
+                return {
+                    curPd,
+                    displayPd,
+                    dropLimit,
+                    hoursUntilDrop: null,
+                    timeText: 'Заморожен',
+                    hasDropped: false
+                };
+            }
+
+            if (rate === 0) {
+                const isUnder = scannedPd < dropLimit;
+                return {
+                    curPd,
+                    displayPd,
+                    dropLimit,
+                    hoursUntilDrop: isUnder ? 0 : null,
+                    timeText: isUnder ? 'Слёт прямо сейчас' : '—',
+                    hasDropped: false
+                };
+            }
+
+            let nRaw = 0;
+            if (scannedPd >= dropLimit) {
+                nRaw = Math.floor((scannedPd - dropLimit) / rate) + 1;
+            }
+
+            let rawDropMs = scanHourStartMs + nRaw * 3600000;
+            let rawDropHour = new Date(rawDropMs).getUTCHours();
+
+            let actualDropMs = rawDropMs;
+            if (rawDropHour === 5) {
+                actualDropMs += 3600000; // перенос с 5:00 рестарта на 6:00
+            }
+
+            const hasDropped = nowHourStartMs > actualDropMs;
+
+            let hoursUntilDrop = Math.floor((actualDropMs - nowHourStartMs) / 3600000);
+            if (hoursUntilDrop < 0) hoursUntilDrop = 0;
+
+            let timeText = '';
+            if (hoursUntilDrop <= 0) {
+                timeText = 'Слёт прямо сейчас';
+            } else {
+                const diffMs = actualDropMs - nowMskMs;
+                if (diffMs <= 0) {
+                    timeText = 'Слёт прямо сейчас';
+                } else {
+                    const totalMin = Math.floor(diffMs / 60000);
+                    const h = Math.floor(totalMin / 60);
+                    const m = totalMin % 60;
+                    if (h > 0 && m > 0) timeText = `${h} ч. ${m} мин.`;
+                    else if (h > 0) timeText = `${h} ч.`;
+                    else timeText = `${m} мин.`;
+                }
+            }
+
+            return {
+                curPd,
+                displayPd,
+                dropLimit,
+                hoursUntilDrop,
+                timeText,
+                hasDropped
+            };
+        }
+
+        function calculateCurrentPd(scannedPd, status, scanTimeStr) {
+            const info = getPropertyInfo({ pd: scannedPd, status: status }, 'Phoenix', 'house', scanTimeStr);
+            return info.displayPd;
+        }
+
         function getHoursUntilDrop(pd, status, dropLimit) {
-            if (status === 'frozen') return null;
-            const diff = pd - dropLimit;
-            if (diff < 0) return 0;
-            let dec = getStatusRate(status);
-            if (dec === 0) dec = 1;
-            return Math.floor(diff / dec) + 1;
+            const info = getPropertyInfo({ pd: pd, status: status }, 'Phoenix', 'house', null);
+            return info.hoursUntilDrop;
         }
 
         function getTimeUntilDropText(pd, status, dropLimit) {
-            const hours = getHoursUntilDrop(pd, status, dropLimit);
-            if (hours === null) return 'Заморожен';
-            if (hours <= 0) return 'Слёт прямо сейчас';
-
-            const now = new Date();
-            const utcMs = now.getTime() + (now.getTimezoneOffset() * 60000);
-            const mskNow = new Date(utcMs + (3 * 3600000));
-
-            const targetTime = new Date(mskNow.getTime() + hours * 3600000);
-            targetTime.setMinutes(0, 0, 0);
-
-            const diffMs = targetTime.getTime() - mskNow.getTime();
-            if (diffMs <= 0) return 'Слёт прямо сейчас';
-
-            const totalMin = Math.floor(diffMs / 60000);
-            const h = Math.floor(totalMin / 60);
-            const m = totalMin % 60;
-
-            if (h > 0 && m > 0) return `${h} ч. ${m} мин.`;
-            if (h > 0) return `${h} ч.`;
-            return `${m} мин.`;
+            const info = getPropertyInfo({ pd: pd, status: status }, 'Phoenix', 'house', null);
+            return info.timeText;
         }
 
         function toggleFavorite(srv) {
@@ -1972,18 +2031,14 @@ DASHBOARD_HTML = """
                 const scanTime = scan.scanTime;
                 
                 const filteredHouses = (scan.houses || []).map(h => {
-                    const curPd = calculateCurrentPd(h.pd, h.status, scanTime);
-                    const dropLimit = getDropLimit(srv, 'house', h.status);
-                    const hLeft = getHoursUntilDrop(curPd, h.status, dropLimit);
-                    return { ...h, curPd, hLeft, dropLimit };
-                }).filter(h => h.hLeft === selectedUpcomingHours);
+                    const pInfo = getPropertyInfo(h, srv, 'house', scanTime);
+                    return { ...h, pInfo };
+                }).filter(h => !h.pInfo.hasDropped && h.pInfo.hoursUntilDrop === selectedUpcomingHours);
 
                 const filteredBiz = (scan.businesses || []).map(b => {
-                    const curPd = calculateCurrentPd(b.pd, b.status, scanTime);
-                    const dropLimit = getDropLimit(srv, 'biz', b.status);
-                    const hLeft = getHoursUntilDrop(curPd, b.status, dropLimit);
-                    return { ...b, curPd, hLeft, dropLimit };
-                }).filter(b => b.hLeft === selectedUpcomingHours);
+                    const pInfo = getPropertyInfo(b, srv, 'biz', scanTime);
+                    return { ...b, pInfo };
+                }).filter(b => !b.pInfo.hasDropped && b.pInfo.hoursUntilDrop === selectedUpcomingHours);
 
                 if (filteredHouses.length > 0 || filteredBiz.length > 0) {
                     count++;
@@ -2019,11 +2074,11 @@ DASHBOARD_HTML = """
                 html += `<tr><td colspan="3"><span class="empty">Нет объектов</span></td></tr>`;
             } else {
                 items.forEach(item => {
-                    const timeText = getTimeUntilDropText(item.curPd, item.status, item.dropLimit);
+                    const pInfo = item.pInfo;
                     html += `<tr>
                         <td><b>${item.pos}</b></td>
                         <td>${item.propId ? '#' + item.propId : '—'}</td>
-                        <td><span class="pd-badge">${item.curPd}</span> <span class="time-left-badge">${timeText}</span></td>
+                        <td><span class="pd-badge">${pInfo.displayPd}</span> <span class="time-left-badge">${pInfo.timeText}</span></td>
                     </tr>`;
                 });
             }
@@ -2091,7 +2146,17 @@ DASHBOARD_HTML = """
         function renderPropertyTable(srv, scan, propType, isViewTab) {
             const isHouse = propType === 'house';
             const title = isHouse ? 'Дома' : 'Бизнесы';
-            const items = scan ? (isHouse ? scan.houses : scan.businesses) : [];
+            const rawItems = scan ? (isHouse ? scan.houses : scan.businesses) : [];
+
+            let itemsToRender = [];
+            if (rawItems && rawItems.length > 0) {
+                rawItems.forEach(item => {
+                    const info = getPropertyInfo(item, srv, propType, scan ? scan.scanTime : null);
+                    if (!isViewTab || !info.hasDropped) {
+                        itemsToRender.push({ item, info });
+                    }
+                });
+            }
 
             let html = `<div>
                 <div class="section-header">
@@ -2110,26 +2175,22 @@ DASHBOARD_HTML = """
                     </thead>
                     <tbody>`;
 
-            if (!items || items.length === 0) {
+            if (!itemsToRender || itemsToRender.length === 0) {
                 html += `<tr><td colspan="5"><span class="empty">Нет данных</span></td></tr>`;
             } else {
-                items.forEach(item => {
-                    const displayPd = isViewTab ? calculateCurrentPd(item.pd, item.status, scan.scanTime) : item.pd;
-                    const dropLimit = getDropLimit(srv, propType, item.status);
-                    
+                itemsToRender.forEach(({ item, info }) => {
                     if (isViewTab) {
-                        const timeText = getTimeUntilDropText(displayPd, item.status, dropLimit);
                         html += `<tr>
                             <td><b>${item.pos}</b></td>
                             <td>${item.propId ? '#' + item.propId : '—'}</td>
-                            <td><span class="pd-badge">${displayPd}</span></td>
-                            <td><span class="time-left-badge">${timeText}</span></td>
+                            <td><span class="pd-badge">${info.displayPd}</span></td>
+                            <td><span class="time-left-badge">${info.timeText}</span></td>
                         </tr>`;
                     } else {
                         html += `<tr>
                             <td><b>${item.pos}</b></td>
                             <td>${item.propId ? '#' + item.propId : '—'}</td>
-                            <td><span class="pd-badge">${displayPd}</span></td>
+                            <td><span class="pd-badge">${item.pd}</span></td>
                             <td>${renderStatusControls(srv, scan.scanId, propType, item)}</td>
                             <td><button class="btn-del" onclick="deleteItem('${srv}', '${scan.scanId}', '${propType}', ${item.pos})">×</button></td>
                         </tr>`;
@@ -2148,9 +2209,9 @@ DASHBOARD_HTML = """
             }
 
             const btnInsured = `<button class="btn-opt ${st === 'insured' ? 'active-insured' : ''}" title="Страхованный" onclick="updateStatus('${srv}', '${scanId}', '${propType}', ${item.pos}, 'insured')">С</button>`;
-            const btnUninsured = `<button class="btn-opt ${st === 'uninsured' ? 'active-uninsured' : ''}" title="Нестрахованный" onclick="updateStatus('${srv}', '${scanId}', '${propType}', ${item.pos}, 'uninsured')">Н</button>`;
-            const btnNoAct = (propType === 'biz') ? `<button class="btn-opt ${st === 'no_activity' ? 'active-noact' : ''}" title="Без занятости" onclick="updateStatus('${srv}', '${scanId}', '${propType}', ${item.pos}, 'no_activity')">Б</button>` : '';
-            const btnFrozen = `<button class="btn-opt ${st === 'frozen' ? 'active-frozen' : ''}" title="Заморожен" onclick="updateStatus('${srv}', '${scanId}', '${propType}', ${item.pos}, 'frozen')">З</button>`;
+            const btnUninsured = `<button class="btn-opt ${st === 'uninsured' ? 'active-uninsured' : ''}" title="Нестрахованный" onclick="updateStatus('${srv}', '${scanId}', '${propType}', ${item.pos}, 'uninsured')">НС</button>`;
+            const btnNoAct = `<button class="btn-opt ${st === 'no_activity' ? 'active-noact' : ''}" title="Без налога" onclick="updateStatus('${srv}', '${scanId}', '${propType}', ${item.pos}, 'no_activity')">БН</button>`;
+            const btnFrozen = `<button class="btn-opt ${st === 'frozen' ? 'active-frozen' : ''}" title="Заморожен" onclick="updateStatus('${srv}', '${scanId}', '${propType}', ${item.pos}, 'frozen')">Зам</button>`;
 
             return `<div class="btn-group">${btnInsured}${btnUninsured}${btnNoAct}${btnFrozen}</div>`;
         }
@@ -2160,149 +2221,310 @@ DASHBOARD_HTML = """
             renderManageTab();
         }
 
-        async function updateStatus(server, scanId, propType, pos, status) {
-            await fetch('/api/update_status', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ server, scanId, propType, pos, status })
-            });
-            await fetchPaydays();
+        async function updateStatus(srv, scanId, propType, pos, status) {
+            try {
+                const res = await fetch('/api/update_status', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ server: srv, scanId, propType, pos, status })
+                });
+
+                if (res.ok) {
+                    await fetchPaydays();
+                } else {
+                    const err = await res.json();
+                    alert(err.detail || 'Ошибка обновления статуса');
+                }
+            } catch (e) {
+                alert('Ошибка отправки запроса');
+            }
         }
 
-        async function deleteItem(server, scanId, propType, pos) {
-            if (!confirm('Удалить эту запись?')) return;
-            await fetch('/api/delete_item', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ server, scanId, propType, pos })
-            });
-            await fetchPaydays();
+        async function deleteItem(srv, scanId, propType, pos) {
+            if (!confirm(`Удалить этот объект (№${pos})?`)) return;
+
+            try {
+                const res = await fetch('/api/delete_item', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ server: srv, scanId, propType, pos })
+                });
+
+                if (res.ok) {
+                    await fetchPaydays();
+                } else {
+                    const err = await res.json();
+                    alert(err.detail || 'Ошибка удаления');
+                }
+            } catch (e) {
+                alert('Ошибка отправки запроса');
+            }
         }
 
-        async function deleteScan(server, scanId) {
-            if (!confirm('Удалить весь скан?')) return;
-            await fetch('/api/delete_scan', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ server, scanId })
-            });
-            await fetchPaydays();
+        async function deleteScan(srv, scanId) {
+            if (!confirm(`Удалить весь скан (${scanId})?`)) return;
+
+            try {
+                const res = await fetch('/api/delete_scan', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ server: srv, scanId })
+                });
+
+                if (res.ok) {
+                    delete activeServerScans[srv];
+                    await fetchPaydays();
+                } else {
+                    const err = await res.json();
+                    alert(err.detail || 'Ошибка удаления скана');
+                }
+            } catch (e) {
+                alert('Ошибка отправки запроса');
+            }
         }
 
-        async function addItem(server, scanId, propType) {
-            const pdStr = prompt("Введите количество ПейДев (PD):");
-            if (!pdStr) return;
-            const pd = parseInt(pdStr);
-            if (isNaN(pd)) return alert("Некорректное число");
+        async function addItem(srv, scanId, propType) {
+            const pdStr = prompt('Введите значение PD (число пейдеев):');
+            if (pdStr === null || pdStr.trim() === '') return;
+            const pd = parseInt(pdStr, 10);
+            if (isNaN(pd) || pd < 0) {
+                alert('Некорректное значение PD');
+                return;
+            }
 
-            const propIdStr = prompt("Введите ID дома/бизнеса (необязательно):");
-            const propId = propIdStr ? parseInt(propIdStr) : null;
+            const propIdStr = prompt('Введите ID дома/бизнеса (необязательно):');
+            let propId = null;
+            if (propIdStr !== null && propIdStr.trim() !== '') {
+                const parsedId = parseInt(propIdStr, 10);
+                if (!isNaN(parsedId)) propId = parsedId;
+            }
 
-            await fetch('/api/add_item', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ server, scanId, propType, pd, propId })
-            });
-            await fetchPaydays();
+            try {
+                const res = await fetch('/api/add_item', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ server: srv, scanId, propType, pd, propId })
+                });
+
+                if (res.ok) {
+                    await fetchPaydays();
+                } else {
+                    const err = await res.json();
+                    alert(err.detail || 'Ошибка добавления объекта');
+                }
+            } catch (e) {
+                alert('Ошибка отправки запроса');
+            }
         }
 
         async function loadActionLogs() {
+            const container = document.getElementById('action-logs-table-container');
+            if (!container) return;
+
             try {
                 const res = await fetch('/api/action_logs');
                 if (res.ok) {
                     const logs = await res.json();
-                    let html = `<table class="taxes-table"><thead><tr><th>Время</th><th>Сервер</th><th>Пользователь</th><th>Действие</th></tr></thead><tbody>`;
-                    if (logs.length === 0) {
-                        html += `<tr><td colspan="4"><span class="empty">Логи отсутствуют</span></td></tr>`;
-                    } else {
-                        logs.forEach(l => {
-                            html += `<tr><td>${l.time}</td><td><b>${l.server}</b></td><td>${l.username}</td><td>${l.action}</td></tr>`;
-                        });
+                    if (!logs || logs.length === 0) {
+                        container.innerHTML = '<span class="empty">Сегодня действий не зафиксировано</span>';
+                        return;
                     }
+
+                    let html = `<table>
+                        <thead>
+                            <tr>
+                                <th>Время</th>
+                                <th>Сервер</th>
+                                <th>Пользователь</th>
+                                <th>Действие</th>
+                            </tr>
+                        </thead>
+                        <tbody>`;
+
+                    logs.forEach(l => {
+                        html += `<tr>
+                            <td><b>${l.time}</b></td>
+                            <td>${l.server}</td>
+                            <td><span style="color: #00e5ff; font-weight:700;">${l.username}</span></td>
+                            <td>${l.action}</td>
+                        </tr>`;
+                    });
+
                     html += `</tbody></table>`;
-                    document.getElementById('action-logs-table-container').innerHTML = html;
+                    container.innerHTML = html;
+                } else {
+                    container.innerHTML = '<span class="empty">Не удалось загрузить логи</span>';
                 }
-            } catch (e) {}
+            } catch (e) {
+                container.innerHTML = '<span class="empty">Ошибка соединения при загрузке логов</span>';
+            }
         }
 
         async function loadTaxesTab() {
+            const container = document.getElementById('taxes-container');
+            if (!container) return;
+
             try {
                 const res = await fetch('/api/taxes');
                 if (res.ok) {
                     const taxes = await res.json();
                     const isAdmin = currentUser && currentUser.role === 'admin';
 
-                    let html = `<table class="taxes-table"><thead><tr><th># Сервер</th><th>Налог на дом ($)</th><th>Налог на бизнес ($)</th>${isAdmin ? '<th>Действия</th>' : ''}</tr></thead><tbody>`;
+                    let html = `<table class="taxes-table">
+                        <thead>
+                            <tr>
+                                <th>Сервер</th>
+                                <th>Налог на дома ($/час)</th>
+                                <th>Налог на бизнесы ($/час)</th>
+                                ${isAdmin ? '<th>Действие</th>' : ''}
+                            </tr>
+                        </thead>
+                        <tbody>`;
 
                     ALL_SERVERS.forEach(srv => {
-                        const t = taxes[srv] || { house_tax: 0, biz_tax: 0 };
+                        const sData = taxes[srv] || { house_tax: 0, biz_tax: 0 };
+                        
                         html += `<tr>
                             <td><b>${getServerDisplayName(srv)}</b></td>
-                            <td><input type="number" id="tax-house-${srv}" value="${t.house_tax}" class="tax-input-compact" ${!isAdmin ? 'disabled' : ''}></td>
-                            <td><input type="number" id="tax-biz-${srv}" value="${t.biz_tax}" class="tax-input-compact" ${!isAdmin ? 'disabled' : ''}></td>
+                            <td>
+                                ${isAdmin 
+                                    ? `<input type="number" id="tax-house-${srv}" class="tax-input-compact" value="${sData.house_tax}">` 
+                                    : `<b style="color:#00e676;">${sData.house_tax} $</b>`}
+                            </td>
+                            <td>
+                                ${isAdmin 
+                                    ? `<input type="number" id="tax-biz-${srv}" class="tax-input-compact" value="${sData.biz_tax}">` 
+                                    : `<b style="color:#00e676;">${sData.biz_tax} $</b>`}
+                            </td>
                             ${isAdmin ? `<td><button class="btn-save-tax-compact" onclick="saveTax('${srv}')">Сохранить</button></td>` : ''}
                         </tr>`;
                     });
 
                     html += `</tbody></table>`;
-                    document.getElementById('taxes-container').innerHTML = html;
+                    container.innerHTML = html;
                 }
-            } catch (e) {}
+            } catch (e) {
+                container.innerHTML = '<div class="empty-center">Ошибка загрузки налогов</div>';
+            }
         }
 
-        async function saveTax(server) {
-            const houseTax = parseInt(document.getElementById(`tax-house-${server}`).value) || 0;
-            const bizTax = parseInt(document.getElementById(`tax-biz-${server}`).value) || 0;
+        async function saveTax(srv) {
+            const hInput = document.getElementById(`tax-house-${srv}`);
+            const bInput = document.getElementById(`tax-biz-${srv}`);
+            if (!hInput || !bInput) return;
 
-            const res = await fetch('/api/taxes/update', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ server, house_tax: houseTax, biz_tax: bizTax })
-            });
+            const house_tax = parseInt(hInput.value, 10) || 0;
+            const biz_tax = parseInt(bInput.value, 10) || 0;
 
-            if (res.ok) alert(`Налоги для ${server} успешно обновлены!`);
-            else alert("Ошибка при сохранении налогов");
+            try {
+                const res = await fetch('/api/taxes/update', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ server: srv, house_tax, biz_tax })
+                });
+
+                if (res.ok) {
+                    alert(`Налоги для ${srv} успешно сохранены!`);
+                } else {
+                    const err = await res.json();
+                    alert(err.detail || 'Ошибка сохранения налогов');
+                }
+            } catch (e) {
+                alert('Ошибка соединения');
+            }
         }
 
         async function loadAdminUsers() {
+            const container = document.getElementById('admin-users-table');
+            if (!container) return;
+
             try {
                 const res = await fetch('/api/admin/users');
                 if (res.ok) {
                     const users = await res.json();
-                    let html = `<table class="taxes-table"><thead><tr><th>ID</th><th>Логин</th><th>Роль</th><th>Доступ</th><th>Действия</th></tr></thead><tbody>`;
+                    let html = `<table style="width:100%; border-collapse:collapse;">
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Логин</th>
+                                <th>Роль</th>
+                                <th>Доступ</th>
+                                <th>Действия</th>
+                            </tr>
+                        </thead>
+                        <tbody>`;
 
                     users.forEach(u => {
-                        let actions = '';
-                        if (u.username !== 'admin') {
-                            actions = `
-                                <button onclick="toggleUserAccess(${u.id}, ${!u.is_allowed})" class="${u.is_allowed ? 'btn-del' : 'btn-add'}">
-                                    ${u.is_allowed ? 'Заблокировать' : 'Разблокировать'}
-                                </button>
-                                <button onclick="deleteUser(${u.id})" class="btn-user-del">Удалить</button>
-                            `;
-                        } else {
-                            actions = `<span style="color:var(--text-muted);">—</span>`;
-                        }
+                        const isSelf = currentUser && currentUser.username === u.username;
+                        const isAdminAccount = u.username === 'admin';
 
                         html += `<tr>
                             <td>${u.id}</td>
-                            <td><b>${u.username}</b></td>
-                            <td>${u.username === 'admin' ? 'admin' : `
-                                <select class="filter-select" onchange="updateUserRole(${u.id}, this.value)">
-                                    <option value="user" ${u.role==='user'?'selected':''}>user</option>
-                                    <option value="support" ${u.role==='support'?'selected':''}>support</option>
-                                    <option value="admin" ${u.role==='admin'?'selected':''}>admin</option>
-                                </select>`}
+                            <td><b>${u.username}</b> ${isSelf ? '(Вы)' : ''}</td>
+                            <td>
+                                <select onchange="handleUpdateRole(${u.id}, this.value)" class="filter-select" style="padding:4px 8px;" ${isAdminAccount ? 'disabled' : ''}>
+                                    <option value="user" ${u.role === 'user' ? 'selected' : ''}>User</option>
+                                    <option value="support" ${u.role === 'support' ? 'selected' : ''}>Support</option>
+                                    <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin</option>
+                                </select>
                             </td>
-                            <td>${u.is_allowed ? '<span style="color:#00e676">Разрешен</span>' : '<span style="color:#ff2d55">Заблокирован</span>'}</td>
-                            <td>${actions}</td>
+                            <td>
+                                <button class="btn-add" style="background:${u.is_allowed ? '#2e7d32' : '#c62828'};" onclick="handleToggleAccess(${u.id}, ${!u.is_allowed})" ${isAdminAccount ? 'disabled' : ''}>
+                                    ${u.is_allowed ? 'Разрешен' : 'Заблокирован'}
+                                </button>
+                            </td>
+                            <td>
+                                <button class="btn-add" style="background:#0288d1; margin-right:5px;" onclick="handleChangePassword(${u.id})">Сменить пароль</button>
+                                ${(!isSelf && !isAdminAccount) ? `<button class="btn-user-del" onclick="handleDeleteUser(${u.id})">Удалить</button>` : ''}
+                            </td>
                         </tr>`;
                     });
 
                     html += `</tbody></table>`;
-                    document.getElementById('admin-users-table').innerHTML = html;
+                    container.innerHTML = html;
                 }
-            } catch (e) {}
+            } catch (e) {
+                container.innerHTML = 'Ошибка загрузки пользователей';
+            }
+        }
+
+        async function loadScanLogs() {
+            const container = document.getElementById('admin-scan-logs-table');
+            if (!container) return;
+
+            try {
+                const res = await fetch('/api/admin/scan_logs');
+                if (res.ok) {
+                    const logs = await res.json();
+                    if (!logs || logs.length === 0) {
+                        container.innerHTML = '<span class="empty">Сегодня логов сканирований нет</span>';
+                        return;
+                    }
+
+                    let html = `<table style="width:100%; border-collapse:collapse;">
+                        <thead>
+                            <tr>
+                                <th>Время</th>
+                                <th>Сервер</th>
+                                <th>Сканнер</th>
+                            </tr>
+                        </thead>
+                        <tbody>`;
+
+                    logs.forEach(l => {
+                        html += `<tr>
+                            <td><b>${l.created_at}</b></td>
+                            <td>${l.server}</td>
+                            <td><span style="color:#ffca28;">${l.scanner}</span></td>
+                        </tr>`;
+                    });
+
+                    html += `</tbody></table>`;
+                    container.innerHTML = html;
+                }
+            } catch (e) {
+                container.innerHTML = 'Ошибка загрузки логов';
+            }
         }
 
         async function handleCreateUser() {
@@ -2310,72 +2532,113 @@ DASHBOARD_HTML = """
             const password = document.getElementById('new-password').value;
             const role = document.getElementById('new-role').value;
 
-            if (!username || !password) return alert("Заполните логин и пароль");
-
-            const res = await fetch('/api/admin/create_user', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username, password, role })
-            });
-
-            if (res.ok) {
-                alert("Пользователь создан");
-                document.getElementById('new-username').value = '';
-                document.getElementById('new-password').value = '';
-                loadAdminUsers();
-            } else {
-                const err = await res.json();
-                alert(err.detail || "Ошибка создания");
+            if (!username || !password) {
+                alert('Заполните логин и пароль');
+                return;
             }
-        }
 
-        async function toggleUserAccess(userId, isAllowed) {
-            await fetch('/api/admin/toggle_access', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ user_id: userId, is_allowed: isAllowed })
-            });
-            loadAdminUsers();
-        }
-
-        async function deleteUser(userId) {
-            if (!confirm('Удалить пользователя?')) return;
-            const res = await fetch('/api/admin/delete_user', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ user_id: userId })
-            });
-            if (res.ok) loadAdminUsers();
-            else {
-                const err = await res.json();
-                alert(err.detail || "Ошибка удаления");
-            }
-        }
-
-        async function updateUserRole(userId, role) {
-            await fetch('/api/admin/update_role', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ user_id: userId, role })
-            });
-            loadAdminUsers();
-        }
-
-        async function loadScanLogs() {
             try {
-                const res = await fetch('/api/admin/scan_logs');
+                const res = await fetch('/api/admin/create_user', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password, role })
+                });
+
                 if (res.ok) {
-                    const logs = await res.json();
-                    let html = `<table class="taxes-table"><thead><tr><th>Время</th><th>Сервер</th><th>Сканнер</th></tr></thead><tbody>`;
-                    logs.forEach(l => {
-                        html += `<tr><td>${l.created_at}</td><td><b>${l.server}</b></td><td>${l.scanner}</td></tr>`;
-                    });
-                    html += `</tbody></table>`;
-                    document.getElementById('admin-scan-logs-table').innerHTML = html;
+                    document.getElementById('new-username').value = '';
+                    document.getElementById('new-password').value = '';
+                    loadAdminUsers();
+                } else {
+                    const err = await res.json();
+                    alert(err.detail || 'Ошибка создания пользователя');
                 }
-            } catch (e) {}
+            } catch (e) {
+                alert('Ошибка выполнения запроса');
+            }
         }
 
+        async function handleToggleAccess(user_id, is_allowed) {
+            try {
+                const res = await fetch('/api/admin/toggle_access', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id, is_allowed })
+                });
+
+                if (res.ok) {
+                    loadAdminUsers();
+                } else {
+                    const err = await res.json();
+                    alert(err.detail || 'Ошибка изменения доступа');
+                }
+            } catch (e) {
+                alert('Ошибка соединения');
+            }
+        }
+
+        async function handleUpdateRole(user_id, role) {
+            try {
+                const res = await fetch('/api/admin/update_role', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id, role })
+                });
+
+                if (res.ok) {
+                    loadAdminUsers();
+                } else {
+                    const err = await res.json();
+                    alert(err.detail || 'Ошибка изменения роли');
+                }
+            } catch (e) {
+                alert('Ошибка соединения');
+            }
+        }
+
+        async function handleChangePassword(user_id) {
+            const new_password = prompt('Введите новый пароль для пользователя:');
+            if (!new_password || new_password.trim() === '') return;
+
+            try {
+                const res = await fetch('/api/admin/change_password', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id, new_password })
+                });
+
+                if (res.ok) {
+                    alert('Пароль успешно изменен');
+                } else {
+                    const err = await res.json();
+                    alert(err.detail || 'Ошибка изменения пароля');
+                }
+            } catch (e) {
+                alert('Ошибка соединения');
+            }
+        }
+
+        async function handleDeleteUser(user_id) {
+            if (!confirm('Вы уверены, что хотите удалить этого пользователя?')) return;
+
+            try {
+                const res = await fetch('/api/admin/delete_user', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id })
+                });
+
+                if (res.ok) {
+                    loadAdminUsers();
+                } else {
+                    const err = await res.json();
+                    alert(err.detail || 'Ошибка удаления пользователя');
+                }
+            } catch (e) {
+                alert('Ошибка соединения');
+            }
+        }
+
+        // Старт проверки авторизации при загрузке
         checkAuth();
     </script>
 </body>
