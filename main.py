@@ -1049,28 +1049,33 @@ DASHBOARD_HTML = """
     <title>Arizona RP — Мониторинг Слётов</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         :root {
-            --bg-color: #0b0e14;
-            --card-bg: #141822;
-            --card-border: #202636;
+            --bg-color: #07090e;
+            --card-bg: rgba(18, 22, 33, 0.85);
+            --card-border: rgba(255, 255, 255, 0.08);
             --accent-orange: #ff9800;
-            --accent-orange-glow: rgba(255, 152, 0, 0.25);
+            --accent-orange-glow: rgba(255, 152, 0, 0.35);
             --accent-blue: #00b0ff;
             --accent-green: #00e676;
-            --accent-red: #ff3d00;
-            --text-main: #f0f4f8;
-            --text-muted: #8a99ad;
-            --table-header: #1a202c;
-            --table-row-hover: #1c2333;
+            --accent-red: #ff2d55;
+            --accent-purple: #9c27b0;
+            --text-main: #f3f6fc;
+            --text-muted: #8e9bb0;
+            --table-header: rgba(255, 255, 255, 0.03);
+            --table-row-hover: rgba(255, 255, 255, 0.05);
         }
 
         * { box-sizing: border-box; }
 
         body { 
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+            font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
             background-color: var(--bg-color); 
+            background-image: 
+                radial-gradient(circle at 50% 0%, rgba(255, 152, 0, 0.08), transparent 45%),
+                radial-gradient(circle at 10% 90%, rgba(0, 176, 255, 0.05), transparent 35%);
+            background-attachment: fixed;
             color: var(--text-main); 
             margin: 0; 
             padding: 20px 15px; 
@@ -1079,28 +1084,30 @@ DASHBOARD_HTML = """
 
         ::-webkit-scrollbar { width: 8px; height: 8px; }
         ::-webkit-scrollbar-track { background: var(--bg-color); }
-        ::-webkit-scrollbar-thumb { background: #263043; border-radius: 4px; }
-        ::-webkit-scrollbar-thumb:hover { background: #3b4962; }
+        ::-webkit-scrollbar-thumb { background: #202838; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #35425c; }
 
         h1 { 
             text-align: center; 
             color: #ffffff; 
-            font-size: 1.8rem;
+            font-size: 1.9rem;
             font-weight: 800;
-            letter-spacing: 0.5px;
+            letter-spacing: 0.8px;
             margin: 10px 0 25px 0;
             text-transform: uppercase;
-            background: linear-gradient(135deg, #fff 30%, var(--accent-orange));
+            background: linear-gradient(135deg, #ffffff 20%, #ffb74d 70%, var(--accent-orange) 100%);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
+            text-shadow: 0 4px 20px rgba(255, 152, 0, 0.2);
         }
 
         /* Баннер Лотереи */
         .lottery-banner {
-            background: linear-gradient(135deg, rgba(255, 152, 0, 0.15), rgba(156, 39, 176, 0.2));
-            border: 1px solid rgba(255, 152, 0, 0.4);
-            border-radius: 12px;
-            padding: 14px 20px;
+            background: linear-gradient(135deg, rgba(255, 152, 0, 0.12), rgba(156, 39, 176, 0.18));
+            border: 1px solid rgba(255, 152, 0, 0.35);
+            backdrop-filter: blur(12px);
+            border-radius: 14px;
+            padding: 14px 22px;
             margin: 0 auto 20px auto;
             max-width: 1600px;
             display: flex;
@@ -1108,7 +1115,7 @@ DASHBOARD_HTML = """
             align-items: center;
             flex-wrap: wrap;
             gap: 15px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+            box-shadow: 0 8px 25px rgba(0,0,0,0.35);
         }
         .lottery-info {
             display: flex;
@@ -1118,11 +1125,12 @@ DASHBOARD_HTML = """
         .lottery-icon {
             font-size: 2.2rem;
             line-height: 1;
+            filter: drop-shadow(0 2px 8px rgba(255, 152, 0, 0.5));
         }
         .lottery-title {
             font-size: 1.05rem;
             font-weight: 800;
-            color: #ffb74d;
+            color: #ffca28;
             text-transform: uppercase;
             letter-spacing: 0.5px;
         }
@@ -1138,14 +1146,15 @@ DASHBOARD_HTML = """
             display: flex;
             align-items: center;
             gap: 10px;
-            background: rgba(15, 18, 26, 0.7);
-            padding: 8px 16px;
-            border-radius: 8px;
-            border: 1px solid var(--card-border);
+            background: rgba(10, 13, 20, 0.7);
+            padding: 8px 18px;
+            border-radius: 10px;
+            border: 1px solid rgba(0, 230, 118, 0.3);
+            box-shadow: 0 0 12px rgba(0, 230, 118, 0.15);
         }
         .lottery-label {
             font-size: 0.85rem;
-            font-weight: 600;
+            font-weight: 700;
             color: var(--text-muted);
         }
         .lottery-timer {
@@ -1154,57 +1163,60 @@ DASHBOARD_HTML = """
             color: #00e676;
             font-family: monospace;
             letter-spacing: 1px;
+            text-shadow: 0 0 10px rgba(0, 230, 118, 0.5);
         }
 
         /* Auth Screen */
         .login-box { 
-            max-width: 380px; 
+            max-width: 400px; 
             margin: 80px auto; 
             background: var(--card-bg); 
-            padding: 35px 30px; 
-            border-radius: 12px; 
+            backdrop-filter: blur(16px);
+            padding: 38px 32px; 
+            border-radius: 16px; 
             border: 1px solid var(--card-border); 
             text-align: center; 
-            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            box-shadow: 0 12px 40px rgba(0,0,0,0.6);
         }
         .login-box h2 {
             margin-top: 0;
-            margin-bottom: 20px;
+            margin-bottom: 22px;
             color: var(--text-main);
-            font-size: 1.4rem;
+            font-size: 1.45rem;
+            font-weight: 800;
         }
         .login-box input { 
             width: 100%; 
-            padding: 12px; 
+            padding: 13px; 
             margin: 8px 0; 
-            background: #0f121a; 
-            border: 1px solid #263043; 
+            background: rgba(10, 13, 20, 0.8); 
+            border: 1px solid rgba(255,255,255,0.12); 
             color: #fff; 
-            border-radius: 6px; 
+            border-radius: 8px; 
             font-size: 0.95rem;
             outline: none;
-            transition: 0.2s;
+            transition: all 0.2s;
         }
         .login-box input:focus {
             border-color: var(--accent-orange);
-            box-shadow: 0 0 8px var(--accent-orange-glow);
+            box-shadow: 0 0 12px var(--accent-orange-glow);
         }
         .login-box button { 
             width: 100%; 
-            padding: 12px; 
-            margin-top: 15px;
+            padding: 13px; 
+            margin-top: 18px;
             background: linear-gradient(135deg, #ff9800, #f57c00); 
             border: none; 
-            font-weight: 700; 
+            font-weight: 800; 
             cursor: pointer; 
-            border-radius: 6px; 
-            color: #121212; 
+            border-radius: 8px; 
+            color: #0b0d14; 
             font-size: 1rem;
-            transition: transform 0.1s, box-shadow 0.2s;
+            transition: all 0.2s;
         }
         .login-box button:hover {
-            transform: translateY(-1px);
-            box-shadow: 0 4px 15px var(--accent-orange-glow);
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px var(--accent-orange-glow);
         }
 
         /* Top Navigation */
@@ -1215,24 +1227,26 @@ DASHBOARD_HTML = """
             max-width: 1600px; 
             margin: 0 auto 20px auto; 
             background: var(--card-bg);
-            padding: 12px 20px;
-            border-radius: 10px;
+            backdrop-filter: blur(12px);
+            padding: 12px 22px;
+            border-radius: 12px;
             border: 1px solid var(--card-border);
         }
-        #user-info { font-weight: 600; font-size: 0.95rem; color: var(--text-muted); }
+        #user-info { font-weight: 700; font-size: 0.92rem; color: var(--text-muted); }
         .btn-logout { 
-            background: rgba(229, 57, 53, 0.15); 
-            color: #ef5350; 
-            border: 1px solid rgba(229, 57, 53, 0.3); 
-            padding: 7px 16px; 
-            border-radius: 6px; 
+            background: rgba(255, 45, 85, 0.12); 
+            color: #ff5252; 
+            border: 1px solid rgba(255, 45, 85, 0.3); 
+            padding: 8px 18px; 
+            border-radius: 8px; 
             cursor: pointer; 
-            font-weight: 600;
-            transition: 0.2s;
+            font-weight: 700;
+            transition: all 0.2s;
         }
         .btn-logout:hover {
-            background: #e53935;
+            background: #ff2d55;
             color: #fff;
+            box-shadow: 0 0 12px rgba(255, 45, 85, 0.4);
         }
 
         /* Tabs Navigation */
@@ -1245,25 +1259,27 @@ DASHBOARD_HTML = """
         }
         .tab-btn { 
             background-color: var(--card-bg); 
+            backdrop-filter: blur(10px);
             color: var(--text-muted); 
             border: 1px solid var(--card-border); 
-            padding: 10px 22px; 
-            font-size: 0.95rem; 
-            font-weight: 700; 
-            border-radius: 8px; 
+            padding: 11px 24px; 
+            font-size: 0.92rem; 
+            font-weight: 800; 
+            border-radius: 10px; 
             cursor: pointer; 
-            transition: all 0.2s ease; 
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); 
         }
         .tab-btn.active { 
             background: linear-gradient(135deg, #ff9800, #f57c00); 
-            color: #121212; 
+            color: #0b0d14; 
             border-color: #ff9800; 
-            box-shadow: 0 4px 15px var(--accent-orange-glow);
+            box-shadow: 0 4px 18px var(--accent-orange-glow);
         }
         .tab-btn:hover:not(.active) { 
-            background-color: #1c2333; 
+            background-color: rgba(255, 255, 255, 0.08); 
             color: #fff; 
-            border-color: #2e384e;
+            border-color: rgba(255, 255, 255, 0.2);
+            transform: translateY(-1px);
         }
 
         .tab-content { display: none; }
@@ -1275,61 +1291,66 @@ DASHBOARD_HTML = """
             background-color: var(--card-bg); 
             color: var(--text-muted); 
             border: 1px solid var(--card-border); 
-            padding: 8px 18px; 
+            padding: 8px 20px; 
             font-size: 0.85rem; 
-            font-weight: 700; 
+            font-weight: 800; 
             border-radius: 20px; 
             cursor: pointer; 
-            transition: 0.2s; 
+            transition: all 0.2s; 
         }
         .time-filter-btn.active { 
-            background-color: #e53935; 
+            background: linear-gradient(135deg, #e53935, #d32f2f); 
             color: #ffffff; 
             border-color: #ef5350; 
-            box-shadow: 0 0 12px rgba(229, 57, 53, 0.4); 
+            box-shadow: 0 0 14px rgba(229, 57, 53, 0.5); 
         }
 
         .filter-panel { 
             background: var(--card-bg); 
+            backdrop-filter: blur(12px);
             border: 1px solid var(--card-border); 
-            border-radius: 10px; 
-            padding: 14px 20px; 
+            border-radius: 12px; 
+            padding: 14px 22px; 
             margin: 0 auto 20px auto; 
             max-width: 1600px;
             display: flex; 
             flex-wrap: wrap; 
-            gap: 20px; 
+            gap: 22px; 
             align-items: center; 
             justify-content: center; 
         }
         .filter-group { display: flex; align-items: center; gap: 10px; }
-        .filter-group label { font-size: 0.85rem; color: var(--accent-orange); font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
+        .filter-group label { font-size: 0.85rem; color: var(--accent-orange); font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; }
         .filter-select { 
-            background: #0f121a; 
+            background: rgba(10, 13, 20, 0.8); 
             color: #fff; 
-            border: 1px solid #263043; 
-            padding: 7px 12px; 
-            border-radius: 6px; 
+            border: 1px solid rgba(255,255,255,0.12); 
+            padding: 8px 14px; 
+            border-radius: 8px; 
             font-size: 0.85rem; 
-            font-weight: 600;
+            font-weight: 700;
             outline: none;
             cursor: pointer;
+            transition: all 0.2s;
+        }
+        .filter-select:hover {
+            border-color: rgba(255,255,255,0.25);
         }
         .fav-btn { 
             cursor: pointer; 
-            font-size: 1.1rem; 
+            font-size: 1.15rem; 
             user-select: none; 
             margin-right: 6px; 
-            transition: transform 0.15s ease; 
+            transition: transform 0.2s ease; 
             display: inline-block;
         }
-        .fav-btn:hover { transform: scale(1.3); }
+        .fav-btn:hover { transform: scale(1.35) rotate(10deg); }
 
         /* GRID FOR SERVERS */
         .servers-container { 
             display: grid; 
             grid-template-columns: repeat(1, 1fr); 
-            gap: 16px; 
+            gap: 18px; 
             max-width: 1600px; 
             margin: 0 auto; 
         }
@@ -1347,40 +1368,42 @@ DASHBOARD_HTML = """
         /* Server Card Styling */
         .server-card { 
             background-color: var(--card-bg); 
+            backdrop-filter: blur(14px);
             border: 1px solid var(--card-border); 
-            border-radius: 10px; 
-            padding: 14px; 
-            box-shadow: 0 4px 12px rgba(0,0,0,0.25); 
+            border-radius: 14px; 
+            padding: 16px; 
+            box-shadow: 0 6px 20px rgba(0,0,0,0.3); 
             display: flex;
             flex-direction: column;
-            transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+            transition: all 0.25s ease;
         }
         .server-card:hover {
-            border-color: #2e384e;
-            box-shadow: 0 6px 18px rgba(0,0,0,0.4);
+            border-color: rgba(255, 255, 255, 0.18);
+            box-shadow: 0 10px 28px rgba(0,0,0,0.5);
+            transform: translateY(-2px);
         }
         
         .server-header { 
-            border-bottom: 1px solid #1f2736; 
-            padding-bottom: 8px; 
-            margin-bottom: 10px; 
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08); 
+            padding-bottom: 10px; 
+            margin-bottom: 12px; 
         }
         .server-title { 
-            font-size: 1.05rem; 
-            font-weight: 700; 
+            font-size: 1.08rem; 
+            font-weight: 800; 
             color: #ffffff; 
             display: flex; 
             justify-content: space-between; 
             align-items: center; 
         }
         .season-badge { 
-            font-size: 0.7rem; 
+            font-size: 0.72rem; 
             background: rgba(255, 152, 0, 0.12); 
-            color: #ffb74d; 
+            color: #ffca28; 
             border: 1px solid rgba(255, 152, 0, 0.3); 
-            padding: 2px 8px; 
+            padding: 3px 10px; 
             border-radius: 12px; 
-            font-weight: 600; 
+            font-weight: 700; 
             white-space: nowrap;
         }
         
@@ -1388,155 +1411,297 @@ DASHBOARD_HTML = """
             display: flex; 
             justify-content: space-between; 
             align-items: center; 
-            margin-bottom: 10px; 
-            border-bottom: 1px solid #1f2736; 
-            padding-bottom: 6px; 
+            margin-bottom: 12px; 
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08); 
+            padding-bottom: 8px; 
             gap: 8px;
         }
         .scan-tabs-container { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
         .scan-subtab { 
-            background-color: #0f121a; 
+            background-color: rgba(10, 13, 20, 0.8); 
             color: var(--text-muted); 
-            border: 1px solid #232b3c; 
-            padding: 4px 8px; 
+            border: 1px solid rgba(255,255,255,0.08); 
+            padding: 5px 10px; 
             font-size: 0.75rem; 
-            border-radius: 4px; 
+            border-radius: 6px; 
             cursor: pointer; 
             white-space: nowrap; 
-            transition: 0.2s; 
-            font-weight: 600;
+            transition: all 0.2s; 
+            font-weight: 700;
             display: inline-flex;
             align-items: center;
-            gap: 4px;
+            gap: 5px;
         }
 
         .scan-subtab.current-pair { 
             background-color: rgba(46, 125, 50, 0.2); 
-            color: #81c784; 
+            color: #a5d6a7; 
             border-color: #4caf50; 
         }
         .scan-subtab.current-pair.active { 
             background-color: #2e7d32; 
             color: #ffffff; 
-            border-color: #66bb6a; 
-            box-shadow: 0 0 8px rgba(76, 175, 80, 0.4);
+            border-color: #81c784; 
+            box-shadow: 0 0 10px rgba(76, 175, 80, 0.4);
         }
 
         .scan-subtab.old-pair { 
             background-color: rgba(55, 71, 79, 0.25); 
-            color: #78909c; 
+            color: #90a4ae; 
             border-color: #37474f; 
             opacity: 0.75;
         }
         .scan-subtab.old-pair.active { 
             background-color: #37474f; 
             color: #cfd8dc; 
-            border-color: #546e7a; 
+            border-color: #607d8b; 
             opacity: 1;
         }
 
         .scan-subtab.single { 
             background-color: rgba(255, 152, 0, 0.15); 
-            color: #ffb74d; 
+            color: #ffe082; 
             border-color: #ff9800; 
         }
         .scan-subtab.single.active { 
             background-color: #f57c00; 
             color: #ffffff; 
-            border-color: #ffb74d; 
+            border-color: #ffe082; 
         }
 
-        .scan-subtab:hover:not(.active) { opacity: 1; filter: brightness(1.2); }
+        .scan-subtab:hover:not(.active) { opacity: 1; filter: brightness(1.25); }
 
         .btn-delete-scan { 
-            background-color: rgba(183, 28, 28, 0.2); 
-            color: #ef5350; 
-            border: 1px solid rgba(239, 83, 80, 0.4); 
-            padding: 3px 6px; 
-            border-radius: 4px; 
+            background-color: rgba(255, 45, 85, 0.15); 
+            color: #ff5252; 
+            border: 1px solid rgba(255, 45, 85, 0.35); 
+            padding: 4px 8px; 
+            border-radius: 6px; 
             font-size: 0.7rem; 
-            font-weight: 700; 
+            font-weight: 800; 
             cursor: pointer; 
-            transition: 0.2s; 
+            transition: all 0.2s; 
             white-space: nowrap;
         }
-        .btn-delete-scan:hover { background-color: #d32f2f; color: #fff; }
+        .btn-delete-scan:hover { background-color: #ff2d55; color: #fff; box-shadow: 0 0 8px rgba(255, 45, 85, 0.4); }
 
         .tables-grid { 
             display: grid; 
             grid-template-columns: 1fr 1fr; 
-            gap: 10px; 
+            gap: 12px; 
             flex-grow: 1;
         }
         @media (max-width: 480px) { .tables-grid { grid-template-columns: 1fr; } }
         
         .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
-        .section-title { font-size: 0.8rem; font-weight: 700; color: #00e5ff; text-transform: uppercase; letter-spacing: 0.5px; }
+        .section-title { font-size: 0.8rem; font-weight: 800; color: #00e5ff; text-transform: uppercase; letter-spacing: 0.6px; }
         
         .btn-add { 
-            background-color: #0288d1; 
+            background: linear-gradient(135deg, #0288d1, #0277bd); 
             color: white; 
             border: none; 
-            border-radius: 4px; 
-            padding: 2px 6px; 
+            border-radius: 5px; 
+            padding: 3px 8px; 
             font-size: 0.75rem; 
-            font-weight: 700; 
+            font-weight: 800; 
             cursor: pointer; 
-            transition: 0.2s; 
+            transition: all 0.2s; 
         }
-        .btn-add:hover { background-color: #0277bd; }
+        .btn-add:hover { background: #0277bd; box-shadow: 0 0 8px rgba(2, 136, 209, 0.4); }
 
-        table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
-        th, td { padding: 4px 6px; text-align: left; border-bottom: 1px solid #1a202c; }
-        th { background-color: var(--table-header); color: var(--text-muted); font-weight: 600; font-size: 0.72rem; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+        th, td { padding: 6px 8px; text-align: left; border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
+        th { background-color: var(--table-header); color: var(--text-muted); font-weight: 700; font-size: 0.72rem; text-transform: uppercase; }
         tr:hover td { background-color: var(--table-row-hover); }
 
-        .pd-badge { background-color: #37474f; color: #eceff1; padding: 2px 5px; border-radius: 4px; font-weight: 700; font-size: 0.72rem; }
-        .pd-badge-drop { background-color: #b71c1c; color: #ffee58; padding: 2px 5px; border-radius: 4px; font-weight: 800; font-size: 0.72rem; animation: pulse 1.5s infinite; }
-        .pd-badge-fixed { background-color: #1a237e; color: #82b1ff; border: 1px solid #304ffe; padding: 2px 5px; border-radius: 4px; font-weight: 700; font-size: 0.72rem; }
+        .pd-badge { background-color: #263043; color: #e2e8f0; padding: 2px 6px; border-radius: 5px; font-weight: 800; font-size: 0.75rem; }
+        .pd-badge-drop { background-color: #b71c1c; color: #ffe082; padding: 2px 6px; border-radius: 5px; font-weight: 800; font-size: 0.75rem; animation: pulse 1.5s infinite; border: 1px solid #ff1744; }
+        .pd-badge-fixed { background-color: rgba(26, 35, 126, 0.6); color: #82b1ff; border: 1px solid #304ffe; padding: 2px 6px; border-radius: 5px; font-weight: 800; font-size: 0.75rem; }
         
-        .time-left-badge { font-weight: 700; color: #ffb74d; font-size: 0.75rem; background-color: rgba(255, 152, 0, 0.1); padding: 2px 5px; border-radius: 4px; border: 1px solid rgba(255, 152, 0, 0.3); }
-        .time-left-frozen { font-weight: 700; color: #64b5f6; font-size: 0.75rem; }
+        .time-left-badge { font-weight: 800; color: #ffca28; font-size: 0.75rem; background-color: rgba(255, 152, 0, 0.12); padding: 3px 7px; border-radius: 6px; border: 1px solid rgba(255, 152, 0, 0.35); }
+        .time-left-frozen { font-weight: 800; color: #64b5f6; font-size: 0.75rem; background-color: rgba(0, 176, 255, 0.12); padding: 3px 7px; border-radius: 6px; border: 1px solid rgba(0, 176, 255, 0.35); }
 
         @keyframes pulse {
-            0% { opacity: 1; }
-            50% { opacity: 0.5; }
-            100% { opacity: 1; }
+            0% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.7; transform: scale(1.03); }
+            100% { opacity: 1; transform: scale(1); }
         }
 
-        .btn-group { display: flex; gap: 2px; flex-wrap: wrap; }
+        /* КНОПКИ СТАТУСОВ С ЭМОДЗИ КРУГЛЫЕ */
+        .btn-group { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
         .btn-opt { 
-            background-color: #0f121a; 
-            color: #78909c; 
-            border: 1px solid #232b3c; 
-            padding: 2px 5px; 
-            font-size: 0.68rem; 
-            border-radius: 3px; 
+            width: 26px;
+            height: 26px;
+            border-radius: 50%;
+            border: 1px solid rgba(255, 255, 255, 0.12); 
+            background: rgba(255, 255, 255, 0.05); 
+            color: #a0aec0; 
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.82rem;
             cursor: pointer; 
-            transition: 0.15s; 
-            font-weight: 600;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); 
+            outline: none;
+            padding: 0;
+            user-select: none;
         }
-        .btn-opt.active-insured { background-color: #2e7d32; color: #fff; border-color: #4caf50; }
-        .btn-opt.active-uninsured { background-color: #c62828; color: #fff; border-color: #ef5350; }
-        .btn-opt.active-noact { background-color: #b71c1c; color: #fff; border-color: #ff1744; font-weight: bold; }
-        .btn-opt.active-frozen { background-color: #1565c0; color: #fff; border-color: #42a5f5; font-weight: bold; }
+        .btn-opt:hover {
+            transform: translateY(-1px) scale(1.1);
+            border-color: rgba(255, 255, 255, 0.3);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+        }
+        .btn-opt.active-insured { 
+            background: linear-gradient(135deg, #2e7d32, #4caf50); 
+            color: #fff; 
+            border-color: #66bb6a; 
+            box-shadow: 0 0 10px rgba(76, 175, 80, 0.4); 
+        }
+        .btn-opt.active-uninsured { 
+            background: linear-gradient(135deg, #c62828, #ef5350); 
+            color: #fff; 
+            border-color: #e57373; 
+            box-shadow: 0 0 10px rgba(239, 83, 80, 0.4); 
+        }
+        .btn-opt.active-noact { 
+            background: linear-gradient(135deg, #d32f2f, #ff1744); 
+            color: #fff; 
+            border-color: #ff5252; 
+            box-shadow: 0 0 10px rgba(255, 23, 68, 0.4); 
+        }
+        .btn-opt.active-frozen { 
+            background: linear-gradient(135deg, #1565c0, #00b0ff); 
+            color: #fff; 
+            border-color: #40c4ff; 
+            box-shadow: 0 0 10px rgba(0, 176, 255, 0.4); 
+        }
         
-        .status-text { font-weight: 700; font-size: 0.75rem; padding: 2px 4px; border-radius: 3px; display: inline-block; }
+        .status-text { font-weight: 800; font-size: 0.75rem; padding: 2px 6px; border-radius: 4px; display: inline-block; }
         .status-insured { color: #81c784; }
         .status-uninsured { color: #e57373; }
         .status-noact { color: #ff5252; }
         .status-frozen { color: #64b5f6; }
         .status-pending { color: #ffb74d; font-style: italic; font-size: 0.72rem; }
 
-        .btn-del { background-color: transparent; color: #ef5350; border: 1px solid rgba(239, 83, 80, 0.4); padding: 1px 5px; font-size: 0.75rem; border-radius: 3px; cursor: pointer; transition: 0.2s; }
-        .btn-del:hover { background-color: #ef5350; color: #fff; }
-        .btn-user-del { background-color: #c62828; color: #fff; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 0.8em; }
+        .btn-del { background-color: transparent; color: #ff5252; border: 1px solid rgba(255, 82, 82, 0.3); padding: 1px 6px; font-size: 0.75rem; border-radius: 4px; cursor: pointer; transition: all 0.2s; }
+        .btn-del:hover { background-color: #ff5252; color: #fff; }
+        .btn-user-del { background-color: #c62828; color: #fff; border: none; padding: 5px 10px; border-radius: 6px; cursor: pointer; font-size: 0.8em; font-weight: 700; }
         .btn-user-del:hover { background-color: #e53935; }
         
-        .select-role { background: #0f121a; color: #fff; border: 1px solid #263043; padding: 4px; border-radius: 4px; font-size: 0.85em; }
+        .select-role { background: rgba(10, 13, 20, 0.8); color: #fff; border: 1px solid rgba(255,255,255,0.12); padding: 5px; border-radius: 6px; font-size: 0.85em; }
         .empty { color: #546e7a; font-style: italic; font-size: 0.78rem; display: block; padding: 4px 0; }
-        .empty-center { text-align: center; color: var(--text-muted); font-style: italic; padding: 30px; background-color: var(--card-bg); border-radius: 10px; border: 1px solid var(--card-border); max-width: 600px; margin: 0 auto; grid-column: 1 / -1; }
+        .empty-center { text-align: center; color: var(--text-muted); font-style: italic; padding: 35px; background-color: var(--card-bg); border-radius: 14px; border: 1px solid var(--card-border); max-width: 600px; margin: 0 auto; grid-column: 1 / -1; }
     </style>
+</head>
+<body>
+    <div id="login-screen" style="display: none;">
+        <div class="login-box">
+            <h2>🔐 Авторизация</h2>
+            <input type="text" id="login-username" placeholder="Логин">
+            <input type="password" id="login-password" placeholder="Пароль">
+            <button onclick="handleLogin()">Войти в систему</button>
+        </div>
+    </div>
+
+    <div id="main-dashboard" style="display: none;">
+        <h1>Arizona RP — Мониторинг Слётов</h1>
+
+        <div class="lottery-banner">
+            <div class="lottery-info">
+                <div class="lottery-icon">🎰</div>
+                <div>
+                    <div class="lottery-title">Лотерейный билет</div>
+                    <div class="lottery-sub">Сброс лотерейных билетов каждый день в <b>21:10 МСК</b></div>
+                </div>
+            </div>
+            <div class="lottery-countdown">
+                <span class="lottery-label">До сброса:</span>
+                <span class="lottery-timer" id="lottery-timer">00:00:00</span>
+            </div>
+        </div>
+
+        <div class="user-nav">
+            <span id="user-info">Вы вошли как: ...</span>
+            <button class="btn-logout" onclick="handleLogout()">Выйти</button>
+        </div>
+
+        <div class="tabs">
+            <button class="tab-btn active" id="btn-tab-view" onclick="switchTab('view')">📊 Обзор слётов</button>
+            <button class="tab-btn" id="btn-tab-upcoming" onclick="switchTab('upcoming')">🚨 Ожидаются к слёту</button>
+            <button class="tab-btn" id="btn-tab-manage" onclick="switchTab('manage')" style="display:none;">⚙️ Управление</button>
+            <button class="tab-btn" id="btn-tab-admin" onclick="switchTab('admin')" style="display:none;">👑 Админ-панель</button>
+        </div>
+
+        <!-- Таб Обзор -->
+        <div id="tab-view" class="tab-content active">
+            <div class="filter-panel">
+                <div class="filter-group">
+                    <label for="filter-season">Сезон:</label>
+                    <select id="filter-season" class="filter-select" onchange="renderViewTab()">
+                        <option value="all">Все сезоны</option>
+                        <option value="1">📱 По инфе (1)</option>
+                        <option value="2">⌨ Скорострелы (2)</option>
+                        <option value="3">🏎️ Автогонки (3)</option>
+                        <option value="4">✈️ По новому (4)</option>
+                        <option value="5">🏍 Мотогонки (5)</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label for="filter-fav">Избранное:</label>
+                    <select id="filter-fav" class="filter-select" onchange="renderViewTab()">
+                        <option value="all">Все сервера</option>
+                        <option value="fav_only">⭐ Только избранные</option>
+                    </select>
+                </div>
+            </div>
+            <div class="servers-container" id="servers-view"></div>
+        </div>
+
+        <!-- Таб Ожидаются к слёту -->
+        <div id="tab-upcoming" class="tab-content">
+            <div class="upcoming-filters">
+                <button class="time-filter-btn active" id="btn-upcoming-1h" onclick="setUpcomingHoursFilter(1)">1 час</button>
+                <button class="time-filter-btn" id="btn-upcoming-2h" onclick="setUpcomingHoursFilter(2)">2 часа</button>
+                <button class="time-filter-btn" id="btn-upcoming-3h" onclick="setUpcomingHoursFilter(3)">3 часа</button>
+            </div>
+            <div class="servers-container" id="servers-upcoming"></div>
+        </div>
+
+        <!-- Таб Управление -->
+        <div id="tab-manage" class="tab-content">
+            <div class="servers-container" id="servers-manage"></div>
+        </div>
+
+        <!-- Таб Админка -->
+        <div id="tab-admin" class="tab-content">
+            <div class="admin-panel" style="max-width: 1200px; margin: 0 auto;">
+                <div class="admin-card" style="background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px; padding: 22px; margin-bottom: 20px;">
+                    <h3 style="margin-top: 0; color: var(--accent-orange);">➕ Создать пользователя</h3>
+                    <div style="display: flex; gap: 12px; flex-wrap: wrap; align-items: center;">
+                        <input type="text" id="new-username" placeholder="Логин" class="filter-select" style="padding: 9px 14px;">
+                        <input type="password" id="new-password" placeholder="Пароль" class="filter-select" style="padding: 9px 14px;">
+                        <select id="new-role" class="filter-select" style="padding: 9px 14px;">
+                            <option value="user">User</option>
+                            <option value="support">Support</option>
+                            <option value="admin">Admin</option>
+                        </select>
+                        <button class="btn-add" style="padding: 10px 18px; background: linear-gradient(135deg, #ff9800, #f57c00); color: #0b0d14;" onclick="handleCreateUser()">Создать</button>
+                    </div>
+                </div>
+
+                <div class="admin-card" style="background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px; padding: 22px; margin-bottom: 20px;">
+                    <h3 style="margin-top: 0; color: var(--accent-orange);">👥 Список пользователей</h3>
+                    <div id="admin-users-table"></div>
+                </div>
+
+                <div class="admin-card" style="background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px; padding: 22px;">
+                    <h3 style="margin-top: 0; color: var(--accent-orange);">📜 Логи сканирований (За сегодня)</h3>
+                    <div id="admin-scan-logs-table"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script>
         const ALL_SERVERS = [
             "Phoenix", "Tucson", "Scottdale", "Chandler", "Brainburg",
@@ -2023,10 +2188,10 @@ DASHBOARD_HTML = """
                 if (interactive) {
                     statusControl = `
                         <div class="btn-group">
-                            <button class="btn-opt ${st === 'insured' && !isPending ? 'active-insured' : ''}" onclick="setStatus('${server}', '${scanId}', '${type}', ${item.pos}, 'insured')">Страх.</button>
-                            <button class="btn-opt ${st === 'uninsured' && !isPending ? 'active-uninsured' : ''}" onclick="setStatus('${server}', '${scanId}', '${type}', ${item.pos}, 'uninsured')">Не страх.</button>
-                            ${type === 'biz' ? `<button class="btn-opt ${st === 'no_activity' && !isPending ? 'active-noact' : ''}" onclick="setStatus('${server}', '${scanId}', 'biz',${item.pos}, 'no_activity')">Без зан.</button>` : ''}
-                            <button class="btn-opt ${st === 'frozen' && !isPending ? 'active-frozen' : ''}" onclick="setStatus('${server}', '${scanId}', '${type}', ${item.pos}, 'frozen')">Заморожен</button>
+                            <button class="btn-opt ${st === 'insured' && !isPending ? 'active-insured' : ''}" title="Страховка" onclick="setStatus('${server}', '${scanId}', '${type}', ${item.pos}, 'insured')">🛡️</button>
+                            <button class="btn-opt ${st === 'uninsured' && !isPending ? 'active-uninsured' : ''}" title="Без страховки" onclick="setStatus('${server}', '${scanId}', '${type}', ${item.pos}, 'uninsured')">❌</button>
+                            ${type === 'biz' ? `<button class="btn-opt ${st === 'no_activity' && !isPending ? 'active-noact' : ''}" title="Без бизнеса/налога" onclick="setStatus('${server}', '${scanId}', 'biz', ${item.pos}, 'no_activity')">💼</button>` : ''}
+                            <button class="btn-opt ${st === 'frozen' && !isPending ? 'active-frozen' : ''}" title="Заморожен" onclick="setStatus('${server}', '${scanId}', '${type}', ${item.pos}, 'frozen')">❄️</button>
                         </div>
                         ${isPending ? '<span class="status-pending">⏳ Новый</span>' : ''}`;
                 } else {
@@ -2325,7 +2490,7 @@ DASHBOARD_HTML = """
                                 </div>
                                 <div class="scan-tabs-bar">
                                     <div class="scan-tabs-container" id="scan-tabs-${srv}"></div>
-                                    <button class="btn-delete-scan" id="btn-del-scan-${srv}" onclick="deleteWholeScan('${srv}')">🗑 Удалить скан</button>
+                                    <button class="btn-delete-scan" id="btn-del-scan-${srv}" onclick="deleteWholeScan('${srv}')">Удалить скан</button>
                                 </div>
                                 <div class="tables-grid">
                                     <div>
@@ -2351,118 +2516,14 @@ DASHBOARD_HTML = """
             loadData();
         }
 
-        setInterval(loadData, 30000);
         setInterval(updateLotteryTimer, 1000);
+        setInterval(loadData, 30000);
 
         window.onload = function() {
-            updateLotteryTimer();
             checkAuth();
+            updateLotteryTimer();
         };
     </script>
-</head>
-<body>
-    <div id="login-screen" style="display: none;">
-        <div class="login-box">
-            <h2>Arizona RP Tracker</h2>
-            <input type="text" id="login-username" placeholder="Логин">
-            <input type="password" id="login-password" placeholder="Пароль">
-            <button onclick="handleLogin()">Войти</button>
-        </div>
-    </div>
-
-    <div id="main-dashboard" style="display: none;">
-        <div class="user-nav">
-            <span id="user-info"></span>
-            <button class="btn-logout" onclick="handleLogout()">Выйти</button>
-        </div>
-
-        <h1>Arizona RP — Мониторинг Слётов</h1>
-
-        <!-- Информационная плашка Лотерейных билетов -->
-        <div class="lottery-banner">
-            <div class="lottery-info">
-                <div class="lottery-icon">🎟️</div>
-                <div>
-                    <div class="lottery-title">Лотерейные билеты</div>
-                    <div class="lottery-sub">Слёт билетов: <b>Каждый день в 21:10 МСК</b></div>
-                </div>
-            </div>
-            <div class="lottery-countdown">
-                <div class="lottery-label">До слёта:</div>
-                <div class="lottery-timer" id="lottery-timer">00:00:00</div>
-            </div>
-        </div>
-
-        <div class="tabs">
-            <button class="tab-btn active" id="btn-tab-view" onclick="switchTab('view')">📊 Слёты (Подтвержденные)</button>
-            <button class="tab-btn" id="btn-tab-upcoming" onclick="switchTab('upcoming')">🚨 Ближайшие слёты</button>
-            <button class="tab-btn" id="btn-tab-manage" onclick="switchTab('manage')" style="display: none;">✏️ Управление сканами</button>
-            <button class="tab-btn" id="btn-tab-admin" onclick="switchTab('admin')" style="display: none;">👑 Админ-панель</button>
-        </div>
-
-        <!-- Таб: Просмотр (Подтвержденные) -->
-        <div class="tab-content active" id="tab-view">
-            <div class="filter-panel">
-                <div class="filter-group">
-                    <label for="filter-season">Сезон:</label>
-                    <select id="filter-season" class="filter-select" onchange="renderViewTab()">
-                        <option value="all">Все сезоны</option>
-                        <option value="1">📱 По инфе (1)</option>
-                        <option value="2">⌨ Скорострелы (2)</option>
-                        <option value="3">🏎️️ Автогонки (3)</option>
-                        <option value="4">✈️ По новому (4)</option>
-                        <option value="5">🏍 Мотогонки (5)</option>
-                    </select>
-                </div>
-                <div class="filter-group">
-                    <label for="filter-fav">Избранное:</label>
-                    <select id="filter-fav" class="filter-select" onchange="renderViewTab()">
-                        <option value="all">Все серверы</option>
-                        <option value="fav_only">Только избранные ⭐</option>
-                    </select>
-                </div>
-            </div>
-            <div class="servers-container" id="servers-view"></div>
-        </div>
-
-        <!-- Таб: Ближайшие слёты -->
-        <div class="tab-content" id="tab-upcoming">
-            <div class="upcoming-filters">
-                <button class="time-filter-btn active" id="btn-upcoming-1h" onclick="setUpcomingHoursFilter(1)">В этот час</button>
-                <button class="time-filter-btn" id="btn-upcoming-2h" onclick="setUpcomingHoursFilter(2)">Через 2 часа</button>
-                <button class="time-filter-btn" id="btn-upcoming-3h" onclick="setUpcomingHoursFilter(3)">Через 3 часа</button>
-            </div>
-            <div class="servers-container" id="servers-upcoming"></div>
-        </div>
-
-        <!-- Таб: Управление сканами -->
-        <div class="tab-content" id="tab-manage">
-            <div class="servers-container" id="servers-manage"></div>
-        </div>
-
-        <!-- Таб: Админ-панель -->
-        <div class="tab-content" id="tab-admin">
-            <div class="filter-panel" style="flex-direction: column; align-items: stretch; max-width: 1000px;">
-                <h3 style="margin-top: 0; color: var(--accent-orange);">Создать пользователя</h3>
-                <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 20px;">
-                    <input type="text" id="new-username" placeholder="Логин" class="filter-select" style="flex: 1;">
-                    <input type="password" id="new-password" placeholder="Пароль" class="filter-select" style="flex: 1;">
-                    <select id="new-role" class="filter-select">
-                        <option value="user">User</option>
-                        <option value="support">Support</option>
-                        <option value="admin">Admin</option>
-                    </select>
-                    <button class="btn-add" style="padding: 8px 16px; font-size: 0.85rem;" onclick="handleCreateUser()">Создать</button>
-                </div>
-
-                <h3 style="color: var(--accent-orange);">Список пользователей</h3>
-                <div id="admin-users-table" style="overflow-x: auto; margin-bottom: 20px;"></div>
-
-                <h3 style="color: var(--accent-orange);">Логи сканирований (сегодня)</h3>
-                <div id="admin-scan-logs-table" style="overflow-x: auto;"></div>
-            </div>
-        </div>
-    </div>
 </body>
 </html>
 """
