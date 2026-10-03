@@ -18,15 +18,15 @@ SECRET_KEY = os.getenv("SECRET_KEY", "usefguIHSFUSDFGUjhjfk88448")
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://slet_db_user:password@host/slet_db")
 DATA_FILE = "server_data.json"
 MSK_TZ = zoneinfo.ZoneInfo("Europe/Moscow")
-SESSION_EXPIRE_DAYS = 30  # Срок действия авторизации
+SESSION_EXPIRE_DAYS = 30  # Срок действия авторизации ("Запомнить устройство")
 
 BASE_WEEK_START = datetime(2026, 9, 21, 5, 0, 0, tzinfo=MSK_TZ)
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 db_pool: Optional[asyncpg.Pool] = None
 
+# Активные сессии в памяти: token -> username
 active_sessions: Dict[str, str] = {}
-action_logs_memory: List[dict] = []
 
 ALL_SERVERS = [
     "Phoenix", "Tucson", "Scottdale", "Chandler", "Brainburg",
@@ -38,14 +38,12 @@ ALL_SERVERS = [
     "Drake", "Space", "Home"
 ]
 
-server_taxes_data: Dict[str, dict] = {srv: {"house_tax": 0, "biz_tax": 0} for srv in ALL_SERVERS}
-
 SEASONS_MAP = {
     1: "📱 По инфе",
     2: "⌨ Скорострелы",
     3: "🏎️ Автогонки",
     4: "✈️ По новому",
-    5: "🏍 Мотогонки"
+    5: "🏍️️ Мотогонки"
 }
 
 BASE_SERVER_SEASONS = {
@@ -167,34 +165,6 @@ class ChangePasswordModel(BaseModel):
     user_id: int
     new_password: str
 
-class UpdateTaxModel(BaseModel):
-    server: str
-    house_tax: int
-    biz_tax: int
-
-# --- ЛОГИРОВАНИЕ ДЕЙСТВИЙ ---
-async def record_action_log(server: str, username: str, action: str):
-    now_msk = datetime.now(MSK_TZ)
-    time_str = now_msk.strftime("%H:%M:%S")
-    date_str = now_msk.strftime("%Y-%m-%d")
-    entry = {
-        "time": time_str,
-        "date": date_str,
-        "server": server,
-        "username": username,
-        "action": action
-    }
-    action_logs_memory.insert(0, entry)
-    if db_pool:
-        try:
-            async with db_pool.acquire() as conn:
-                await conn.execute(
-                    "INSERT INTO action_logs (server, username, action, created_at) VALUES ($1, $2, $3, $4)",
-                    server, username, action, now_msk.replace(tzinfo=None)
-                )
-        except Exception as e:
-            print(f"Ошибка логирования действия: {e}")
-
 # --- РАБОТА С БД POSTGRESQL И АВТОРИЗАЦИЕЙ ---
 async def init_db():
     if not db_pool:
@@ -221,24 +191,6 @@ async def init_db():
         """)
 
         await conn.execute("""
-            CREATE TABLE IF NOT EXISTS action_logs (
-                id SERIAL PRIMARY KEY,
-                server VARCHAR(50) NOT NULL,
-                username VARCHAR(50) NOT NULL,
-                action VARCHAR(255) NOT NULL,
-                created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL
-            );
-        """)
-
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS server_taxes (
-                server VARCHAR(50) PRIMARY KEY,
-                house_tax INT DEFAULT 0,
-                biz_tax INT DEFAULT 0
-            );
-        """)
-
-        await conn.execute("""
             CREATE TABLE IF NOT EXISTS server_scans_data (
                 server VARCHAR(50) PRIMARY KEY,
                 data JSONB NOT NULL
@@ -260,14 +212,6 @@ async def init_db():
             VALUES ('admin', $1, 'admin', TRUE)
             ON CONFLICT (username) DO NOTHING;
         """, hashed_pw)
-
-        tax_rows = await conn.fetch("SELECT server, house_tax, biz_tax FROM server_taxes;")
-        for r in tax_rows:
-            if r["server"] in server_taxes_data:
-                server_taxes_data[r["server"]] = {
-                    "house_tax": r["house_tax"],
-                    "biz_tax": r["biz_tax"]
-                }
 
 async def get_user_by_username(username: str):
     if not db_pool:
@@ -437,8 +381,9 @@ def get_latest_confirmed_scan(scans: List[dict]) -> Optional[dict]:
     if confirmed_scans:
         return confirmed_scans[-1]
         
-    return None
+    return scans[-1]
 
+# --- АЛГОРИТМ УМНОГО СОПОСТАВЛЕНИЯ ---
 def find_pairs_with_offset(prev_items: List[dict], curr_entries: List[PropertyEntry], prop_type: str):
     valid_diffs = {0, 1, 2} if prop_type == "house" else {0, 1, 2, 4}
     matches = {}
@@ -484,20 +429,65 @@ def find_pairs_with_offset(prev_items: List[dict], curr_entries: List[PropertyEn
 
     return matches
 
+# --- ЛОГИКА PAYDAY ---
 async def process_hourly_payday():
     now_msk = datetime.now(MSK_TZ)
-    if now_msk.hour == 0:
-        action_logs_memory.clear()
-        if db_pool:
-            try:
-                async with db_pool.acquire() as conn:
-                    await conn.execute("TRUNCATE TABLE scan_logs;")
-                    await conn.execute("TRUNCATE TABLE action_logs;")
-            except Exception as e:
-                print(f"Ошибка очистки логов: {e}")
+    is_restart_hour = (now_msk.hour == 5)
+
+    if now_msk.hour == 0 and db_pool:
+        try:
+            async with db_pool.acquire() as conn:
+                await conn.execute("TRUNCATE TABLE scan_logs;")
+                print(f"[{now_msk.strftime('%Y-%m-%d %H:%M:%S')}] Логи сканов успешно очищены (00:00 МСК).")
+        except Exception as e:
+            print(f"Ошибка очистки логов сканирования: {e}")
 
     async with data_lock:
         check_and_update_outdated_scans()
+        print(f"[{now_msk.strftime('%Y-%m-%d %H:%M:%S')}] Выполнение списания PayDay (Рестарт: {is_restart_hour})...")
+        for srv, data in server_data.items():
+            scans = data.get("scans", [])
+            if not scans:
+                continue
+            
+            latest_scan = get_latest_confirmed_scan(scans)
+            if not latest_scan:
+                continue
+
+            updated_houses = []
+            for h in latest_scan.get("houses", []):
+                if h.get("isPendingPair", False):
+                    updated_houses.append(h)
+                    continue
+
+                st = h.get("status", "insured")
+                if not is_restart_hour and st != "frozen":
+                    decrement = 1 if st == "insured" else 2
+                    h["pd"] -= decrement
+                
+                drop_limit = get_drop_limit(srv, "house", st)
+                if is_restart_hour or h["pd"] >= drop_limit:
+                    updated_houses.append(h)
+
+            latest_scan["houses"] = sorted(updated_houses, key=lambda x: x["pos"])
+
+            updated_biz = []
+            for b in latest_scan.get("businesses", []):
+                if b.get("isPendingPair", False):
+                    updated_biz.append(b)
+                    continue
+
+                st = b.get("status", "insured")
+                if not is_restart_hour and st != "frozen":
+                    decrement = 1 if st == "insured" else (2 if st == "uninsured" else 4)
+                    b["pd"] -= decrement
+                
+                drop_limit = get_drop_limit(srv, "biz", st)
+                if is_restart_hour or b["pd"] >= drop_limit:
+                    updated_biz.append(b)
+
+            latest_scan["businesses"] = sorted(updated_biz, key=lambda x: x["pos"])
+
         await save_data_to_file_async()
 
 async def hourly_loop():
@@ -520,7 +510,7 @@ async def lifespan(app: FastAPI):
         server_data.update(loaded_db_data)
         check_and_update_outdated_scans()
     except Exception as e:
-        print(f"Ошибка подключения к БД: {e}")
+        print(f"Ошибка подключения к PostgreSQL: {e}")
 
     task = asyncio.create_task(hourly_loop())
     yield
@@ -540,34 +530,40 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- ЭНДПОИНТЫ ---
+# --- ЭНДПОИНТЫ АВТОРИЗАЦИИ И АДМИНКИ ---
 
 @app.post("/api/auth/login")
 async def login(data: LoginModel, response: Response):
     if not db_pool:
-        raise HTTPException(status_code=503, detail="БД недоступна")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="База данных недоступна. Попробуйте позже."
+        )
 
     user = await get_user_by_username(data.username)
     if not user or not pwd_context.verify(data.password, user["password_hash"]):
         raise HTTPException(status_code=400, detail="Неверный логин или пароль")
     
     if not user["is_allowed"]:
-        raise HTTPException(status_code=403, detail="Доступ заблокирован")
+        raise HTTPException(status_code=403, detail="Ваш доступ к сайту заблокирован")
 
     token = os.urandom(24).hex()
     active_sessions[token] = user["username"]
 
     expires_at_utc = datetime.now(timezone.utc) + timedelta(days=SESSION_EXPIRE_DAYS)
+    expires_at_db = expires_at_utc.replace(tzinfo=None)
+
     async with db_pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO user_sessions (token, username, expires_at) VALUES ($1, $2, $3)",
-            token, user["username"], expires_at_utc.replace(tzinfo=None)
+            token, user["username"], expires_at_db
         )
     
+    max_age = SESSION_EXPIRE_DAYS * 24 * 3600
     response.set_cookie(
         key="session_token",
         value=token,
-        max_age=SESSION_EXPIRE_DAYS * 24 * 3600,
+        max_age=max_age,
         expires=expires_at_utc,
         httponly=True,
         samesite="lax"
@@ -601,7 +597,11 @@ async def get_me(request: Request):
     if not user or not user["is_allowed"]:
         return {"authenticated": False}
 
-    return {"authenticated": True, "username": user["username"], "role": user["role"]}
+    return {
+        "authenticated": True,
+        "username": user["username"],
+        "role": user["role"]
+    }
 
 @app.get("/api/admin/users")
 async def get_users(username: str = Depends(verify_admin)):
@@ -616,53 +616,32 @@ async def get_scan_logs(username: str = Depends(verify_admin)):
     if not db_pool:
         return []
     async with db_pool.acquire() as conn:
-        rows = await conn.fetch("SELECT id, server, scanner, created_at FROM scan_logs ORDER BY created_at DESC LIMIT 200")
-        res = []
-        for r in rows:
-            d = dict(r)
-            if d["created_at"]:
-                d["created_at"] = d["created_at"].strftime("%H:%M:%S")
-            res.append(d)
-        return res
-
-@app.get("/api/action_logs")
-async def get_action_logs(username: str = Depends(verify_auth)):
-    now_msk = datetime.now(MSK_TZ)
-    today_start = now_msk.replace(hour=0, minute=0, second=0, microsecond=0).replace(tzinfo=None)
-    if db_pool:
-        try:
-            async with db_pool.acquire() as conn:
-                rows = await conn.fetch(
-                    "SELECT server, username, action, created_at FROM action_logs WHERE created_at >= $1 ORDER BY created_at DESC LIMIT 200",
-                    today_start
-                )
-                return [{
-                    "time": row["created_at"].strftime("%H:%M:%S") if row["created_at"] else "—",
-                    "server": row["server"],
-                    "username": row["username"],
-                    "action": row["action"]
-                } for row in rows]
-        except Exception:
-            pass
-    
-    today_str = now_msk.strftime("%Y-%m-%d")
-    return [log for log in action_logs_memory if log.get("date") == today_str]
+        rows = await conn.fetch("""
+            SELECT id, server, scanner, created_at 
+            FROM scan_logs 
+            ORDER BY created_at DESC 
+            LIMIT 200
+        """)
+        result = []
+        for row in rows:
+            r = dict(row)
+            if r["created_at"]:
+                r["created_at"] = r["created_at"].strftime("%H:%M:%S")
+            result.append(r)
+        return result
 
 @app.post("/api/admin/toggle_access")
 async def toggle_access(data: ToggleAccessModel, username: str = Depends(verify_admin)):
     if not db_pool:
-        raise HTTPException(status_code=503, detail="БД недоступна")
+        raise HTTPException(status_code=53, detail="БД недоступна")
     async with db_pool.acquire() as conn:
-        target = await conn.fetchrow("SELECT username FROM users WHERE id = $1", data.user_id)
-        if target and target["username"] == "admin":
-            raise HTTPException(status_code=400, detail="Нельзя изменять доступ администратора admin")
         await conn.execute("UPDATE users SET is_allowed = $1 WHERE id = $2", data.is_allowed, data.user_id)
     return {"status": "success"}
 
 @app.post("/api/admin/create_user")
 async def create_user(data: CreateUserModel, username: str = Depends(verify_admin)):
     if not db_pool:
-        raise HTTPException(status_code=503, detail="БД недоступна")
+        raise HTTPException(status_code=53, detail="БД недоступна")
     role = data.role if data.role in ["user", "support", "admin"] else "user"
     hashed_pw = pwd_context.hash(data.password)
     async with db_pool.acquire() as conn:
@@ -673,18 +652,19 @@ async def create_user(data: CreateUserModel, username: str = Depends(verify_admi
             )
         except asyncpg.UniqueViolationError:
             raise HTTPException(status_code=400, detail="Пользователь уже существует")
+
     return {"status": "success"}
 
 @app.post("/api/admin/delete_user")
 async def delete_user(data: DeleteUserModel, current_admin: str = Depends(verify_admin)):
     if not db_pool:
-        raise HTTPException(status_code=503, detail="БД недоступна")
+        raise HTTPException(status_code=53, detail="БД недоступна")
     async with db_pool.acquire() as conn:
         target = await conn.fetchrow("SELECT username FROM users WHERE id = $1", data.user_id)
         if not target:
             raise HTTPException(status_code=404, detail="Пользователь не найден")
-        if target["username"] in [current_admin, "admin"]:
-            raise HTTPException(status_code=400, detail="Нельзя удалить главный аккаунт admin")
+        if target["username"] == current_admin:
+            raise HTTPException(status_code=400, detail="Нельзя удалить собственный аккаунт")
         
         await conn.execute("DELETE FROM users WHERE id = $1", data.user_id)
         await conn.execute("DELETE FROM user_sessions WHERE username = $1", target["username"])
@@ -698,7 +678,7 @@ async def delete_user(data: DeleteUserModel, current_admin: str = Depends(verify
 @app.post("/api/admin/update_role")
 async def update_role(data: UpdateRoleModel, current_admin: str = Depends(verify_admin)):
     if not db_pool:
-        raise HTTPException(status_code=503, detail="БД недоступна")
+        raise HTTPException(status_code=53, detail="БД недоступна")
     if data.role not in ["user", "support", "admin"]:
         raise HTTPException(status_code=400, detail="Недопустимая роль")
         
@@ -706,8 +686,8 @@ async def update_role(data: UpdateRoleModel, current_admin: str = Depends(verify
         target = await conn.fetchrow("SELECT username FROM users WHERE id = $1", data.user_id)
         if not target:
             raise HTTPException(status_code=404, detail="Пользователь не найден")
-        if target["username"] == "admin":
-            raise HTTPException(status_code=400, detail="Нельзя менять роль супер-администратору")
+        if target["username"] == current_admin:
+            raise HTTPException(status_code=400, detail="Нельзя изменить роль самому себе")
 
         await conn.execute("UPDATE users SET role = $1 WHERE id = $2", data.role, data.user_id)
 
@@ -716,11 +696,12 @@ async def update_role(data: UpdateRoleModel, current_admin: str = Depends(verify
 @app.post("/api/admin/change_password")
 async def change_password(data: ChangePasswordModel, current_admin: str = Depends(verify_admin)):
     if not db_pool:
-        raise HTTPException(status_code=503, detail="БД недоступна")
+        raise HTTPException(status_code=53, detail="БД недоступна")
     if not data.new_password or len(data.new_password.strip()) < 4:
-        raise HTTPException(status_code=400, detail="Пароль слишком короткий")
+        raise HTTPException(status_code=400, detail="Пароль слишком короткий (минимум 4 символа)")
 
     hashed_pw = pwd_context.hash(data.new_password)
+    
     async with db_pool.acquire() as conn:
         target = await conn.fetchrow("SELECT username FROM users WHERE id = $1", data.user_id)
         if not target:
@@ -730,35 +711,7 @@ async def change_password(data: ChangePasswordModel, current_admin: str = Depend
 
     return {"status": "success"}
 
-@app.get("/api/taxes")
-async def get_taxes(username: str = Depends(verify_auth)):
-    return server_taxes_data
-
-@app.post("/api/taxes/update")
-async def update_tax(data: UpdateTaxModel, username: str = Depends(verify_admin)):
-    if data.server not in ALL_SERVERS:
-        raise HTTPException(status_code=400, detail="Некорректный сервер")
-    
-    server_taxes_data[data.server] = {
-        "house_tax": max(0, data.house_tax),
-        "biz_tax": max(0, data.biz_tax)
-    }
-
-    if db_pool:
-        try:
-            async with db_pool.acquire() as conn:
-                await conn.execute("""
-                    INSERT INTO server_taxes (server, house_tax, biz_tax)
-                    VALUES ($1, $2, $3)
-                    ON CONFLICT (server) DO UPDATE SET house_tax = EXCLUDED.house_tax, biz_tax = EXCLUDED.biz_tax;
-                """, data.server, max(0, data.house_tax), max(0, data.biz_tax))
-        except Exception as e:
-            print(f"Ошибка сохранения налогов: {e}")
-
-    await record_action_log(data.server, username, f"Обновление налогов: Дом={data.house_tax}$, Бизнес={data.biz_tax}$")
-    return {"status": "success"}
-
-# --- ЭНДПОИНТЫ МОНИТОРИНГА ---
+# --- ЭНДПОИНТЫ API МОНИТОРИНГА ---
 
 @app.get("/", response_class=HTMLResponse)
 async def get_dashboard():
@@ -767,7 +720,10 @@ async def get_dashboard():
 @app.post("/api/paydays")
 async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header(None)):
     if x_secret_key != SECRET_KEY:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid Secret Key")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Invalid Secret Key"
+        )
 
     srv = payload.server
     scanner_name = payload.scanner or "unknown"
@@ -843,7 +799,6 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
                     "pos": item.pos,
                     "status": final_status,
                     "isPendingPair": False,
-                    "createdAt": now_msk.strftime("%Y-%m-%d %H:%M:%S"),
                     "updatedAt": now_msk.strftime("%H:%M:%S")
                 }
             elif matched_existing and not matched_existing.get("isPendingPair", True):
@@ -852,20 +807,30 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
                     "pd": item.pd,
                     "propId": item.propId,
                     "pos": item.pos,
-                    "status": matched_existing.get("status", "new"),
+                    "status": matched_existing.get("status", "insured"),
                     "isPendingPair": False,
-                    "createdAt": matched_existing.get("createdAt", now_msk.strftime("%Y-%m-%d %H:%M:%S")),
                     "updatedAt": now_msk.strftime("%H:%M:%S")
                 }
             else:
+                saved_status = "insured"
+                if matched_existing and "status" in matched_existing:
+                    saved_status = matched_existing["status"]
+                elif prev_scan:
+                    matched_prev = None
+                    if item.propId is not None:
+                        matched_prev = next((ph for ph in prev_houses if ph.get("propId") == item.propId), None)
+                    if not matched_prev and idx < len(prev_houses):
+                        matched_prev = prev_houses[idx]
+                    if matched_prev and "status" in matched_prev:
+                        saved_status = matched_prev["status"]
+
                 record = {
                     "basePd": item.pd,
                     "pd": item.pd,
                     "propId": item.propId,
                     "pos": item.pos,
-                    "status": "new",
+                    "status": saved_status,
                     "isPendingPair": True,
-                    "createdAt": now_msk.strftime("%Y-%m-%d %H:%M:%S"),
                     "updatedAt": now_msk.strftime("%H:%M:%S")
                 }
             houses.append(record)
@@ -895,7 +860,6 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
                     "pos": item.pos,
                     "status": final_status,
                     "isPendingPair": False,
-                    "createdAt": now_msk.strftime("%Y-%m-%d %H:%M:%S"),
                     "updatedAt": now_msk.strftime("%H:%M:%S")
                 }
             elif matched_existing and not matched_existing.get("isPendingPair", True):
@@ -904,20 +868,30 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
                     "pd": item.pd,
                     "propId": item.propId,
                     "pos": item.pos,
-                    "status": matched_existing.get("status", "new"),
+                    "status": matched_existing.get("status", "insured"),
                     "isPendingPair": False,
-                    "createdAt": matched_existing.get("createdAt", now_msk.strftime("%Y-%m-%d %H:%M:%S")),
                     "updatedAt": now_msk.strftime("%H:%M:%S")
                 }
             else:
+                saved_status = "insured"
+                if matched_existing and "status" in matched_existing:
+                    saved_status = matched_existing["status"]
+                elif prev_scan:
+                    matched_prev = None
+                    if item.propId is not None:
+                        matched_prev = next((pb for pb in prev_biz if pb.get("propId") == item.propId), None)
+                    if not matched_prev and idx < len(prev_biz):
+                        matched_prev = prev_biz[idx]
+                    if matched_prev and "status" in matched_prev:
+                        saved_status = matched_prev["status"]
+
                 record = {
                     "basePd": item.pd,
                     "pd": item.pd,
                     "propId": item.propId,
                     "pos": item.pos,
-                    "status": "new",
+                    "status": saved_status,
                     "isPendingPair": True,
-                    "createdAt": now_msk.strftime("%Y-%m-%d %H:%M:%S"),
                     "updatedAt": now_msk.strftime("%H:%M:%S")
                 }
             businesses.append(record)
@@ -951,6 +925,11 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
                 existing_scan["hasPair"] = True
                 existing_scan["isCurrentPair"] = True
                 existing_scan["isOutdated"] = False
+            else:
+                existing_scan["isConfirmed"] = existing_scan.get("isConfirmed", False)
+                existing_scan["hasPair"] = existing_scan.get("hasPair", False)
+                existing_scan["isCurrentPair"] = existing_scan.get("isCurrentPair", False)
+                existing_scan["isOutdated"] = existing_scan.get("isOutdated", False)
         else:
             new_scan = {
                 "scanId": scan_id,
@@ -975,49 +954,16 @@ async def receive_paydays(payload: Payload, x_secret_key: Optional[str] = Header
 @app.post("/api/update_status")
 async def update_status(data: UpdateStatusModel, username: str = Depends(verify_editor)):
     srv = data.server
-    now_msk = datetime.now(MSK_TZ)
     async with data_lock:
         if srv in server_data:
             for scan in server_data[srv].get("scans", []):
                 if scan["scanId"] == data.scanId:
                     target_key = "houses" if data.propType in ["house", "houses"] else "businesses"
-                    
-                    if target_key == "houses" and data.status == "no_activity":
-                        raise HTTPException(status_code=400, detail="Статус 'Без занятости' недоступен для домов")
-
                     for item in scan[target_key]:
                         if item["pos"] == data.pos:
-                            prev_status = item.get("status", "new")
-                            
-                            if prev_status in ["new", "новый"]:
-                                created_str = item.get("createdAt") or scan.get("scanTime")
-                                if created_str:
-                                    try:
-                                        created_dt = datetime.strptime(created_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=MSK_TZ)
-                                        c_hour_start = created_dt.replace(minute=0, second=0, microsecond=0)
-                                        n_hour_start = now_msk.replace(minute=0, second=0, microsecond=0)
-                                        hours_passed = max(0, int((n_hour_start - c_hour_start).total_seconds() / 3600))
-                                        
-                                        if hours_passed >= 1:
-                                            rate = 1
-                                            if data.status == "uninsured": rate = 2
-                                            elif data.status == "no_activity": rate = 4
-                                            elif data.status == "frozen": rate = 0
-                                            
-                                            item["pd"] = max(0, item["pd"] - (hours_passed * rate))
-                                    except Exception as e:
-                                        print(f"Ошибка вычисления разницы часов: {e}")
-
                             item["status"] = data.status
                             item["isPendingPair"] = False
                             await save_data_to_file_async()
-                            
-                            p_title = "Дом" if target_key == "houses" else "Бизнес"
-                            prop_id_str = f" #{item.get('propId')}" if item.get("propId") else ""
-                            await record_action_log(
-                                srv, username,
-                                f"Смена статуса на '{data.status}' для {p_title}{prop_id_str} (№{data.pos})"
-                            )
                             return {"status": "success"}
     raise HTTPException(status_code=404, detail="Scan or Item not found")
 
@@ -1029,11 +975,8 @@ async def delete_item(data: DeleteItemModel, username: str = Depends(verify_edit
             for scan in server_data[srv].get("scans", []):
                 if scan["scanId"] == data.scanId:
                     target_key = "houses" if data.propType in ["house", "houses"] else "businesses"
-                    p_title = "дом" if target_key == "houses" else "бизнес"
                     scan[target_key] = [item for item in scan[target_key] if item["pos"] != data.pos]
                     await save_data_to_file_async()
-                    
-                    await record_action_log(srv, username, f"Удаление {p_title}а (№{data.pos})")
                     return {"status": "success"}
     raise HTTPException(status_code=404, detail="Server or Scan not found")
 
@@ -1046,14 +989,12 @@ async def delete_scan(data: DeleteScanModel, username: str = Depends(verify_edit
                 s for s in server_data[srv]["scans"] if s["scanId"] != data.scanId
             ]
             await save_data_to_file_async()
-            await record_action_log(srv, username, f"Удаление скана ({data.scanId})")
             return {"status": "success"}
     raise HTTPException(status_code=404, detail="Scan not found")
 
 @app.post("/api/add_item")
 async def add_item(data: AddItemModel, username: str = Depends(verify_editor)):
     srv = data.server
-    now_msk = datetime.now(MSK_TZ)
     async with data_lock:
         if srv in server_data:
             for scan in server_data[srv].get("scans", []):
@@ -1069,20 +1010,12 @@ async def add_item(data: AddItemModel, username: str = Depends(verify_editor)):
                         "pos": new_pos,
                         "status": "insured",
                         "isPendingPair": False,
-                        "createdAt": now_msk.strftime("%Y-%m-%d %H:%M:%S"),
-                        "updatedAt": now_msk.strftime("%H:%M:%S")
+                        "updatedAt": datetime.now(MSK_TZ).strftime("%H:%M:%S")
                     }
                     
                     scan[target_key].append(new_record)
                     scan[target_key] = sorted(scan[target_key], key=lambda x: x["pos"])
                     await save_data_to_file_async()
-                    
-                    p_title = "дома" if target_key == "houses" else "бизнеса"
-                    prop_str = f" #{data.propId}" if data.propId else ""
-                    await record_action_log(
-                        srv, username,
-                        f"Добавление {p_title}{prop_str} (PD: {data.pd})"
-                    )
                     return {"status": "success"}
     raise HTTPException(status_code=404, detail="Server or Scan not found")
 
@@ -1106,7 +1039,7 @@ async def get_paydays(username: str = Depends(verify_auth)):
             }
         return res
 
-# --- ДАШБОРД (FRONTEND) ---
+# --- ДАШБОРД ---
 DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html lang="ru">
@@ -1116,29 +1049,28 @@ DASHBOARD_HTML = """
     <title>Arizona RP — Мониторинг Слётов</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         :root {
-            --bg-color: #07090e;
-            --card-bg: rgba(18, 22, 33, 0.85);
-            --card-border: rgba(255, 255, 255, 0.08);
+            --bg-color: #0b0e14;
+            --card-bg: #141822;
+            --card-border: #202636;
             --accent-orange: #ff9800;
-            --accent-orange-glow: rgba(255, 152, 0, 0.35);
-            --text-main: #f3f6fc;
-            --text-muted: #8e9bb0;
-            --table-header: rgba(255, 255, 255, 0.03);
-            --table-row-hover: rgba(255, 255, 255, 0.05);
+            --accent-orange-glow: rgba(255, 152, 0, 0.25);
+            --accent-blue: #00b0ff;
+            --accent-green: #00e676;
+            --accent-red: #ff3d00;
+            --text-main: #f0f4f8;
+            --text-muted: #8a99ad;
+            --table-header: #1a202c;
+            --table-row-hover: #1c2333;
         }
 
         * { box-sizing: border-box; }
 
         body { 
-            font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
             background-color: var(--bg-color); 
-            background-image: 
-                radial-gradient(circle at 50% 0%, rgba(255, 152, 0, 0.08), transparent 45%),
-                radial-gradient(circle at 10% 90%, rgba(0, 176, 255, 0.05), transparent 35%);
-            background-attachment: fixed;
             color: var(--text-main); 
             margin: 0; 
             padding: 20px 15px; 
@@ -1147,28 +1079,28 @@ DASHBOARD_HTML = """
 
         ::-webkit-scrollbar { width: 8px; height: 8px; }
         ::-webkit-scrollbar-track { background: var(--bg-color); }
-        ::-webkit-scrollbar-thumb { background: #202838; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb { background: #263043; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #3b4962; }
 
         h1 { 
             text-align: center; 
             color: #ffffff; 
-            font-size: 1.9rem;
+            font-size: 1.8rem;
             font-weight: 800;
-            letter-spacing: 0.8px;
+            letter-spacing: 0.5px;
             margin: 10px 0 25px 0;
             text-transform: uppercase;
-            background: linear-gradient(135deg, #ffffff 20%, #ffb74d 70%, var(--accent-orange) 100%);
+            background: linear-gradient(135deg, #fff 30%, var(--accent-orange));
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
-            text-shadow: 0 4px 20px rgba(255, 152, 0, 0.2);
         }
 
+        /* Баннер Лотереи */
         .lottery-banner {
-            background: linear-gradient(135deg, rgba(255, 152, 0, 0.12), rgba(156, 39, 176, 0.18));
-            border: 1px solid rgba(255, 152, 0, 0.35);
-            backdrop-filter: blur(12px);
-            border-radius: 14px;
-            padding: 14px 22px;
+            background: linear-gradient(135deg, rgba(255, 152, 0, 0.15), rgba(156, 39, 176, 0.2));
+            border: 1px solid rgba(255, 152, 0, 0.4);
+            border-radius: 12px;
+            padding: 14px 20px;
             margin: 0 auto 20px auto;
             max-width: 1600px;
             display: flex;
@@ -1176,62 +1108,106 @@ DASHBOARD_HTML = """
             align-items: center;
             flex-wrap: wrap;
             gap: 15px;
-            box-shadow: 0 8px 25px rgba(0,0,0,0.35);
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
         }
-        .lottery-info { display: flex; align-items: center; gap: 14px; }
-        .lottery-icon { font-size: 2.2rem; line-height: 1; }
-        .lottery-title { font-size: 1.05rem; font-weight: 800; color: #ffca28; text-transform: uppercase; }
-        .lottery-sub { font-size: 0.85rem; color: var(--text-muted); margin-top: 2px; }
-        .lottery-sub b { color: #ffffff; }
+        .lottery-info {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+        .lottery-icon {
+            font-size: 2.2rem;
+            line-height: 1;
+        }
+        .lottery-title {
+            font-size: 1.05rem;
+            font-weight: 800;
+            color: #ffb74d;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .lottery-sub {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            margin-top: 2px;
+        }
+        .lottery-sub b {
+            color: #ffffff;
+        }
         .lottery-countdown {
             display: flex;
             align-items: center;
             gap: 10px;
-            background: rgba(10, 13, 20, 0.7);
-            padding: 8px 18px;
-            border-radius: 10px;
-            border: 1px solid rgba(0, 230, 118, 0.3);
+            background: rgba(15, 18, 26, 0.7);
+            padding: 8px 16px;
+            border-radius: 8px;
+            border: 1px solid var(--card-border);
         }
-        .lottery-label { font-size: 0.85rem; font-weight: 700; color: var(--text-muted); }
-        .lottery-timer { font-size: 1.25rem; font-weight: 800; color: #00e676; font-family: monospace; }
+        .lottery-label {
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: var(--text-muted);
+        }
+        .lottery-timer {
+            font-size: 1.25rem;
+            font-weight: 800;
+            color: #00e676;
+            font-family: monospace;
+            letter-spacing: 1px;
+        }
 
+        /* Auth Screen */
         .login-box { 
-            max-width: 400px; 
+            max-width: 380px; 
             margin: 80px auto; 
             background: var(--card-bg); 
-            backdrop-filter: blur(16px);
-            padding: 38px 32px; 
-            border-radius: 16px; 
+            padding: 35px 30px; 
+            border-radius: 12px; 
             border: 1px solid var(--card-border); 
             text-align: center; 
-            box-shadow: 0 12px 40px rgba(0,0,0,0.6);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
         }
-        .login-box h2 { margin-top: 0; margin-bottom: 22px; color: var(--text-main); font-size: 1.45rem; font-weight: 800; }
+        .login-box h2 {
+            margin-top: 0;
+            margin-bottom: 20px;
+            color: var(--text-main);
+            font-size: 1.4rem;
+        }
         .login-box input { 
             width: 100%; 
-            padding: 13px; 
+            padding: 12px; 
             margin: 8px 0; 
-            background: rgba(10, 13, 20, 0.8); 
-            border: 1px solid rgba(255,255,255,0.12); 
+            background: #0f121a; 
+            border: 1px solid #263043; 
             color: #fff; 
-            border-radius: 8px; 
+            border-radius: 6px; 
             font-size: 0.95rem;
             outline: none;
+            transition: 0.2s;
         }
-        .login-box input:focus { border-color: var(--accent-orange); }
+        .login-box input:focus {
+            border-color: var(--accent-orange);
+            box-shadow: 0 0 8px var(--accent-orange-glow);
+        }
         .login-box button { 
             width: 100%; 
-            padding: 13px; 
-            margin-top: 18px;
+            padding: 12px; 
+            margin-top: 15px;
             background: linear-gradient(135deg, #ff9800, #f57c00); 
             border: none; 
-            font-weight: 800; 
+            font-weight: 700; 
             cursor: pointer; 
-            border-radius: 8px; 
-            color: #0b0d14; 
+            border-radius: 6px; 
+            color: #121212; 
             font-size: 1rem;
+            transition: transform 0.1s, box-shadow 0.2s;
+        }
+        .login-box button:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 15px var(--accent-orange-glow);
         }
 
+        /* Top Navigation */
         .user-nav { 
             display: flex; 
             justify-content: space-between; 
@@ -1239,617 +1215,328 @@ DASHBOARD_HTML = """
             max-width: 1600px; 
             margin: 0 auto 20px auto; 
             background: var(--card-bg);
-            padding: 12px 22px;
-            border-radius: 12px;
+            padding: 12px 20px;
+            border-radius: 10px;
             border: 1px solid var(--card-border);
         }
-        #user-info { font-weight: 700; font-size: 0.92rem; color: var(--text-muted); }
+        #user-info { font-weight: 600; font-size: 0.95rem; color: var(--text-muted); }
         .btn-logout { 
-            background: rgba(255, 45, 85, 0.12); 
-            color: #ff5252; 
-            border: 1px solid rgba(255, 45, 85, 0.3); 
-            padding: 8px 18px; 
-            border-radius: 8px; 
+            background: rgba(229, 57, 53, 0.15); 
+            color: #ef5350; 
+            border: 1px solid rgba(229, 57, 53, 0.3); 
+            padding: 7px 16px; 
+            border-radius: 6px; 
             cursor: pointer; 
-            font-weight: 700;
+            font-weight: 600;
+            transition: 0.2s;
         }
-        .btn-logout:hover { background: #ff2d55; color: #fff; }
+        .btn-logout:hover {
+            background: #e53935;
+            color: #fff;
+        }
 
-        .tabs { display: flex; justify-content: center; gap: 10px; margin-bottom: 25px; flex-wrap: wrap; }
+        /* Tabs Navigation */
+        .tabs { 
+            display: flex; 
+            justify-content: center; 
+            gap: 10px; 
+            margin-bottom: 25px; 
+            flex-wrap: wrap;
+        }
         .tab-btn { 
             background-color: var(--card-bg); 
             color: var(--text-muted); 
             border: 1px solid var(--card-border); 
-            padding: 11px 24px; 
-            font-size: 0.92rem; 
-            font-weight: 800; 
-            border-radius: 10px; 
+            padding: 10px 22px; 
+            font-size: 0.95rem; 
+            font-weight: 700; 
+            border-radius: 8px; 
             cursor: pointer; 
-            transition: all 0.2s; 
+            transition: all 0.2s ease; 
         }
         .tab-btn.active { 
             background: linear-gradient(135deg, #ff9800, #f57c00); 
-            color: #0b0d14; 
+            color: #121212; 
             border-color: #ff9800; 
-            box-shadow: 0 4px 18px var(--accent-orange-glow);
+            box-shadow: 0 4px 15px var(--accent-orange-glow);
+        }
+        .tab-btn:hover:not(.active) { 
+            background-color: #1c2333; 
+            color: #fff; 
+            border-color: #2e384e;
         }
 
         .tab-content { display: none; }
         .tab-content.active { display: block; }
 
+        /* Filter Controls */
         .upcoming-filters { display: flex; justify-content: center; gap: 10px; margin-bottom: 20px; }
         .time-filter-btn { 
             background-color: var(--card-bg); 
             color: var(--text-muted); 
             border: 1px solid var(--card-border); 
-            padding: 8px 20px; 
+            padding: 8px 18px; 
             font-size: 0.85rem; 
-            font-weight: 800; 
+            font-weight: 700; 
             border-radius: 20px; 
             cursor: pointer; 
-            transition: all 0.2s; 
+            transition: 0.2s; 
         }
         .time-filter-btn.active { 
-            background: linear-gradient(135deg, #e53935, #d32f2f); 
+            background-color: #e53935; 
             color: #ffffff; 
             border-color: #ef5350; 
-            box-shadow: 0 0 14px rgba(229, 57, 53, 0.5); 
+            box-shadow: 0 0 12px rgba(229, 57, 53, 0.4); 
         }
 
         .filter-panel { 
             background: var(--card-bg); 
             border: 1px solid var(--card-border); 
-            border-radius: 12px; 
-            padding: 14px 22px; 
+            border-radius: 10px; 
+            padding: 14px 20px; 
             margin: 0 auto 20px auto; 
             max-width: 1600px;
             display: flex; 
             flex-wrap: wrap; 
-            gap: 22px; 
+            gap: 20px; 
             align-items: center; 
             justify-content: center; 
         }
         .filter-group { display: flex; align-items: center; gap: 10px; }
-        .filter-group label { font-size: 0.85rem; color: var(--accent-orange); font-weight: 800; text-transform: uppercase; }
+        .filter-group label { font-size: 0.85rem; color: var(--accent-orange); font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
         .filter-select { 
-            background: rgba(10, 13, 20, 0.8); 
+            background: #0f121a; 
             color: #fff; 
-            border: 1px solid rgba(255,255,255,0.12); 
-            padding: 8px 14px; 
-            border-radius: 8px; 
+            border: 1px solid #263043; 
+            padding: 7px 12px; 
+            border-radius: 6px; 
             font-size: 0.85rem; 
-            font-weight: 700;
+            font-weight: 600;
             outline: none;
+            cursor: pointer;
         }
+        .fav-btn { 
+            cursor: pointer; 
+            font-size: 1.1rem; 
+            user-select: none; 
+            margin-right: 6px; 
+            transition: transform 0.15s ease; 
+            display: inline-block;
+        }
+        .fav-btn:hover { transform: scale(1.3); }
 
+        /* GRID FOR SERVERS */
         .servers-container { 
             display: grid; 
-            grid-template-columns: repeat(3, 1fr); 
-            gap: 18px; 
+            grid-template-columns: repeat(1, 1fr); 
+            gap: 16px; 
             max-width: 1600px; 
             margin: 0 auto; 
-            align-items: start;
         }
 
-        @media (max-width: 1100px) { .servers-container { grid-template-columns: repeat(2, 1fr); } }
-        @media (max-width: 650px) { .servers-container { grid-template-columns: repeat(1, 1fr); } }
+        @media (min-width: 600px) {
+            .servers-container { grid-template-columns: repeat(2, 1fr); }
+        }
+        @media (min-width: 1100px) {
+            .servers-container { grid-template-columns: repeat(3, 1fr); }
+        }
+        @media (min-width: 1500px) {
+            .servers-container { grid-template-columns: repeat(4, 1fr); }
+        }
 
+        /* Server Card Styling */
         .server-card { 
             background-color: var(--card-bg); 
             border: 1px solid var(--card-border); 
-            border-radius: 14px; 
-            padding: 16px; 
-            box-shadow: 0 6px 20px rgba(0,0,0,0.3); 
+            border-radius: 10px; 
+            padding: 14px; 
+            box-shadow: 0 4px 12px rgba(0,0,0,0.25); 
             display: flex;
             flex-direction: column;
-            transition: all 0.25s ease;
+            transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+        }
+        .server-card:hover {
+            border-color: #2e384e;
+            box-shadow: 0 6px 18px rgba(0,0,0,0.4);
         }
         
         .server-header { 
-            border-bottom: 1px solid rgba(255, 255, 255, 0.08); 
-            padding-bottom: 10px; 
-            margin-bottom: 12px; 
+            border-bottom: 1px solid #1f2736; 
+            padding-bottom: 8px; 
+            margin-bottom: 10px; 
         }
         .server-title { 
-            font-size: 1.08rem; 
-            font-weight: 800; 
+            font-size: 1.05rem; 
+            font-weight: 700; 
             color: #ffffff; 
             display: flex; 
             justify-content: space-between; 
             align-items: center; 
         }
         .season-badge { 
-            font-size: 0.72rem; 
+            font-size: 0.7rem; 
             background: rgba(255, 152, 0, 0.12); 
-            color: #ffca28; 
+            color: #ffb74d; 
             border: 1px solid rgba(255, 152, 0, 0.3); 
-            padding: 3px 10px; 
+            padding: 2px 8px; 
             border-radius: 12px; 
-            font-weight: 700; 
+            font-weight: 600; 
+            white-space: nowrap;
         }
-
-        .scan-info-time {
-            font-size: 0.78rem;
-            color: var(--text-muted);
-            margin-bottom: 10px;
-            font-weight: 600;
-        }
-        .scan-info-time b { color: #00e676; }
         
         .scan-tabs-bar { 
             display: flex; 
             justify-content: space-between; 
             align-items: center; 
-            margin-bottom: 12px; 
-            border-bottom: 1px solid rgba(255, 255, 255, 0.08); 
-            padding-bottom: 8px; 
+            margin-bottom: 10px; 
+            border-bottom: 1px solid #1f2736; 
+            padding-bottom: 6px; 
             gap: 8px;
         }
         .scan-tabs-container { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
         .scan-subtab { 
-            background-color: rgba(10, 13, 20, 0.8); 
+            background-color: #0f121a; 
             color: var(--text-muted); 
-            border: 1px solid rgba(255,255,255,0.08); 
-            padding: 5px 12px; 
-            font-size: 0.78rem; 
-            border-radius: 6px; 
+            border: 1px solid #232b3c; 
+            padding: 4px 8px; 
+            font-size: 0.75rem; 
+            border-radius: 4px; 
             cursor: pointer; 
-            transition: all 0.2s; 
-            font-weight: 700;
+            white-space: nowrap; 
+            transition: 0.2s; 
+            font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
         }
 
-        .scan-subtab.current-pair { background-color: rgba(46, 125, 50, 0.2); color: #a5d6a7; border-color: #4caf50; }
-        .scan-subtab.current-pair.active { background-color: #2e7d32; color: #ffffff; border-color: #81c784; }
-        .scan-subtab.old-pair { background-color: rgba(55, 71, 79, 0.25); color: #90a4ae; border-color: #37474f; }
-        .scan-subtab.old-pair.active { background-color: #37474f; color: #cfd8dc; }
-        .scan-subtab.single { background-color: rgba(255, 152, 0, 0.15); color: #ffe082; border-color: #ff9800; }
-        .scan-subtab.single.active { background-color: #f57c00; color: #ffffff; }
+        .scan-subtab.current-pair { 
+            background-color: rgba(46, 125, 50, 0.2); 
+            color: #81c784; 
+            border-color: #4caf50; 
+        }
+        .scan-subtab.current-pair.active { 
+            background-color: #2e7d32; 
+            color: #ffffff; 
+            border-color: #66bb6a; 
+            box-shadow: 0 0 8px rgba(76, 175, 80, 0.4);
+        }
+
+        .scan-subtab.old-pair { 
+            background-color: rgba(55, 71, 79, 0.25); 
+            color: #78909c; 
+            border-color: #37474f; 
+            opacity: 0.75;
+        }
+        .scan-subtab.old-pair.active { 
+            background-color: #37474f; 
+            color: #cfd8dc; 
+            border-color: #546e7a; 
+            opacity: 1;
+        }
+
+        .scan-subtab.single { 
+            background-color: rgba(255, 152, 0, 0.15); 
+            color: #ffb74d; 
+            border-color: #ff9800; 
+        }
+        .scan-subtab.single.active { 
+            background-color: #f57c00; 
+            color: #ffffff; 
+            border-color: #ffb74d; 
+        }
+
+        .scan-subtab:hover:not(.active) { opacity: 1; filter: brightness(1.2); }
 
         .btn-delete-scan { 
-            background-color: rgba(255, 45, 85, 0.15); 
-            color: #ff5252; 
-            border: 1px solid rgba(255, 45, 85, 0.35); 
-            padding: 4px 8px; 
-            border-radius: 6px; 
+            background-color: rgba(183, 28, 28, 0.2); 
+            color: #ef5350; 
+            border: 1px solid rgba(239, 83, 80, 0.4); 
+            padding: 3px 6px; 
+            border-radius: 4px; 
             font-size: 0.7rem; 
-            font-weight: 800; 
+            font-weight: 700; 
             cursor: pointer; 
+            transition: 0.2s; 
+            white-space: nowrap;
         }
+        .btn-delete-scan:hover { background-color: #d32f2f; color: #fff; }
 
         .tables-grid { 
             display: grid; 
             grid-template-columns: 1fr 1fr; 
-            gap: 12px; 
+            gap: 10px; 
             flex-grow: 1;
         }
         @media (max-width: 480px) { .tables-grid { grid-template-columns: 1fr; } }
         
         .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
-        .section-title { font-size: 0.8rem; font-weight: 800; color: #00e5ff; text-transform: uppercase; }
+        .section-title { font-size: 0.8rem; font-weight: 700; color: #00e5ff; text-transform: uppercase; letter-spacing: 0.5px; }
         
         .btn-add { 
-            background: linear-gradient(135deg, #0288d1, #0277bd); 
+            background-color: #0288d1; 
             color: white; 
             border: none; 
-            border-radius: 5px; 
-            padding: 3px 8px; 
+            border-radius: 4px; 
+            padding: 2px 6px; 
             font-size: 0.75rem; 
-            font-weight: 800; 
+            font-weight: 700; 
             cursor: pointer; 
+            transition: 0.2s; 
         }
+        .btn-add:hover { background-color: #0277bd; }
 
-        table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
-        th, td { padding: 6px 8px; text-align: left; border-bottom: 1px solid rgba(255, 255, 255, 0.05); }
-        th { background-color: var(--table-header); color: var(--text-muted); font-weight: 700; font-size: 0.72rem; text-transform: uppercase; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+        th, td { padding: 4px 6px; text-align: left; border-bottom: 1px solid #1a202c; }
+        th { background-color: var(--table-header); color: var(--text-muted); font-weight: 600; font-size: 0.72rem; }
         tr:hover td { background-color: var(--table-row-hover); }
 
-        .pd-badge { background-color: #263043; color: #e2e8f0; padding: 2px 6px; border-radius: 5px; font-weight: 800; font-size: 0.75rem; }
-        .time-left-badge { font-weight: 800; color: #ffca28; font-size: 0.75rem; background-color: rgba(255, 152, 0, 0.12); padding: 3px 7px; border-radius: 6px; border: 1px solid rgba(255, 152, 0, 0.35); }
-
-        .status-btn-group {
-            display: flex;
-            gap: 4px;
-            align-items: center;
-            flex-wrap: wrap;
-        }
-        .btn-status-pill {
-            padding: 3px 8px;
-            border-radius: 6px;
-            font-size: 0.72rem;
-            font-weight: 700;
-            border: 1px solid rgba(255, 255, 255, 0.12);
-            background: rgba(255, 255, 255, 0.05);
-            color: #8e9bb0;
-            cursor: pointer;
-            transition: all 0.2s;
-            white-space: nowrap;
-        }
-        .btn-status-pill:hover {
-            background: rgba(255, 255, 255, 0.12);
-            color: #ffffff;
-        }
-        .btn-status-pill.active-insured {
-            background: linear-gradient(135deg, #2e7d32, #4caf50);
-            color: #ffffff;
-            border-color: #81c784;
-            box-shadow: 0 0 8px rgba(76, 175, 80, 0.35);
-        }
-        .btn-status-pill.active-uninsured {
-            background: linear-gradient(135deg, #c62828, #ef5350);
-            color: #ffffff;
-            border-color: #e57373;
-            box-shadow: 0 0 8px rgba(239, 83, 80, 0.35);
-        }
-        .btn-status-pill.active-frozen {
-            background: linear-gradient(135deg, #1565c0, #00b0ff);
-            color: #ffffff;
-            border-color: #40c4ff;
-            box-shadow: 0 0 8px rgba(0, 176, 255, 0.35);
-        }
-        .btn-status-pill.active-noact {
-            background: linear-gradient(135deg, #6a1b9a, #ab47bc);
-            color: #ffffff;
-            border-color: #ce93d8;
-            box-shadow: 0 0 8px rgba(171, 71, 188, 0.35);
-        }
+        .pd-badge { background-color: #37474f; color: #eceff1; padding: 2px 5px; border-radius: 4px; font-weight: 700; font-size: 0.72rem; }
+        .pd-badge-drop { background-color: #b71c1c; color: #ffee58; padding: 2px 5px; border-radius: 4px; font-weight: 800; font-size: 0.72rem; animation: pulse 1.5s infinite; }
+        .pd-badge-fixed { background-color: #1a237e; color: #82b1ff; border: 1px solid #304ffe; padding: 2px 5px; border-radius: 4px; font-weight: 700; font-size: 0.72rem; }
         
-        .status-text { font-weight: 800; font-size: 0.75rem; padding: 2px 6px; border-radius: 4px; display: inline-block; }
+        .time-left-badge { font-weight: 700; color: #ffb74d; font-size: 0.75rem; background-color: rgba(255, 152, 0, 0.1); padding: 2px 5px; border-radius: 4px; border: 1px solid rgba(255, 152, 0, 0.3); }
+        .time-left-frozen { font-weight: 700; color: #64b5f6; font-size: 0.75rem; }
+
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+
+        .btn-group { display: flex; gap: 2px; flex-wrap: wrap; }
+        .btn-opt { 
+            background-color: #0f121a; 
+            color: #78909c; 
+            border: 1px solid #232b3c; 
+            padding: 2px 5px; 
+            font-size: 0.68rem; 
+            border-radius: 3px; 
+            cursor: pointer; 
+            transition: 0.15s; 
+            font-weight: 600;
+        }
+        .btn-opt.active-insured { background-color: #2e7d32; color: #fff; border-color: #4caf50; }
+        .btn-opt.active-uninsured { background-color: #c62828; color: #fff; border-color: #ef5350; }
+        .btn-opt.active-noact { background-color: #b71c1c; color: #fff; border-color: #ff1744; font-weight: bold; }
+        .btn-opt.active-frozen { background-color: #1565c0; color: #fff; border-color: #42a5f5; font-weight: bold; }
+        
+        .status-text { font-weight: 700; font-size: 0.75rem; padding: 2px 4px; border-radius: 3px; display: inline-block; }
         .status-insured { color: #81c784; }
         .status-uninsured { color: #e57373; }
-        .status-noact { color: #ce93d8; }
+        .status-noact { color: #ff5252; }
         .status-frozen { color: #64b5f6; }
-        .status-new { color: #ffca28; font-style: italic; }
+        .status-pending { color: #ffb74d; font-style: italic; font-size: 0.72rem; }
 
-        .btn-del { background-color: transparent; color: #ff5252; border: 1px solid rgba(255, 82, 82, 0.3); padding: 1px 6px; font-size: 0.75rem; border-radius: 4px; cursor: pointer; }
-        .btn-user-del { background-color: #c62828; color: #fff; border: none; padding: 5px 10px; border-radius: 6px; cursor: pointer; font-size: 0.8em; font-weight: 700; }
+        .btn-del { background-color: transparent; color: #ef5350; border: 1px solid rgba(239, 83, 80, 0.4); padding: 1px 5px; font-size: 0.75rem; border-radius: 3px; cursor: pointer; transition: 0.2s; }
+        .btn-del:hover { background-color: #ef5350; color: #fff; }
+        .btn-user-del { background-color: #c62828; color: #fff; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; font-size: 0.8em; }
+        .btn-user-del:hover { background-color: #e53935; }
         
+        .select-role { background: #0f121a; color: #fff; border: 1px solid #263043; padding: 4px; border-radius: 4px; font-size: 0.85em; }
         .empty { color: #546e7a; font-style: italic; font-size: 0.78rem; display: block; padding: 4px 0; }
-        .empty-center { text-align: center; color: var(--text-muted); font-style: italic; padding: 35px; background-color: var(--card-bg); border-radius: 14px; border: 1px solid var(--card-border); max-width: 600px; margin: 0 auto; grid-column: 1 / -1; }
-
-        .action-log-panel {
-            background: var(--card-bg);
-            border: 1px solid var(--card-border);
-            border-radius: 14px;
-            padding: 16px 20px;
-            max-width: 1600px;
-            margin: 0 auto 22px auto;
-        }
-        .action-log-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            cursor: pointer;
-            user-select: none;
-        }
-        .action-log-title { font-size: 1rem; font-weight: 800; color: var(--accent-orange); }
-        .toggle-icon { font-size: 0.9rem; color: var(--text-muted); }
-        .action-log-content { margin-top: 15px; max-height: 280px; overflow-y: auto; border-top: 1px solid rgba(255, 255, 255, 0.08); padding-top: 10px; }
-        .action-log-content.collapsed { display: none; }
-
-        .taxes-layout {
-            display: flex;
-            flex-direction: column;
-            gap: 22px;
-            max-width: 1200px;
-            margin: 0 auto;
-        }
-
-        .tax-calc-card {
-            background: var(--card-bg);
-            border: 1px solid var(--card-border);
-            border-radius: 14px;
-            padding: 22px;
-            backdrop-filter: blur(14px);
-            box-shadow: 0 8px 25px rgba(0,0,0,0.35);
-        }
-
-        .tax-calc-header {
-            font-size: 1.1rem;
-            font-weight: 800;
-            color: var(--accent-orange);
-            margin-bottom: 18px;
-            border-bottom: 1px solid rgba(255,255,255,0.08);
-            padding-bottom: 10px;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 8px;
-        }
-
-        .tax-calc-row {
-            display: flex;
-            gap: 16px;
-            margin-bottom: 16px;
-            flex-wrap: wrap;
-        }
-
-        .tax-calc-field {
-            flex: 1;
-            min-width: 180px;
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
-        }
-
-        .tax-calc-field label {
-            font-size: 0.8rem;
-            font-weight: 700;
-            color: var(--text-muted);
-            text-transform: uppercase;
-        }
-
-        .calc-type-toggle {
-            display: flex;
-            gap: 6px;
-        }
-
-        .calc-type-btn {
-            flex: 1;
-            padding: 9px 12px;
-            background: rgba(10, 13, 20, 0.8);
-            border: 1px solid rgba(255, 255, 255, 0.12);
-            color: var(--text-muted);
-            border-radius: 8px;
-            font-weight: 700;
-            font-size: 0.85rem;
-            cursor: pointer;
-            transition: all 0.2s;
-        }
-
-        .calc-type-btn.active {
-            background: linear-gradient(135deg, #ff9800, #f57c00);
-            color: #0b0d14;
-            border-color: #ff9800;
-            box-shadow: 0 2px 10px rgba(255, 152, 0, 0.3);
-        }
-
-        .btn-calc-submit {
-            width: 100%;
-            padding: 10px 18px;
-            background: linear-gradient(135deg, #00c853, #00e676);
-            color: #0b0d14;
-            border: none;
-            font-weight: 800;
-            border-radius: 8px;
-            cursor: pointer;
-            font-size: 0.95rem;
-            transition: all 0.2s;
-        }
-
-        .btn-calc-submit:hover {
-            box-shadow: 0 0 15px rgba(0, 230, 118, 0.4);
-        }
-
-        .calc-result-box {
-            margin-top: 18px;
-            padding: 16px 20px;
-            background: rgba(10, 13, 20, 0.9);
-            border: 1px solid rgba(255, 152, 0, 0.35);
-            border-radius: 12px;
-        }
-
-        .calc-res-grid {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 14px;
-        }
-
-        @media (max-width: 650px) {
-            .calc-res-grid { grid-template-columns: 1fr; }
-        }
-
-        .calc-res-item {
-            display: flex;
-            flex-direction: column;
-            gap: 4px;
-        }
-
-        .calc-res-label {
-            font-size: 0.78rem;
-            color: var(--text-muted);
-            font-weight: 700;
-        }
-
-        .calc-res-val {
-            font-size: 1.05rem;
-            font-weight: 800;
-        }
-
-        .taxes-table-card {
-            background: var(--card-bg);
-            border: 1px solid var(--card-border);
-            border-radius: 14px;
-            padding: 20px;
-            backdrop-filter: blur(14px);
-            box-shadow: 0 8px 25px rgba(0,0,0,0.35);
-        }
-
-        .taxes-table-compact {
-            width: 100%;
-            border-collapse: collapse;
-        }
-
-        .taxes-table-compact th {
-            background: var(--table-header);
-            color: var(--accent-orange);
-            font-weight: 800;
-            font-size: 0.78rem;
-            padding: 8px 12px;
-            text-align: left;
-            text-transform: uppercase;
-        }
-
-        .taxes-table-compact td {
-            padding: 6px 12px;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-            font-size: 0.88rem;
-        }
-
-        .taxes-table-compact tr:hover td {
-            background-color: var(--table-row-hover);
-        }
-
-        .tax-input-compact {
-            width: 95px;
-            background: rgba(10, 13, 20, 0.8);
-            border: 1px solid rgba(255, 255, 255, 0.15);
-            color: #00e676;
-            font-weight: 800;
-            border-radius: 6px;
-            padding: 4px 8px;
-            font-size: 0.88rem;
-            text-align: right;
-            outline: none;
-        }
-
-        .tax-input-compact:focus {
-            border-color: var(--accent-orange);
-        }
-
-        .btn-save-tax-compact {
-            background: linear-gradient(135deg, #ff9800, #f57c00);
-            color: #0b0d14;
-            border: none;
-            font-weight: 800;
-            padding: 5px 12px;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 0.78rem;
-            transition: all 0.2s;
-        }
-
-        .btn-save-tax-compact:hover {
-            box-shadow: 0 0 10px rgba(255, 152, 0, 0.4);
-        }
+        .empty-center { text-align: center; color: var(--text-muted); font-style: italic; padding: 30px; background-color: var(--card-bg); border-radius: 10px; border: 1px solid var(--card-border); max-width: 600px; margin: 0 auto; grid-column: 1 / -1; }
     </style>
-</head>
-<body>
-    <div id="login-screen" style="display: none;">
-        <div class="login-box">
-            <h2>🔐 Авторизация</h2>
-            <input type="text" id="login-username" placeholder="Логин">
-            <input type="password" id="login-password" placeholder="Пароль">
-            <button onclick="handleLogin()">Войти в систему</button>
-        </div>
-    </div>
-
-    <div id="main-dashboard" style="display: none;">
-        <h1>Arizona RP — Мониторинг Слётов</h1>
-
-        <div class="lottery-banner">
-            <div class="lottery-info">
-                <div class="lottery-icon">🎰</div>
-                <div>
-                    <div class="lottery-title">Лотерейный билет</div>
-                    <div class="lottery-sub">Сброс лотерейных билетов каждый день в <b>21:10 МСК</b></div>
-                </div>
-            </div>
-            <div class="lottery-countdown">
-                <span class="lottery-label">До сброса:</span>
-                <span class="lottery-timer" id="lottery-timer">00:00:00</span>
-            </div>
-        </div>
-
-        <div class="user-nav">
-            <span id="user-info">Вы вошли как: ...</span>
-            <button class="btn-logout" onclick="handleLogout()">Выйти</button>
-        </div>
-
-        <div class="tabs">
-            <button class="tab-btn active" id="btn-tab-view" onclick="switchTab('view')">📊 Обзор слётов</button>
-            <button class="tab-btn" id="btn-tab-upcoming" onclick="switchTab('upcoming')">🚨 Ожидаются к слёту</button>
-            <button class="tab-btn" id="btn-tab-manage" onclick="switchTab('manage')" style="display:none;">⚙️ Управление</button>
-            <button class="tab-btn" id="btn-tab-taxes" onclick="switchTab('taxes')">💰 Налоги</button>
-            <button class="tab-btn" id="btn-tab-admin" onclick="switchTab('admin')" style="display:none;">👑 Админ-панель</button>
-        </div>
-
-        <!-- Таб Обзор -->
-        <div id="tab-view" class="tab-content active">
-            <div class="filter-panel">
-                <div class="filter-group">
-                    <label for="filter-season">Сезон:</label>
-                    <select id="filter-season" class="filter-select" onchange="renderViewTab()">
-                        <option value="all">Все сезоны</option>
-                        <option value="1">📱 По инфе (1)</option>
-                        <option value="2">⌨ Скорострелы (2)</option>
-                        <option value="3">🏎 Автогонки (3)</option>
-                        <option value="4">✈️ По новому (4)</option>
-                        <option value="5">🏍 Мотогонки (5)</option>
-                    </select>
-                </div>
-                <div class="filter-group">
-                    <label for="filter-fav">Избранное:</label>
-                    <select id="filter-fav" class="filter-select" onchange="renderViewTab()">
-                        <option value="all">Все сервера</option>
-                        <option value="fav_only">⭐ Только избранные</option>
-                    </select>
-                </div>
-            </div>
-            <div class="servers-container" id="servers-view"></div>
-        </div>
-
-        <!-- Таб Ожидаются к слёту -->
-        <div id="tab-upcoming" class="tab-content">
-            <div class="upcoming-filters">
-                <button class="time-filter-btn active" id="btn-upcoming-1h" onclick="setUpcomingHoursFilter(1)">1 час</button>
-                <button class="time-filter-btn" id="btn-upcoming-2h" onclick="setUpcomingHoursFilter(2)">2 часа</button>
-                <button class="time-filter-btn" id="btn-upcoming-3h" onclick="setUpcomingHoursFilter(3)">3 часа</button>
-            </div>
-            <div class="servers-container" id="servers-upcoming"></div>
-        </div>
-
-        <!-- Таб Управление -->
-        <div id="tab-manage" class="tab-content">
-            <div class="action-log-panel">
-                <div class="action-log-header" onclick="toggleActionLog()">
-                    <div class="action-log-title">
-                        <span>📝 Лог действий (За сегодня)</span>
-                    </div>
-                    <span class="toggle-icon" id="action-log-arrow">▼ Свернуть</span>
-                </div>
-                <div class="action-log-content" id="action-log-content">
-                    <div id="action-logs-table-container">Загрузка логов...</div>
-                </div>
-            </div>
-
-            <div class="servers-container" id="servers-manage"></div>
-        </div>
-
-        <!-- Таб Налоги -->
-        <div id="tab-taxes" class="tab-content">
-            <div id="taxes-container">Загрузка данных налогов...</div>
-        </div>
-
-        <!-- Таб Админка -->
-        <div id="tab-admin" class="tab-content">
-            <div class="admin-panel" style="max-width: 1200px; margin: 0 auto;">
-                <div class="admin-card" style="background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px; padding: 22px; margin-bottom: 20px;">
-                    <h3 style="margin-top: 0; color: var(--accent-orange);">➕ Создать пользователя</h3>
-                    <div style="display: flex; gap: 12px; flex-wrap: wrap; align-items: center;">
-                        <input type="text" id="new-username" placeholder="Логин" class="filter-select" style="padding: 9px 14px;">
-                        <input type="password" id="new-password" placeholder="Пароль" class="filter-select" style="padding: 9px 14px;">
-                        <select id="new-role" class="filter-select" style="padding: 9px 14px;">
-                            <option value="user">User</option>
-                            <option value="support">Support</option>
-                            <option value="admin">Admin</option>
-                        </select>
-                        <button class="btn-add" style="padding: 10px 18px; background: linear-gradient(135deg, #ff9800, #f57c00); color: #0b0d14;" onclick="handleCreateUser()">Создать</button>
-                    </div>
-                </div>
-
-                <div class="admin-card" style="background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px; padding: 22px; margin-bottom: 20px;">
-                    <h3 style="margin-top: 0; color: var(--accent-orange);">👥 Список пользователей</h3>
-                    <div id="admin-users-table"></div>
-                </div>
-
-                <div class="admin-card" style="background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px; padding: 22px;">
-                    <h3 style="margin-top: 0; color: var(--accent-orange);">📜 Логи сканирований (За сегодня)</h3>
-                    <div id="admin-scan-logs-table"></div>
-                </div>
-            </div>
-        </div>
-    </div>
-
     <script>
         const ALL_SERVERS = [
             "Phoenix", "Tucson", "Scottdale", "Chandler", "Brainburg",
@@ -1880,13 +1567,7 @@ DASHBOARD_HTML = """
         let currentUser = null;
         let favoriteServers = JSON.parse(localStorage.getItem('fav_servers') || '[]');
         let globalServerData = {};
-        let globalServerTaxes = {};
         let selectedUpcomingHours = 1;
-
-        let calcState = {
-            type: 'house',
-            insured: true
-        };
 
         function updateLotteryTimer() {
             const now = new Date();
@@ -1912,146 +1593,10 @@ DASHBOARD_HTML = """
             }
         }
 
-        function getStatusRate(status) {
-            if (status === 'insured') return 1;
-            if (status === 'uninsured') return 2;
-            if (status === 'no_activity') return 4;
-            if (status === 'frozen' || status === 'new' || status === 'новый') return 0;
-            return 1;
-        }
-
-        function getDropLimit(server, type, status) {
-            const info = globalServerData[server];
+        function getPropRules(info, type) {
             const defaultRules = { insured: 2, uninsured_min: 2, uninsured_max: 3 };
-            const rules = (info && info.dropRules) ? (info.dropRules[type] || defaultRules) : defaultRules;
-            if (['uninsured', 'no_activity', 'frozen'].includes(status)) {
-                return rules.uninsured_min || 2;
-            }
-            return rules.insured || 2;
-        }
-
-        function getPropertyInfo(item, srv, propType, scanTimeStr) {
-            const status = item.status;
-            const scannedPd = item.pd;
-            const dropLimit = getDropLimit(srv, propType, status);
-            const rate = getStatusRate(status);
-
-            const now = new Date();
-            const nowMskMs = now.getTime() + (now.getTimezoneOffset() * 60000) + (3 * 3600000);
-            const nowMsk = new Date(nowMskMs);
-
-            let scanHourStartMs = nowMskMs;
-            if (scanTimeStr) {
-                const parts = scanTimeStr.split(' ');
-                if (parts.length >= 2) {
-                    const dParts = parts[0].split('-');
-                    const tParts = parts[1].split(':');
-                    scanHourStartMs = Date.UTC(parseInt(dParts[0]), parseInt(dParts[1]) - 1, parseInt(dParts[2]), parseInt(tParts[0]), 0, 0);
-                }
-            }
-
-            const nowHourStartMs = Date.UTC(nowMsk.getUTCFullYear(), nowMsk.getUTCMonth(), nowMsk.getUTCDate(), nowMsk.getUTCHours(), 0, 0);
-            const hoursPassed = Math.max(0, Math.floor((nowHourStartMs - scanHourStartMs) / 3600000));
-
-            let curPd = scannedPd;
-            if (status !== 'frozen' && status !== 'new' && status !== 'новый' && rate > 0) {
-                curPd = Math.max(0, scannedPd - (hoursPassed * rate));
-            }
-
-            let displayPd = curPd;
-            if (curPd < dropLimit) {
-                displayPd = 0;
-            }
-
-            let hoursUntilDrop = null;
-            if (status !== 'frozen' && status !== 'new' && status !== 'новый' && rate > 0) {
-                const pdToLose = curPd - dropLimit;
-                if (pdToLose <= 0) {
-                    hoursUntilDrop = 0;
-                } else {
-                    hoursUntilDrop = Math.ceil(pdToLose / rate);
-                }
-            }
-
-            return { curPd, displayPd, dropLimit, hoursUntilDrop, rate };
-        }
-
-        function getStatusBadge(status) {
-            if (status === 'insured') return '<span class="status-text status-insured">Страхован</span>';
-            if (status === 'uninsured') return '<span class="status-text status-uninsured">Без страховки</span>';
-            if (status === 'no_activity') return '<span class="status-text status-noact">Без занятости</span>';
-            if (status === 'frozen') return '<span class="status-text status-frozen">Заморожен</span>';
-            return '<span class="status-text status-new">Новый</span>';
-        }
-
-        async function checkAuth() {
-            try {
-                const res = await fetch('/api/auth/me');
-                const data = await res.json();
-                if (data.authenticated) {
-                    currentUser = data;
-                    document.getElementById('login-screen').style.display = 'none';
-                    document.getElementById('main-dashboard').style.display = 'block';
-                    document.getElementById('user-info').innerText = `Вы вошли как: ${data.username} (${data.role})`;
-                    
-                    if (data.role === 'admin' || data.role === 'support') {
-                        document.getElementById('btn-tab-manage').style.display = 'inline-block';
-                    }
-                    if (data.role === 'admin') {
-                        document.getElementById('btn-tab-admin').style.display = 'inline-block';
-                    }
-                    fetchPaydays();
-                    fetchTaxes();
-                } else {
-                    document.getElementById('login-screen').style.display = 'block';
-                    document.getElementById('main-dashboard').style.display = 'none';
-                }
-            } catch (e) {
-                console.error('Ошибка проверки сессии:', e);
-                document.getElementById('login-screen').style.display = 'block';
-            }
-        }
-
-        async function handleLogin() {
-            const u = document.getElementById('login-username').value;
-            const p = document.getElementById('login-password').value;
-            try {
-                const res = await fetch('/api/auth/login', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username: u, password: p })
-                });
-                if (res.ok) {
-                    checkAuth();
-                } else {
-                    const err = await res.json();
-                    alert(err.detail || 'Ошибка авторизации');
-                }
-            } catch (e) {
-                alert('Ошибка сети');
-            }
-        }
-
-        async function handleLogout() {
-            await fetch('/api/auth/logout', { method: 'POST' });
-            location.reload();
-        }
-
-        function switchTab(tabName) {
-            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-
-            const btn = document.getElementById(`btn-tab-${tabName}`);
-            const content = document.getElementById(`tab-${tabName}`);
-
-            if (btn) btn.classList.add('active');
-            if (content) content.classList.add('active');
-
-            if (tabName === 'view') renderViewTab();
-            if (tabName === 'upcoming') renderUpcomingTab();
-            if (tabName === 'manage') { fetchActionLogs(); renderManageTab(); }
-            if (tabName === 'taxes') renderTaxesTab();
-            if (tabName === 'admin') renderAdminTab();
+            if (!info || !info.dropRules) return defaultRules;
+            return info.dropRules[type] || defaultRules;
         }
 
         function toggleFavorite(srv) {
@@ -2064,896 +1609,845 @@ DASHBOARD_HTML = """
             renderViewTab();
         }
 
-        function selectScan(srv, scanId, tabName) {
-            activeServerScans[srv] = scanId;
-            if (tabName === 'view') renderViewTab();
-            if (tabName === 'manage') renderManageTab();
-        }
-
-        async function fetchPaydays() {
+        async function checkAuth() {
             try {
-                const res = await fetch('/api/paydays');
-                if (res.ok) {
-                    globalServerData = await res.json();
+                const res = await fetch('/api/auth/me');
+                if (!res.ok) {
+                    document.getElementById('login-screen').style.display = 'block';
+                    document.getElementById('main-dashboard').style.display = 'none';
+                    return;
+                }
+                const data = await res.json();
+                if (data.authenticated) {
+                    currentUser = data;
+                    document.getElementById('login-screen').style.display = 'none';
+                    document.getElementById('main-dashboard').style.display = 'block';
+                    document.getElementById('user-info').innerText = `Вы вошли как: ${data.username} (${data.role})`;
                     
-                    ALL_SERVERS.forEach(srv => {
-                        if (!activeServerScans[srv] && globalServerData[srv] && globalServerData[srv].scans) {
-                            const scans = globalServerData[srv].scans;
-                            const curPair = scans.find(s => s.isCurrentPair && s.hasPair);
-                            if (curPair) {
-                                activeServerScans[srv] = curPair.scanId;
-                            } else if (scans.length > 0) {
-                                activeServerScans[srv] = scans[scans.length - 1].scanId;
-                            }
-                        }
-                    });
+                    const canManage = data.role === 'admin' || data.role === 'support';
+                    const isAdmin = data.role === 'admin';
 
-                    const activeTabElem = document.querySelector('.tab-btn.active');
-                    const activeTab = activeTabElem ? activeTabElem.id.replace('btn-tab-', '') : 'view';
-                    if (activeTab === 'view') renderViewTab();
-                    if (activeTab === 'upcoming') renderUpcomingTab();
-                    if (activeTab === 'manage') renderManageTab();
-                }
-            } catch (e) {
-                console.error('Ошибка загрузки сканирований:', e);
-            }
-        }
-
-        async function fetchTaxes() {
-            try {
-                const res = await fetch('/api/taxes');
-                if (res.ok) {
-                    globalServerTaxes = await res.json();
-                    const activeTabElem = document.querySelector('.tab-btn.active');
-                    const activeTab = activeTabElem ? activeTabElem.id.replace('btn-tab-', '') : 'view';
-                    if (activeTab === 'taxes') renderTaxesTab();
-                }
-            } catch (e) {
-                console.error('Ошибка загрузки налогов:', e);
-            }
-        }
-
-        async function fetchActionLogs() {
-            try {
-                const res = await fetch('/api/action_logs');
-                if (res.ok) {
-                    const logs = await res.json();
-                    const container = document.getElementById('action-logs-table-container');
-                    if (!container) return;
-
-                    if (!logs || logs.length === 0) {
-                        container.innerHTML = '<span class="empty">За сегодня действий не зафиксировано</span>';
-                        return;
-                    }
-
-                    let html = `
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>Время</th>
-                                    <th>Сервер</th>
-                                    <th>Пользователь</th>
-                                    <th>Действие</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                    `;
-                    logs.forEach(l => {
-                        html += `
-                            <tr>
-                                <td style="color: #ffca28; font-weight: 700;">${l.time}</td>
-                                <td style="font-weight: 700;">${getServerDisplayName(l.server)}</td>
-                                <td style="color: #00e5ff;">${l.username}</td>
-                                <td>${l.action}</td>
-                            </tr>
-                        `;
-                    });
-                    html += `</tbody></table>`;
-                    container.innerHTML = html;
-                }
-            } catch (e) {
-                console.error('Ошибка получения логов:', e);
-            }
-        }
-
-        function toggleActionLog() {
-            const content = document.getElementById('action-log-content');
-            const arrow = document.getElementById('action-log-arrow');
-            if (content.classList.contains('collapsed')) {
-                content.classList.remove('collapsed');
-                arrow.innerText = '▼ Свернуть';
-            } else {
-                content.classList.add('collapsed');
-                arrow.innerText = '▲ Развернуть';
-            }
-        }
-
-        function renderViewTab() {
-            const container = document.getElementById('servers-view');
-            if (!container) return;
-
-            const seasonFilter = document.getElementById('filter-season').value;
-            const favFilter = document.getElementById('filter-fav').value;
-
-            let html = '';
-
-            ALL_SERVERS.forEach(srv => {
-                const srvData = globalServerData[srv] || { scans: [], season: { id: 1, display: '📱 По инфе (1)' } };
-                const seasonId = String(srvData.season ? srvData.season.id : 1);
-
-                if (seasonFilter !== 'all' && seasonFilter !== seasonId) return;
-                if (favFilter === 'fav_only' && !favoriteServers.includes(srv)) return;
-
-                const isFav = favoriteServers.includes(srv);
-                const scans = srvData.scans || [];
-
-                let activeScanId = activeServerScans[srv];
-                let currentScan = scans.find(s => s.scanId === activeScanId);
-
-                if (!currentScan && scans.length > 0) {
-                    const curPair = scans.find(s => s.isCurrentPair && s.hasPair);
-                    currentScan = curPair || scans[scans.length - 1];
-                    activeScanId = currentScan.scanId;
-                    activeServerScans[srv] = activeScanId;
-                }
-
-                html += `
-                    <div class="server-card">
-                        <div class="server-header">
-                            <div class="server-title">
-                                <span>${getServerDisplayName(srv)}</span>
-                                <span style="cursor: pointer;" onclick="toggleFavorite('${srv}')">${isFav ? '⭐' : '☆'}</span>
-                            </div>
-                            <div style="margin-top: 4px;">
-                                <span class="season-badge">${srvData.season ? srvData.season.display : ''}</span>
-                            </div>
-                        </div>
-                `;
-
-                if (scans.length > 0) {
-                    html += `<div class="scan-tabs-bar"><div class="scan-tabs-container">`;
-                    scans.forEach(s => {
-                        let badgeClass = 'single';
-                        if (s.isCurrentPair && s.hasPair) badgeClass = 'current-pair';
-                        else if (s.hasPair || s.isConfirmed) badgeClass = 'old-pair';
-
-                        const isActive = (s.scanId === activeScanId) ? 'active' : '';
-                        html += `
-                            <button class="scan-subtab ${badgeClass} ${isActive}" onclick="selectScan('${srv}', '${s.scanId}', 'view')">
-                                ${s.hourLabel || s.scanId}
-                            </button>
-                        `;
-                    });
-                    html += `</div></div>`;
-
-                    if (currentScan) {
-                        html += `
-                            <div class="scan-info-time">
-                                Время скана: <b>${currentScan.scanTime || currentScan.scanId}</b>
-                            </div>
-                            <div class="tables-grid">
-                                <div>
-                                    <div class="section-header">
-                                        <span class="section-title">🏠 Дома (${(currentScan.houses || []).length})</span>
-                                    </div>
-                                    ${renderPropertyTable(srv, currentScan.houses || [], 'house', currentScan.scanTime)}
-                                </div>
-                                <div>
-                                    <div class="section-header">
-                                        <span class="section-title">💼 Бизнесы (${(currentScan.businesses || []).length})</span>
-                                    </div>
-                                    ${renderPropertyTable(srv, currentScan.businesses || [], 'biz', currentScan.scanTime)}
-                                </div>
-                            </div>
-                        `;
-                    }
+                    document.getElementById('btn-tab-manage').style.display = canManage ? 'inline-block' : 'none';
+                    document.getElementById('btn-tab-admin').style.display = isAdmin ? 'inline-block' : 'none';
+                    
+                    initDashboard();
                 } else {
-                    html += `<span class="empty">Данные сканирования отсутствуют</span>`;
+                    document.getElementById('login-screen').style.display = 'block';
+                    document.getElementById('main-dashboard').style.display = 'none';
                 }
-
-                html += `</div>`;
-            });
-
-            if (!html) {
-                html = `<div class="empty-center">По выбранным фильтрам серверы не найдены</div>`;
+            } catch (e) {
+                document.getElementById('login-screen').style.display = 'block';
+                document.getElementById('main-dashboard').style.display = 'none';
             }
-
-            container.innerHTML = html;
         }
 
-        function renderPropertyTable(srv, items, propType, scanTimeStr) {
-            if (!items || items.length === 0) {
-                return `<span class="empty">Нет данных</span>`;
+        async function handleLogin() {
+            const usernameInput = document.getElementById('login-username');
+            const passwordInput = document.getElementById('login-password');
+            const username = usernameInput.value.trim();
+            const password = passwordInput.value;
+
+            if (!username || !password) {
+                alert('Пожалуйста, введите логин и пароль.');
+                return;
             }
 
-            let html = `
-                <table>
-                    <thead>
-                        <tr>
-                            <th>№</th>
-                            <th>ID</th>
-                            <th>PD</th>
-                            <th>Слёт</th>
-                            <th>Статус</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-            `;
+            try {
+                const res = await fetch('/api/auth/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
 
-            items.forEach(item => {
-                const info = getPropertyInfo(item, srv, propType, scanTimeStr);
-                const propIdDisplay = (item.propId !== null && item.propId !== undefined) ? `#${item.propId}` : '—';
-                const timeLeftDisplay = (info.hoursUntilDrop !== null) 
-                    ? `<span class="time-left-badge">${info.hoursUntilDrop} ч</span>` 
-                    : '—';
+                if (res.ok) {
+                    await checkAuth();
+                } else {
+                    let errorMsg = 'Ошибка авторизации';
+                    try {
+                        const err = await res.json();
+                        errorMsg = err.detail || errorMsg;
+                    } catch (e) {
+                        errorMsg = `Ошибка сервера (${res.status})`;
+                    }
+                    alert(errorMsg);
+                }
+            } catch (err) {
+                alert('Не удалось связаться с сервером. Проверьте интернет или повторите попытку позже.');
+            }
+        }
 
-                html += `
-                    <tr>
-                        <td>${item.pos}</td>
-                        <td><b>${propIdDisplay}</b></td>
-                        <td><span class="pd-badge">${info.curPd} PD</span></td>
-                        <td>${timeLeftDisplay}</td>
-                        <td>${getStatusBadge(item.status)}</td>
-                    </tr>
-                `;
-            });
+        async function handleLogout() {
+            await fetch('/api/auth/logout', { method: 'POST' });
+            location.reload();
+        }
 
-            html += `</tbody></table>`;
-            return html;
+        function switchTab(tabName) {
+            const canManage = currentUser && (currentUser.role === 'admin' || currentUser.role === 'support');
+            const isAdmin = currentUser && currentUser.role === 'admin';
+
+            if (tabName === 'manage' && !canManage) {
+                alert('Недостаточно прав доступа');
+                return;
+            }
+            if (tabName === 'admin' && !isAdmin) {
+                alert('Недостаточно прав доступа');
+                return;
+            }
+
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+            
+            if (tabName === 'manage') {
+                document.getElementById('btn-tab-manage').classList.add('active');
+                document.getElementById('tab-manage').classList.add('active');
+            } else if (tabName === 'upcoming') {
+                document.getElementById('btn-tab-upcoming').classList.add('active');
+                document.getElementById('tab-upcoming').classList.add('active');
+            } else if (tabName === 'admin') {
+                document.getElementById('btn-tab-admin').classList.add('active');
+                document.getElementById('tab-admin').classList.add('active');
+                loadAdminUsers();
+                loadScanLogs();
+            } else {
+                document.getElementById('btn-tab-view').classList.add('active');
+                document.getElementById('tab-view').classList.add('active');
+            }
         }
 
         function setUpcomingHoursFilter(hours) {
             selectedUpcomingHours = hours;
             document.querySelectorAll('.time-filter-btn').forEach(btn => btn.classList.remove('active'));
-            const targetBtn = document.getElementById(`btn-upcoming-${hours}h`);
-            if (targetBtn) targetBtn.classList.add('active');
-            renderUpcomingTab();
+            document.getElementById(`btn-upcoming-${hours}h`).classList.add('active');
+            loadData();
         }
 
-        function renderUpcomingTab() {
-            const container = document.getElementById('servers-upcoming');
-            if (!container) return;
+        async function handleCreateUser() {
+            const username = document.getElementById('new-username').value;
+            const password = document.getElementById('new-password').value;
+            const role = document.getElementById('new-role').value;
 
-            let html = '';
-
-            ALL_SERVERS.forEach(srv => {
-                const srvData = globalServerData[srv];
-                if (!srvData || !srvData.scans || srvData.scans.length === 0) return;
-
-                const scans = srvData.scans;
-                const curPair = scans.find(s => s.isCurrentPair && s.hasPair);
-                const scan = curPair || scans[scans.length - 1];
-
-                if (!scan) return;
-
-                const upcomingHouses = (scan.houses || []).filter(item => {
-                    const info = getPropertyInfo(item, srv, 'house', scan.scanTime);
-                    return info.hoursUntilDrop !== null && info.hoursUntilDrop <= selectedUpcomingHours;
-                });
-
-                const upcomingBiz = (scan.businesses || []).filter(item => {
-                    const info = getPropertyInfo(item, srv, 'biz', scan.scanTime);
-                    return info.hoursUntilDrop !== null && info.hoursUntilDrop <= selectedUpcomingHours;
-                });
-
-                if (upcomingHouses.length > 0 || upcomingBiz.length > 0) {
-                    html += `
-                        <div class="server-card">
-                            <div class="server-header">
-                                <div class="server-title">
-                                    <span>${getServerDisplayName(srv)}</span>
-                                    <span class="season-badge">${srvData.season ? srvData.season.display : ''}</span>
-                                </div>
-                                <div class="scan-info-time" style="margin-top: 6px; margin-bottom:0;">
-                                    Скан: <b>${scan.scanTime || scan.scanId}</b>
-                                </div>
-                            </div>
-                            <div class="tables-grid">
-                                <div>
-                                    <div class="section-header">
-                                        <span class="section-title">🏠 Дома (${upcomingHouses.length})</span>
-                                    </div>
-                                    ${renderPropertyTable(srv, upcomingHouses, 'house', scan.scanTime)}
-                                </div>
-                                <div>
-                                    <div class="section-header">
-                                        <span class="section-title">💼 Бизнесы (${upcomingBiz.length})</span>
-                                    </div>
-                                    ${renderPropertyTable(srv, upcomingBiz, 'biz', scan.scanTime)}
-                                </div>
-                            </div>
-                        </div>
-                    `;
-                }
-            });
-
-            if (!html) {
-                html = `<div class="empty-center">В ближайшие ${selectedUpcomingHours} ч. слётов не ожидается</div>`;
+            if (!username || !password) {
+                alert('Заполните логин и пароль!');
+                return;
             }
 
-            container.innerHTML = html;
-        }
-
-        function renderManageTab() {
-            const container = document.getElementById('servers-manage');
-            if (!container) return;
-
-            let html = '';
-
-            ALL_SERVERS.forEach(srv => {
-                const srvData = globalServerData[srv] || { scans: [] };
-                const scans = srvData.scans || [];
-
-                let activeScanId = activeServerScans[srv];
-                let currentScan = scans.find(s => s.scanId === activeScanId);
-
-                if (!currentScan && scans.length > 0) {
-                    currentScan = scans[scans.length - 1];
-                    activeScanId = currentScan.scanId;
-                    activeServerScans[srv] = activeScanId;
-                }
-
-                html += `
-                    <div class="server-card">
-                        <div class="server-header">
-                            <div class="server-title">
-                                <span>${getServerDisplayName(srv)}</span>
-                                ${currentScan ? `<button class="btn-delete-scan" onclick="deleteScan('${srv}', '${currentScan.scanId}')">Удалить скан</button>` : ''}
-                            </div>
-                        </div>
-                `;
-
-                if (scans.length > 0) {
-                    html += `<div class="scan-tabs-bar"><div class="scan-tabs-container">`;
-                    scans.forEach(s => {
-                        const isActive = (s.scanId === activeScanId) ? 'active' : '';
-                        html += `
-                            <button class="scan-subtab ${isActive}" onclick="selectScan('${srv}', '${s.scanId}', 'manage')">
-                                ${s.hourLabel || s.scanId}
-                            </button>
-                        `;
-                    });
-                    html += `</div></div>`;
-
-                    if (currentScan) {
-                        html += `
-                            <div class="tables-grid">
-                                <div>
-                                    <div class="section-header">
-                                        <span class="section-title">🏠 Дома</span>
-                                        <button class="btn-add" onclick="addItemPrompt('${srv}', '${currentScan.scanId}', 'house')">+ Добавить</button>
-                                    </div>
-                                    ${renderManageTable(srv, currentScan.scanId, currentScan.houses || [], 'house')}
-                                </div>
-                                <div>
-                                    <div class="section-header">
-                                        <span class="section-title">💼 Бизнесы</span>
-                                        <button class="btn-add" onclick="addItemPrompt('${srv}', '${currentScan.scanId}', 'biz')">+ Добавить</button>
-                                    </div>
-                                    ${renderManageTable(srv, currentScan.scanId, currentScan.businesses || [], 'biz')}
-                                </div>
-                            </div>
-                        `;
-                    }
-                } else {
-                    html += `<span class="empty">Нет сканов для управления</span>`;
-                }
-
-                html += `</div>`;
+            const res = await fetch('/api/admin/create_user', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password, role })
             });
 
-            container.innerHTML = html;
+            if (res.ok) {
+                alert('Пользователь успешно создан');
+                document.getElementById('new-username').value = '';
+                document.getElementById('new-password').value = '';
+                loadAdminUsers();
+            } else {
+                const err = await res.json();
+                alert(err.detail || 'Ошибка создания пользователя');
+            }
         }
 
-        function renderManageTable(srv, scanId, items, propType) {
-            if (!items || items.length === 0) {
-                return `<span class="empty">Список пуст</span>`;
+        async function loadAdminUsers() {
+            const res = await fetch('/api/admin/users');
+            if (!res.ok) return;
+            const users = await res.json();
+            
+            let html = `<table><tr><th>ID</th><th>Логин</th><th>Роль</th><th>Доступ</th><th>Действия</th></tr>`;
+            users.forEach(u => {
+                const isSelf = u.username === currentUser.username;
+                
+                const toggleAccessBtn = !isSelf ? 
+                    `<button onclick="toggleUserAccess(${u.id}, ${u.is_allowed})">${u.is_allowed ? 'Заблокировать' : 'Разблокировать'}</button>` : '—';
+                
+                const deleteUserBtn = !isSelf ? 
+                    `<button class="btn-user-del" onclick="deleteUser(${u.id}, '${u.username}')">Удалить</button>` : '';
+
+                const changePwBtn = `<button class="btn-add" style="background-color: #f57c00;" onclick="changeUserPassword(${u.id}, '${u.username}')">🔑 Пароль</button>`;
+
+                const roleSelect = !isSelf ? `
+                    <select class="select-role" onchange="changeUserRole(${u.id}, this.value)">
+                        <option value="user" ${u.role === 'user' ? 'selected' : ''}>User</option>
+                        <option value="support" ${u.role === 'support' ? 'selected' : ''}>Support</option>
+                        <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin</option>
+                    </select>
+                ` : `<b>${u.role}</b>`;
+
+                html += `<tr>
+                    <td>${u.id}</td>
+                    <td>${u.username}</td>
+                    <td>${roleSelect}</td>
+                    <td>${u.is_allowed ? '✅ Разрешен' : '❌ Заблокирован'}</td>
+                    <td style="display: flex; gap: 5px; align-items: center; flex-wrap: wrap;">
+                        ${changePwBtn}
+                        ${toggleAccessBtn} 
+                        ${deleteUserBtn}
+                    </td>
+                </tr>`;
+            });
+            document.getElementById('admin-users-table').innerHTML = html + '</table>';
+        }
+
+        async function loadScanLogs() {
+            const res = await fetch('/api/admin/scan_logs');
+            if (!res.ok) return;
+            const logs = await res.json();
+            
+            if (logs.length === 0) {
+                document.getElementById('admin-scan-logs-table').innerHTML = '<span class="empty">За сегодня сканов еще не зафиксировано</span>';
+                return;
             }
 
-            let html = `
-                <table>
-                    <thead>
-                        <tr>
-                            <th>№</th>
-                            <th>ID / PD</th>
-                            <th>Изменить статус</th>
-                            <th></th>
-                        </tr>
-                    </thead>
-                    <tbody>
-            `;
-
-            items.forEach(item => {
-                const propIdDisplay = (item.propId !== null && item.propId !== undefined) ? `#${item.propId}` : '—';
-                const st = item.status;
-
-                html += `
-                    <tr>
-                        <td><b>${item.pos}</b></td>
-                        <td>
-                            <div><b>${propIdDisplay}</b></div>
-                            <div style="font-size: 0.72rem; color: var(--text-muted);">${item.pd} PD</div>
-                        </td>
-                        <td>
-                            <div class="status-btn-group">
-                                <button class="btn-status-pill ${st === 'insured' ? 'active-insured' : ''}" onclick="changeStatus('${srv}', '${scanId}', '${propType}', ${item.pos}, 'insured')">Страх.</button>
-                                <button class="btn-status-pill ${st === 'uninsured' ? 'active-uninsured' : ''}" onclick="changeStatus('${srv}', '${scanId}', '${propType}', ${item.pos}, 'uninsured')">Без страх.</button>
-                                <button class="btn-status-pill ${st === 'frozen' ? 'active-frozen' : ''}" onclick="changeStatus('${srv}', '${scanId}', '${propType}', ${item.pos}, 'frozen')">Замороз.</button>
-                                ${propType === 'biz' ? `<button class="btn-status-pill ${st === 'no_activity' ? 'active-noact' : ''}" onclick="changeStatus('${srv}', '${scanId}', '${propType}', ${item.pos}, 'no_activity')">Без зан.</button>` : ''}
-                            </div>
-                        </td>
-                        <td>
-                            <button class="btn-del" onclick="deleteItem('${srv}', '${scanId}', '${propType}', ${item.pos})">✕</button>
-                        </td>
-                    </tr>
-                `;
+            let html = `<table><tr><th>Время (МСК)</th><th>Сервер</th><th>Отправитель</th></tr>`;
+            logs.forEach(l => {
+                html += `<tr>
+                    <td><b>${l.created_at}</b></td>
+                    <td><span style="color: #00bcd4;">${l.server}</span></td>
+                    <td><span style="color: #ffb74d;">${l.scanner}</span></td>
+                </tr>`;
             });
-
-            html += `</tbody></table>`;
-            return html;
+            document.getElementById('admin-scan-logs-table').innerHTML = html + '</table>';
         }
 
-        async function changeStatus(server, scanId, propType, pos, status) {
+        async function changeUserPassword(userId, username) {
+            const newPassword = prompt(`Введите новый пароль для пользователя ${username}:`);
+            if (!newPassword) return;
+            if (newPassword.trim().length < 4) {
+                alert('Пароль слишком короткий (минимум 4 символа)');
+                return;
+            }
+
+            const res = await fetch('/api/admin/change_password', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user_id: userId, new_password: newPassword })
+            });
+
+            if (res.ok) {
+                alert(`Пароль для ${username} успешно изменен!`);
+            } else {
+                const err = await res.json();
+                alert(err.detail || 'Ошибка смены пароля');
+            }
+        }
+
+        async function toggleUserAccess(userId, currentStatus) {
+            await fetch('/api/admin/toggle_access', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user_id: userId, is_allowed: !currentStatus })
+            });
+            loadAdminUsers();
+        }
+
+        async function changeUserRole(userId, newRole) {
+            const res = await fetch('/api/admin/update_role', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user_id: userId, role: newRole })
+            });
+            if (!res.ok) {
+                const err = await res.json();
+                alert(err.detail || 'Ошибка обновления роли');
+            }
+            loadAdminUsers();
+        }
+
+        async function deleteUser(userId, username) {
+            if (!confirm(`Вы действительно хотите безвозвратно удалить аккаунт ${username}?`)) return;
+            
+            const res = await fetch('/api/admin/delete_user', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user_id: userId })
+            });
+
+            if (res.ok) {
+                alert('Пользователь успешно удален');
+                loadAdminUsers();
+            } else {
+                const err = await res.json();
+                alert(err.detail || 'Ошибка удаления');
+            }
+        }
+
+        function selectScanTab(server, scanId) {
+            activeServerScans[server] = scanId;
+            loadData();
+        }
+
+        async function setStatus(server, scanId, propType, pos, status) {
             try {
-                const res = await fetch('/api/update_status', {
+                await fetch('/api/update_status', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ server, scanId, propType, pos, status })
                 });
-                if (res.ok) {
-                    await fetchPaydays();
-                    fetchActionLogs();
-                } else {
-                    const err = await res.json();
-                    alert(err.detail || 'Ошибка обновления статуса');
-                }
-            } catch (e) {
-                alert('Ошибка сети');
-            }
+                loadData();
+            } catch(e) { console.error(e); }
         }
 
         async function deleteItem(server, scanId, propType, pos) {
-            if (!confirm('Удалить данный элемент?')) return;
+            if (!confirm('Удалить эту запись?')) return;
             try {
-                const res = await fetch('/api/delete_item', {
+                await fetch('/api/delete_item', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ server, scanId, propType, pos })
                 });
-                if (res.ok) {
-                    await fetchPaydays();
-                    fetchActionLogs();
-                }
-            } catch (e) {
-                alert('Ошибка сети');
-            }
+                loadData();
+            } catch(e) { console.error(e); }
         }
 
-        async function deleteScan(server, scanId) {
-            if (!confirm(`Удалить скан ${scanId}?`)) return;
+        async function deleteWholeScan(server) {
+            const scanId = activeServerScans[server];
+            if (!scanId) return;
+            if (!confirm(`Удалить весь скан ${scanId} для сервера ${server}?`)) return;
+
             try {
-                const res = await fetch('/api/delete_scan', {
+                await fetch('/api/delete_scan', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ server, scanId })
                 });
-                if (res.ok) {
-                    await fetchPaydays();
-                    fetchActionLogs();
-                }
-            } catch (e) {
-                alert('Ошибка сети');
-            }
+                delete activeServerScans[server];
+                loadData();
+            } catch(e) { console.error(e); }
         }
 
-        async function addItemPrompt(server, scanId, propType) {
-            const pdStr = prompt("Введите количество PD (налог в пейдей):");
-            if (!pdStr) return;
-            const pd = parseInt(pdStr);
-            if (isNaN(pd)) {
-                alert("Некорректное число PD");
+        async function addItemPrompt(server, propType) {
+            const scanId = activeServerScans[server];
+            if (!scanId) {
+                alert('Сначала выберите или дождитесь сканирования!');
                 return;
             }
 
-            const propIdStr = prompt("Введите номер (ID) имущества (или оставьте пустым):");
-            const propId = (propIdStr && !isNaN(parseInt(propIdStr))) ? parseInt(propIdStr) : null;
+            const title = propType === 'house' ? 'дом' : 'бизнес';
+            const pdStr = prompt(`Введите оставшиеся PayDay для нового ${title}:`);
+            if (!pdStr) return;
+            
+            const pd = parseInt(pdStr, 10);
+            if (isNaN(pd) || pd <= 0) {
+                alert('Некорректное значение PayDay!');
+                return;
+            }
+
+            const idStr = prompt(`Введите ID ${title} (или оставьте пустым):`);
+            const propId = idStr && !isNaN(parseInt(idStr, 10)) ? parseInt(idStr, 10) : null;
 
             try {
-                const res = await fetch('/api/add_item', {
+                await fetch('/api/add_item', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ server, scanId, propType, pd, propId })
                 });
-                if (res.ok) {
-                    await fetchPaydays();
-                    fetchActionLogs();
-                }
-            } catch (e) {
-                alert('Ошибка сети');
-            }
+                loadData();
+            } catch(e) { console.error(e); }
         }
 
-        // --- КАЛЬКУЛЯТОР НАЛОГА ---
-        function setCalcType(type) {
-            calcState.type = type;
-            document.getElementById('calc-type-house').classList.toggle('active', type === 'house');
-            document.getElementById('calc-type-biz').classList.toggle('active', type === 'biz');
-            
-            const maxInput = document.getElementById('calc-tax-max');
-            if (maxInput) {
-                maxInput.value = (type === 'house') ? 104000 : 250000;
-            }
-            onCalcServerChange();
-        }
-
-        function setCalcInsurance(insured) {
-            calcState.insured = insured;
-            document.getElementById('calc-insurance-yes').classList.toggle('active', insured);
-            document.getElementById('calc-insurance-no').classList.toggle('active', !insured);
-        }
-
-        function onCalcServerChange() {
-            const srv = document.getElementById('calc-server-select').value;
-            if (srv && globalServerTaxes && globalServerTaxes[srv]) {
-                const taxInfo = globalServerTaxes[srv];
-                const taxVal = (calcState.type === 'house') ? taxInfo.house_tax : taxInfo.biz_tax;
-                if (taxVal !== undefined) {
-                    document.getElementById('calc-tax-pd').value = taxVal;
-                }
-            }
-        }
-
-        function calculateTax() {
-            const taxPd = parseFloat(document.getElementById('calc-tax-pd').value) || 0;
-            const currentTax = parseFloat(document.getElementById('calc-tax-current').value) || 0;
-            const maxTax = parseFloat(document.getElementById('calc-tax-max').value) || (calcState.type === 'house' ? 104000 : 250000);
-            const resBox = document.getElementById('calc-result');
-
-            if (!resBox) return;
-
-            if (taxPd <= 0) {
-                resBox.style.display = 'block';
-                resBox.innerHTML = '<div style="color: #ff5252; font-weight: 700;">Укажите корректный налог за PayDay!</div>';
-                return;
+        function calculateDropInfo(pd, status, typeRules) {
+            if (status === 'frozen') {
+                return { text: '❄️ Заморожен', isFrozen: true, paydays: null, hourSteps: null };
             }
 
-            const effectiveTax = calcState.insured ? (taxPd / 2) : taxPd;
-            const remainingTax = Math.max(0, maxTax - currentTax);
-            const paydaysLeft = Math.ceil(remainingTax / effectiveTax);
+            const rules = typeRules || { insured: 2, uninsured_min: 2, uninsured_max: 3 };
+            let decrement = 1;
+            let dropLimit = rules.insured;
+
+            if (status === 'uninsured') {
+                decrement = 2;
+                dropLimit = rules.uninsured_min;
+            } else if (status === 'no_activity') {
+                decrement = 4;
+                dropLimit = rules.uninsured_min;
+            }
+
+            const neededPayDays = Math.max(0, Math.ceil((pd - (dropLimit - 1)) / decrement));
 
             const now = new Date();
-            const utcMs = now.getTime() + (now.getTimezoneOffset() * 60000);
-            const mskNow = new Date(utcMs + (3 * 3600000));
-            const dropDate = new Date(mskNow.getTime() + (paydaysLeft * 3600000));
+            const utcTime = now.getTime() + (now.getTimezoneOffset() * 60000);
+            const mskNow = new Date(utcTime + (3 * 3600000));
 
-            const pad = n => String(n).padStart(2, '0');
-            const dropTimeStr = `${pad(dropDate.getDate())}.${pad(dropDate.getMonth() + 1)}.${dropDate.getFullYear()} в ${pad(dropDate.getHours())}:00 MSK`;
+            let targetTime = new Date(mskNow);
+            targetTime.setMinutes(0, 0, 0);
+            targetTime.setHours(targetTime.getHours() + 1);
 
-            resBox.style.display = 'block';
-            resBox.innerHTML = `
-                <div class="calc-res-grid">
-                    <div class="calc-res-item">
-                        <span class="calc-res-label">Налог в PayDay:</span>
-                        <span class="calc-res-val" style="color: #00e676;">$${effectiveTax.toLocaleString()} ${calcState.insured ? '<small>(Страховка)</small>' : ''}</span>
-                    </div>
-                    <div class="calc-res-item">
-                        <span class="calc-res-label">Осталось налога:</span>
-                        <span class="calc-res-val" style="color: #ffca28;">$${remainingTax.toLocaleString()}</span>
-                    </div>
-                    <div class="calc-res-item">
-                        <span class="calc-res-label">Осталось PayDay (часов):</span>
-                        <span class="calc-res-val" style="color: #00e5ff;">${paydaysLeft} ч.</span>
-                    </div>
-                    <div class="calc-res-item">
-                        <span class="calc-res-label">Примерное время слёта:</span>
-                        <span class="calc-res-val" style="color: #ff5252;">${dropTimeStr}</span>
-                    </div>
-                </div>
-            `;
+            let paydaysApplied = 0;
+            while (paydaysApplied < neededPayDays) {
+                if (targetTime.getHours() !== 5) {
+                    paydaysApplied++;
+                }
+                if (paydaysApplied < neededPayDays) {
+                    targetTime.setHours(targetTime.getHours() + 1);
+                }
+            }
+
+            let firstNextHour = new Date(mskNow);
+            firstNextHour.setMinutes(0, 0, 0);
+            firstNextHour.setHours(firstNextHour.getHours() + 1);
+
+            const hourSteps = Math.round((targetTime.getTime() - firstNextHour.getTime()) / 3600000) + 1;
+
+            const diffMs = targetTime.getTime() - mskNow.getTime();
+            if (diffMs <= 0) return { text: '< 1 мин', isFrozen: false, paydays: neededPayDays, hourSteps: 1 };
+
+            const totalMinutes = Math.floor(diffMs / 60000);
+            const hours = Math.floor(totalMinutes / 60);
+            const minutes = totalMinutes % 60;
+
+            let timeStr = '';
+            if (hours > 0) timeStr += `${hours} ч `;
+            timeStr += `${minutes} мин`;
+
+            return { text: timeStr, isFrozen: false, paydays: neededPayDays, hourSteps: hourSteps };
         }
 
-        function renderTaxesTab() {
-            const container = document.getElementById('taxes-container');
-            if (!container) return;
+        function calculateDropTime(pd, status, typeRules) {
+            return calculateDropInfo(pd, status, typeRules);
+        }
 
-            const isAdmin = currentUser && currentUser.role === 'admin';
+        function renderTable(items, server, scanId, type, interactive = true, isDropTab = false, info = {}) {
+            if (!items || items.length === 0) return '<span class="empty">Нет данных</span>';
+            
+            let html = '<table><tr><th>№</th><th>ID</th><th>PD</th><th>Статус</th>' + 
+                       (!interactive ? '<th>Слёт</th>' : '') + 
+                       (interactive ? '<th></th>' : '') + '</tr>';
+            
+            items.forEach((item) => {
+                const st = item.status || 'insured';
+                const isPending = item.isPendingPair;
+                const displayPd = interactive ? (item.basePd !== undefined ? item.basePd : item.pd) : item.pd;
+                const badgeClass = interactive ? 'pd-badge-fixed' : (isDropTab ? 'pd-badge-drop' : 'pd-badge');
 
-            let html = `
-                <div class="taxes-layout">
-                    <div class="tax-calc-card">
-                        <div class="tax-calc-header">
-                            <span>🧮 Калькулятор слёта имущества</span>
+                let statusControl = '';
+                if (interactive) {
+                    statusControl = `
+                        <div class="btn-group">
+                            <button class="btn-opt ${st === 'insured' && !isPending ? 'active-insured' : ''}" onclick="setStatus('${server}', '${scanId}', '${type}', ${item.pos}, 'insured')">Страх.</button>
+                            <button class="btn-opt ${st === 'uninsured' && !isPending ? 'active-uninsured' : ''}" onclick="setStatus('${server}', '${scanId}', '${type}', ${item.pos}, 'uninsured')">Не страх.</button>
+                            ${type === 'biz' ? `<button class="btn-opt ${st === 'no_activity' && !isPending ? 'active-noact' : ''}" onclick="setStatus('${server}', '${scanId}', 'biz',${item.pos}, 'no_activity')">Без зан.</button>` : ''}
+                            <button class="btn-opt ${st === 'frozen' && !isPending ? 'active-frozen' : ''}" onclick="setStatus('${server}', '${scanId}', '${type}', ${item.pos}, 'frozen')">Заморожен</button>
                         </div>
-                        <div class="tax-calc-row">
-                            <div class="tax-calc-field">
-                                <label>Тип имущества:</label>
-                                <div class="calc-type-toggle">
-                                    <button id="calc-type-house" class="calc-type-btn ${calcState.type === 'house' ? 'active' : ''}" onclick="setCalcType('house')">🏠 Дом</button>
-                                    <button id="calc-type-biz" class="calc-type-btn ${calcState.type === 'biz' ? 'active' : ''}" onclick="setCalcType('biz')">💼 Бизнес</button>
-                                </div>
-                            </div>
-                            <div class="tax-calc-field">
-                                <label>Наличие страховки:</label>
-                                <div class="calc-type-toggle">
-                                    <button id="calc-insurance-yes" class="calc-type-btn ${calcState.insured ? 'active' : ''}" onclick="setCalcInsurance(true)">Со страховкой</button>
-                                    <button id="calc-insurance-no" class="calc-type-btn ${!calcState.insured ? 'active' : ''}" onclick="setCalcInsurance(false)">Без страховки</button>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="tax-calc-row">
-                            <div class="tax-calc-field">
-                                <label>Выберите сервер:</label>
-                                <select id="calc-server-select" class="filter-select" style="width: 100%;" onchange="onCalcServerChange()">
-                                    <option value="">-- Авто-выбор налога --</option>
-                                    ${ALL_SERVERS.map(s => `<option value="${s}">${getServerDisplayName(s)}</option>`).join('')}
-                                </select>
-                            </div>
-                            <div class="tax-calc-field">
-                                <label>Налог в PayDay ($):</label>
-                                <input type="number" id="calc-tax-pd" class="filter-select" placeholder="Например: 1200" style="width: 100%;">
-                            </div>
-                        </div>
-                        <div class="tax-calc-row">
-                            <div class="tax-calc-field">
-                                <label>Текущий накопившийся налог ($):</label>
-                                <input type="number" id="calc-tax-current" class="filter-select" placeholder="0" value="0" style="width: 100%;">
-                            </div>
-                            <div class="tax-calc-field">
-                                <label>Максимальный налог ($):</label>
-                                <input type="number" id="calc-tax-max" class="filter-select" value="${calcState.type === 'house' ? 104000 : 250000}" style="width: 100%;">
-                            </div>
-                        </div>
-                        <button class="btn-calc-submit" onclick="calculateTax()">Рассчитать время слёта</button>
+                        ${isPending ? '<span class="status-pending">⏳ Новый</span>' : ''}`;
+                } else {
+                    if (isPending) {
+                        statusControl = `<span class="status-pending">⏳ Новый</span>`;
+                    } else {
+                        let label = 'Страховка';
+                        let classNm = 'status-insured';
+                        
+                        if (st === 'uninsured') { label = 'Без страх.'; classNm = 'status-uninsured'; }
+                        else if (st === 'no_activity') { label = 'Без зан.'; classNm = 'status-noact'; }
+                        else if (st === 'frozen') { label = '❄️ Заморожен'; classNm = 'status-frozen'; }
 
-                        <div id="calc-result" class="calc-result-box" style="display: none;"></div>
-                    </div>
+                        statusControl = `<span class="status-text ${classNm}">${label}</span>`;
+                    }
+                }
 
-                    <div class="taxes-table-card">
-                        <div class="tax-calc-header">
-                            <span>💵 Таблица налогов по серверам</span>
-                        </div>
-                        <table class="taxes-table-compact">
-                            <thead>
-                                <tr>
-                                    <th>Сервер</th>
-                                    <th>Налог на дом ($)</th>
-                                    <th>Налог на бизнес ($)</th>
-                                    ${isAdmin ? '<th>Действие</th>' : ''}
-                                </tr>
-                            </thead>
-                            <tbody>
-            `;
+                let dropTimeTd = '';
+                if (!interactive) {
+                    if (isPending) {
+                        dropTimeTd = '<td><span class="empty">—</span></td>';
+                    } else {
+                        const typeRules = getPropRules(info, type);
+                        const dropInfo = calculateDropTime(item.pd, st, typeRules);
+                        const badgeStyle = dropInfo.isFrozen ? 'time-left-frozen' : 'time-left-badge';
+                        dropTimeTd = `<td><span class="${badgeStyle}">${dropInfo.text}</span></td>`;
+                    }
+                }
 
-            ALL_SERVERS.forEach(srv => {
-                const t = globalServerTaxes[srv] || { house_tax: 0, biz_tax: 0 };
-                html += `
-                    <tr>
-                        <td><b>${getServerDisplayName(srv)}</b></td>
-                        <td>
-                            ${isAdmin ? `<input type="number" id="tax-h-${srv}" value="${t.house_tax}" class="tax-input-compact">` : `$${t.house_tax}`}
-                        </td>
-                        <td>
-                            ${isAdmin ? `<input type="number" id="tax-b-${srv}" value="${t.biz_tax}" class="tax-input-compact">` : `$${t.biz_tax}`}
-                        </td>
-                        ${isAdmin ? `<td><button class="btn-save-tax-compact" onclick="saveTaxCompact('${srv}')">Сохранить</button></td>` : ''}
-                    </tr>
-                `;
+                html += `<tr>
+                    <td>${item.pos}</td>
+                    <td>${item.propId ? '№' + item.propId : '—'}</td>
+                    <td><span class="${badgeClass}">${displayPd}</span></td>
+                    <td>${statusControl}</td>
+                    ${dropTimeTd}
+                    ${interactive ? `<td><button class="btn-del" onclick="deleteItem('${server}', '${scanId}', '${type}',${item.pos})">✖</button></td>` : ''}
+                </tr>`;
+            });
+            return html + '</table>';
+        }
+
+        function renderViewTab() {
+            const containerView = document.getElementById('servers-view');
+            if (!containerView) return;
+
+            const seasonFilter = document.getElementById('filter-season').value;
+            const favFilter = document.getElementById('filter-fav').value;
+
+            let filteredServers = ALL_SERVERS.filter(srv => {
+                const info = globalServerData[srv];
+                if (!info) return true;
+
+                if (seasonFilter !== 'all') {
+                    if (!info.season || String(info.season.id) !== seasonFilter) {
+                        return false;
+                    }
+                }
+
+                if (favFilter === 'fav_only') {
+                    if (!favoriteServers.includes(srv)) {
+                        return false;
+                    }
+                }
+
+                return true;
             });
 
-            html += `</tbody></table></div></div>`;
-            container.innerHTML = html;
-        }
+            containerView.innerHTML = '';
 
-        async function saveTaxCompact(server) {
-            const hElem = document.getElementById(`tax-h-${server}`);
-            const bElem = document.getElementById(`tax-b-${server}`);
-            if (!hElem || !bElem) return;
-
-            const house_tax = parseInt(hElem.value) || 0;
-            const biz_tax = parseInt(bElem.value) || 0;
-
-            try {
-                const res = await fetch('/api/taxes/update', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ server, house_tax, biz_tax })
-                });
-                if (res.ok) {
-                    await fetchTaxes();
-                    alert(`Налоги для ${server} успешно обновлены`);
-                } else {
-                    alert('Ошибка при сохранении налогов');
-                }
-            } catch (e) {
-                alert('Ошибка сети');
-            }
-        }
-
-        function renderAdminTab() {
-            fetchAdminUsers();
-            fetchAdminScanLogs();
-        }
-
-        async function handleCreateUser() {
-            const u = document.getElementById('new-username').value;
-            const p = document.getElementById('new-password').value;
-            const r = document.getElementById('new-role').value;
-
-            if (!u || !p) {
-                alert('Заполните логин и пароль');
+            if (filteredServers.length === 0) {
+                containerView.innerHTML = '<div class="empty-center">Нет серверов, соответствующих выбранным фильтрам</div>';
                 return;
             }
 
-            try {
-                const res = await fetch('/api/admin/create_user', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username: u, password: p, role: r })
-                });
-                if (res.ok) {
-                    document.getElementById('new-username').value = '';
-                    document.getElementById('new-password').value = '';
-                    fetchAdminUsers();
-                } else {
-                    const err = await res.json();
-                    alert(err.detail || 'Ошибка создания пользователя');
-                }
-            } catch (e) {
-                alert('Ошибка сети');
-            }
+            filteredServers.forEach(srv => {
+                const isFav = favoriteServers.includes(srv);
+                const starIcon = isFav ? '⭐' : '☆';
+                const displayName = getServerDisplayName(srv);
+
+                const cardView = `
+                    <div class="server-card">
+                        <div class="server-header">
+                            <div class="server-title">
+                                <span>
+                                    <span class="fav-btn" title="Добавить в избранное" onclick="toggleFavorite('${srv}')">${starIcon}</span>
+                                    ${displayName}
+                                </span>
+                                <span class="season-badge season-badge-${srv}">Загрузка...</span>
+                            </div>
+                        </div>
+                        <div class="tables-grid">
+                            <div>
+                                <div class="section-title">Дома</div>
+                                <div id="houses-view-${srv}"></div>
+                            </div>
+                            <div>
+                                <div class="section-title">Бизнесы</div>
+                                <div id="biz-view-${srv}"></div>
+                            </div>
+                        </div>
+                    </div>`;
+                containerView.insertAdjacentHTML('beforeend', cardView);
+            });
+
+            updateViewTables();
         }
 
-        async function fetchAdminUsers() {
-            try {
-                const res = await fetch('/api/admin/users');
-                if (res.ok) {
-                    const users = await res.json();
-                    const container = document.getElementById('admin-users-table');
-                    if (!container) return;
+        function updateViewTables() {
+            for (const srv of ALL_SERVERS) {
+                const info = globalServerData[srv];
+                if (!info) continue;
 
-                    let html = `
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>ID</th>
-                                    <th>Логин</th>
-                                    <th>Роль</th>
-                                    <th>Доступ</th>
-                                    <th>Действия</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                    `;
-
-                    users.forEach(u => {
-                        html += `
-                            <tr>
-                                <td>${u.id}</td>
-                                <td><b>${u.username}</b></td>
-                                <td><span class="season-badge">${u.role}</span></td>
-                                <td>
-                                    <button class="btn-status-pill ${u.is_allowed ? 'active-insured' : 'active-uninsured'}" onclick="toggleAccess(${u.id}, ${!u.is_allowed})">
-                                        ${u.is_allowed ? 'Разрешен' : 'Заблокирован'}
-                                    </button>
-                                </td>
-                                <td>
-                                    <button class="btn-add" style="margin-right: 4px;" onclick="promptRole(${u.id})">Роль</button>
-                                    <button class="btn-add" style="margin-right: 4px; background: #5c6bc0;" onclick="promptPassword(${u.id})">Пароль</button>
-                                    ${u.username !== 'admin' ? `<button class="btn-user-del" onclick="deleteUser(${u.id})">Удалить</button>` : ''}
-                                </td>
-                            </tr>
-                        `;
+                if (info.season) {
+                    document.querySelectorAll(`.season-badge-${srv}`).forEach(elem => {
+                        elem.innerText = `${info.season.display}`;
                     });
-
-                    html += `</tbody></table>`;
-                    container.innerHTML = html;
                 }
-            } catch (e) {
-                console.error('Ошибка загрузки пользователей:', e);
+
+                const elemHouse = document.getElementById(`houses-view-${srv}`);
+                const elemBiz = document.getElementById(`biz-view-${srv}`);
+                if (!elemHouse || !elemBiz) continue;
+
+                const latestConfirmed = info.latestConfirmedScan;
+
+                if (latestConfirmed && (latestConfirmed.isConfirmed || latestConfirmed.hasPair)) {
+                    elemHouse.innerHTML = renderTable(latestConfirmed.houses, srv, latestConfirmed.scanId, 'house', false, false, info);
+                    elemBiz.innerHTML = renderTable(latestConfirmed.businesses, srv, latestConfirmed.scanId, 'biz', false, false, info);
+                } else {
+                    elemHouse.innerHTML = '<span class="empty">Ожидание 2-й точки</span>';
+                    elemBiz.innerHTML = '<span class="empty">Ожидание 2-й точки</span>';
+                }
             }
         }
 
-        async function toggleAccess(userId, isAllowed) {
-            try {
-                const res = await fetch('/api/admin/toggle_access', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ user_id: userId, is_allowed: isAllowed })
-                });
-                if (res.ok) fetchAdminUsers();
-            } catch (e) { alert('Ошибка сети'); }
+        function willDropInExactHours(item, typeRules, targetHours) {
+            if (!item || item.isPendingPair || item.status === 'frozen') return false;
+            const st = item.status || 'insured';
+            const dropInfo = calculateDropInfo(item.pd, st, typeRules);
+            return dropInfo.hourSteps === targetHours;
         }
 
-        async function promptRole(userId) {
-            const role = prompt("Введите новую роль (user, support, admin):");
-            if (!role) return;
+        async function loadData() {
             try {
-                const res = await fetch('/api/admin/update_role', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ user_id: userId, role })
-                });
-                if (res.ok) fetchAdminUsers();
-                else { const err = await res.json(); alert(err.detail || 'Ошибка'); }
-            } catch (e) { alert('Ошибка сети'); }
-        }
+                const res = await fetch('/api/paydays');
+                if (!res.ok) {
+                    if (res.status === 401 || res.status === 403) checkAuth();
+                    return;
+                }
+                const data = await res.json();
+                globalServerData = data;
+                
+                renderViewTab();
 
-        async function promptPassword(userId) {
-            const new_password = prompt("Введите новый пароль:");
-            if (!new_password) return;
-            try {
-                const res = await fetch('/api/admin/change_password', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ user_id: userId, new_password })
-                });
-                if (res.ok) alert("Пароль успешно изменен");
-                else { const err = await res.json(); alert(err.detail || 'Ошибка'); }
-            } catch (e) { alert('Ошибка сети'); }
-        }
+                const containerUpcoming = document.getElementById('servers-upcoming');
+                containerUpcoming.innerHTML = '';
+                let hasUpcomingDrops = false;
 
-        async function deleteUser(userId) {
-            if (!confirm("Удалить пользователя?")) return;
-            try {
-                const res = await fetch('/api/admin/delete_user', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ user_id: userId })
-                });
-                if (res.ok) fetchAdminUsers();
-            } catch (e) { alert('Ошибка сети'); }
-        }
+                const canManage = currentUser && (currentUser.role === 'admin' || currentUser.role === 'support');
 
-        async function fetchAdminScanLogs() {
-            try {
-                const res = await fetch('/api/admin/scan_logs');
-                if (res.ok) {
-                    const logs = await res.json();
-                    const container = document.getElementById('admin-scan-logs-table');
-                    if (!container) return;
+                for (const srv of ALL_SERVERS) {
+                    const info = data[srv];
+                    if (!info) continue;
 
-                    if (logs.length === 0) {
-                        container.innerHTML = '<span class="empty">Логи отсутствуют</span>';
-                        return;
+                    const scans = info.scans || [];
+                    const manageTabsElem = document.getElementById(`scan-tabs-${srv}`);
+                    const delScanBtnElem = document.getElementById(`btn-del-scan-${srv}`);
+                    
+                    if (scans.length === 0) {
+                        if (manageTabsElem) manageTabsElem.innerHTML = '<span class="empty">Сканирований нет</span>';
+                        if (delScanBtnElem) delScanBtnElem.style.display = 'none';
+                        if (canManage) {
+                            const hm = document.getElementById(`houses-manage-${srv}`);
+                            const bm = document.getElementById(`biz-manage-${srv}`);
+                            if (hm) hm.innerHTML = '<span class="empty">Нет данных</span>';
+                            if (bm) bm.innerHTML = '<span class="empty">Нет данных</span>';
+                        }
+                        continue;
                     }
 
-                    let html = `
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>Время</th>
-                                    <th>Сервер</th>
-                                    <th>Сканнер</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                    `;
+                    if (delScanBtnElem) delScanBtnElem.style.display = 'inline-block';
 
-                    logs.forEach(l => {
-                        html += `
-                            <tr>
-                                <td style="color: #ffca28;">${l.created_at || '—'}</td>
-                                <td><b>${getServerDisplayName(l.server)}</b></td>
-                                <td style="color: #00e5ff;">${l.scanner}</td>
-                            </tr>
-                        `;
-                    });
+                    if (!activeServerScans[srv] || !scans.some(s => s.scanId === activeServerScans[srv])) {
+                        activeServerScans[srv] = scans[scans.length - 1].scanId;
+                    }
 
-                    html += `</tbody></table>`;
-                    container.innerHTML = html;
+                    const activeScanId = activeServerScans[srv];
+
+                    if (manageTabsElem) {
+                        manageTabsElem.innerHTML = scans.map(s => {
+                            let typeClass = 'single';
+                            let statusIcon = '⏳';
+                            let titleHint = 'Ожидает пару';
+
+                            if (s.hasPair) {
+                                if (s.isCurrentPair) {
+                                    typeClass = 'current-pair';
+                                    statusIcon = '🟢';
+                                    titleHint = 'Актуальная пара';
+                                } else {
+                                    typeClass = 'old-pair';
+                                    statusIcon = '⚪';
+                                    titleHint = 'Старый скан (устарел)';
+                                }
+                            } else if (s.isOutdated) {
+                                typeClass = 'old-pair';
+                                statusIcon = '🔴';
+                                titleHint = 'Скан устарел (не дождался пары)';
+                            }
+
+                            const isActive = s.scanId === activeScanId ? 'active' : '';
+
+                            return `
+                                <button class="scan-subtab ${typeClass} ${isActive}" 
+                                        title="${s.scanId} — ${titleHint}"
+                                        onclick="selectScanTab('${srv}', '${s.scanId}')">
+                                    <span>${statusIcon}</span> ${s.hourLabel}
+                                </button>
+                            `;
+                        }).join('');
+                    }
+
+                    const curScan = scans.find(s => s.scanId === activeScanId) || scans[scans.length - 1];
+
+                    if (canManage) {
+                        const hm = document.getElementById(`houses-manage-${srv}`);
+                        const bm = document.getElementById(`biz-manage-${srv}`);
+                        if (hm) hm.innerHTML = renderTable(curScan.houses, srv, curScan.scanId, 'house', true, false, info);
+                        if (bm) bm.innerHTML = renderTable(curScan.businesses, srv, curScan.scanId, 'biz', true, false, info);
+                    }
+
+                    const latestConfirmed = info.latestConfirmedScan;
+                    if (latestConfirmed && (latestConfirmed.isConfirmed || latestConfirmed.hasPair)) {
+                        const houseRules = getPropRules(info, 'house');
+                        const bizRules = getPropRules(info, 'biz');
+
+                        const droppingHouses = (latestConfirmed.houses || []).filter(h => willDropInExactHours(h, houseRules, selectedUpcomingHours));
+                        const droppingBiz = (latestConfirmed.businesses || []).filter(b => willDropInExactHours(b, bizRules, selectedUpcomingHours));
+
+                        if (droppingHouses.length > 0 || droppingBiz.length > 0) {
+                            hasUpcomingDrops = true;
+                            
+                            let hourTitleStr = 'в этот час';
+                            if (selectedUpcomingHours === 2) hourTitleStr = 'через 2 часа';
+                            if (selectedUpcomingHours === 3) hourTitleStr = 'через 3 часа';
+
+                            const displayName = getServerDisplayName(srv);
+
+                            const cardUpcoming = `
+                                <div class="server-card">
+                                    <div class="server-header">
+                                        <div class="server-title">
+                                            <span>${displayName}</span>
+                                            <span class="season-badge">${info.season ? info.season.display : ''}</span>
+                                        </div>
+                                    </div>
+                                    <div class="tables-grid">
+                                        <div>
+                                            <div class="section-title">Дома (${hourTitleStr})</div>
+                                            ${renderTable(droppingHouses, srv, latestConfirmed.scanId, 'house', false, true, info)}
+                                        </div>
+                                        <div>
+                                            <div class="section-title">Бизнесы (${hourTitleStr})</div>
+                                            ${renderTable(droppingBiz, srv, latestConfirmed.scanId, 'biz', false, true, info)}
+                                        </div>
+                                    </div>
+                                </div>`;
+                            containerUpcoming.insertAdjacentHTML('beforeend', cardUpcoming);
+                        }
+                    }
                 }
-            } catch (e) {
-                console.error('Ошибка загрузки логов:', e);
-            }
+
+                if (!hasUpcomingDrops) {
+                    let hourMsg = 'в этот час';
+                    if (selectedUpcomingHours === 2) hourMsg = 'через 2 часа';
+                    if (selectedUpcomingHours === 3) hourMsg = 'через 3 часа';
+                    containerUpcoming.innerHTML = `<div class="empty-center">Слётов имущества ${hourMsg} не ожидается</div>`;
+                }
+            } catch(e) { console.error(e); }
         }
 
-        window.onload = function() {
-            checkAuth();
+        function initDashboard() {
+            const containerManage = document.getElementById('servers-manage');
+            containerManage.innerHTML = '';
+
+            const canManage = currentUser && (currentUser.role === 'admin' || currentUser.role === 'support');
+
+            if (canManage) {
+                ALL_SERVERS.forEach(srv => {
+                    const cardManage = `
+                        <div class="server-card">
+                            <div class="server-header">
+                                <div class="server-title">
+                                    <span>${getServerDisplayName(srv)}</span>
+                                    <span class="season-badge season-badge-${srv}">Загрузка...</span>
+                                </div>
+                            </div>
+                            <div class="scan-tabs-bar">
+                                <div class="scan-tabs-container" id="scan-tabs-${srv}"></div>
+                                <button class="btn-delete-scan" id="btn-del-scan-${srv}" onclick="deleteWholeScan('${srv}')">Удалить скан</button>
+                            </div>
+                            <div class="tables-grid">
+                                <div>
+                                    <div class="section-header">
+                                        <span class="section-title">Дома</span>
+                                        <button class="btn-add" onclick="addItemPrompt('${srv}', 'house')">+ Дом</button>
+                                    </div>
+                                    <div id="houses-manage-${srv}"></div>
+                                </div>
+                                <div>
+                                    <div class="section-header">
+                                        <span class="section-title">Бизнесы</span>
+                                        <button class="btn-add" onclick="addItemPrompt('${srv}', 'biz')">+ Бизнес</button>
+                                    </div>
+                                    <div id="biz-manage-${srv}"></div>
+                                </div>
+                            </div>
+                        </div>`;
+                    containerManage.insertAdjacentHTML('beforeend', cardManage);
+                });
+            }
+
+            renderViewTab();
+            loadData();
+            setInterval(loadData, 10000);
+            
             updateLotteryTimer();
             setInterval(updateLotteryTimer, 1000);
-            setInterval(fetchPaydays, 30000);
-        };
+        }
+
+        document.addEventListener('DOMContentLoaded', checkAuth);
     </script>
+</head>
+<body>
+    <h1>Arizona RP — Мониторинг Слётов</h1>
+
+    <!-- Экран входа -->
+    <div id="login-screen" class="login-box" style="display: none;">
+        <h2>Авторизация</h2>
+        <input type="text" id="login-username" placeholder="Логин" onkeydown="if(event.key==='Enter') handleLogin()"><br>
+        <input type="password" id="login-password" placeholder="Пароль" onkeydown="if(event.key==='Enter') handleLogin()"><br>
+        <button type="button" onclick="handleLogin()">Войти</button>
+    </div>
+
+    <!-- Основной Дашборд -->
+    <div id="main-dashboard" style="display: none;">
+        <div class="user-nav">
+            <span id="user-info"></span>
+            <button class="btn-logout" onclick="handleLogout()">Выйти</button>
+        </div>
+
+        <div class="tabs">
+            <button id="btn-tab-view" class="tab-btn active" onclick="switchTab('view')">👁 Общий вид</button>
+            <button id="btn-tab-upcoming" class="tab-btn" onclick="switchTab('upcoming')">🔥 Ближайшие</button>
+            <button id="btn-tab-manage" class="tab-btn" onclick="switchTab('manage')">⚙ Управление</button>
+            <button id="btn-tab-admin" class="tab-btn" onclick="switchTab('admin')">👑 Админ-панель</button>
+        </div>
+
+        <!-- Вкладка 1: Общий вид -->
+        <div id="tab-view" class="tab-content active">
+            <div class="filter-panel">
+                <div class="filter-group">
+                    <label for="filter-season">Сезон:</label>
+                    <select id="filter-season" class="filter-select" onchange="renderViewTab()">
+                        <option value="all">Все сезоны</option>
+                        <option value="1">📱 По инфе (1)</option>
+                        <option value="2">⌨ Скорострелы (2)</option>
+                        <option value="3">🏎️ Автогонки (3)</option>
+                        <option value="4">✈️ По новому (4)</option>
+                        <option value="5">🏍️ Мотогонки (5)</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label for="filter-fav">Избранное:</label>
+                    <select id="filter-fav" class="filter-select" onchange="renderViewTab()">
+                        <option value="all">Все серверы</option>
+                        <option value="fav_only">⭐ Только избранные</option>
+                    </select>
+                </div>
+            </div>
+            
+            <div id="servers-view" class="servers-container"></div>
+        </div>
+
+        <!-- Вкладка 2: Ближайшие -->
+        <div id="tab-upcoming" class="tab-content">
+            <div class="upcoming-filters">
+                <button id="btn-upcoming-1h" class="time-filter-btn active" onclick="setUpcomingHoursFilter(1)">В этот час</button>
+                <button id="btn-upcoming-2h" class="time-filter-btn" onclick="setUpcomingHoursFilter(2)">Через 2 часа</button>
+                <button id="btn-upcoming-3h" class="time-filter-btn" onclick="setUpcomingHoursFilter(3)">Через 3 часа</button>
+            </div>
+            <div id="servers-upcoming" class="servers-container"></div>
+        </div>
+
+        <!-- Вкладка 3: Управление -->
+        <div id="tab-manage" class="tab-content">
+            <div id="servers-manage" class="servers-container"></div>
+        </div>
+
+        <!-- Вкладка 4: Админ-панель -->
+        <div id="tab-admin" class="tab-content">
+            <div class="filter-panel" style="flex-direction: column; align-items: stretch; max-width: 900px;">
+                <h3 style="margin-top:0; color: var(--accent-orange);">Управление пользователями</h3>
+                
+                <div style="display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap;">
+                    <input type="text" id="new-username" placeholder="Логин" style="padding: 8px; border-radius: 4px; border: 1px solid #263043; background: #0f121a; color: #fff;">
+                    <input type="password" id="new-password" placeholder="Пароль" style="padding: 8px; border-radius: 4px; border: 1px solid #263043; background: #0f121a; color: #fff;">
+                    <select id="new-role" class="select-role">
+                        <option value="user">User</option>
+                        <option value="support">Support</option>
+                        <option value="admin">Admin</option>
+                    </select>
+                    <button class="btn-add" onclick="handleCreateUser()">+ Создать аккаунт</button>
+                </div>
+
+                <div id="admin-users-table"></div>
+
+                <h3 style="margin-top:25px; color: var(--accent-orange);">История сканирований (Логи за сегодня)</h3>
+                <div id="admin-scan-logs-table"></div>
+            </div>
+        </div>
+    </div>
 </body>
 </html>
 """
