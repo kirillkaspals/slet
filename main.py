@@ -982,7 +982,6 @@ async def update_status(data: UpdateStatusModel, username: str = Depends(verify_
                 if scan["scanId"] == data.scanId:
                     target_key = "houses" if data.propType in ["house", "houses"] else "businesses"
                     
-                    # Проверка валидности статусов для типов имущества
                     if target_key == "houses" and data.status == "no_activity":
                         raise HTTPException(status_code=400, detail="Статус 'Без занятости' недоступен для домов")
 
@@ -990,7 +989,6 @@ async def update_status(data: UpdateStatusModel, username: str = Depends(verify_
                         if item["pos"] == data.pos:
                             prev_status = item.get("status", "new")
                             
-                            # Ручная смена статуса: списание за прошедшие часы в статусе 'new'
                             if prev_status in ["new", "новый"]:
                                 created_str = item.get("createdAt") or scan.get("scanTime")
                                 if created_str:
@@ -1448,7 +1446,6 @@ DASHBOARD_HTML = """
         .pd-badge { background-color: #263043; color: #e2e8f0; padding: 2px 6px; border-radius: 5px; font-weight: 800; font-size: 0.75rem; }
         .time-left-badge { font-weight: 800; color: #ffca28; font-size: 0.75rem; background-color: rgba(255, 152, 0, 0.12); padding: 3px 7px; border-radius: 6px; border: 1px solid rgba(255, 152, 0, 0.35); }
 
-        /* КНОПКИ СТАТУСОВ В УПРАВЛЕНИИ */
         .status-btn-group {
             display: flex;
             gap: 4px;
@@ -1529,7 +1526,6 @@ DASHBOARD_HTML = """
         .action-log-content { margin-top: 15px; max-height: 280px; overflow-y: auto; border-top: 1px solid rgba(255, 255, 255, 0.08); padding-top: 10px; }
         .action-log-content.collapsed { display: none; }
 
-        /* ВКТАДКА НАЛОГИ (КАЛЬКУЛЯТОР И ТАБЛИЦА) */
         .taxes-layout {
             display: flex;
             flex-direction: column;
@@ -1947,9 +1943,11 @@ DASHBOARD_HTML = """
             let scanHourStartMs = nowMskMs;
             if (scanTimeStr) {
                 const parts = scanTimeStr.split(' ');
-                const dParts = parts[0].split('-');
-                const tParts = parts[1].split(':');
-                scanHourStartMs = Date.UTC(parseInt(dParts[0]), parseInt(dParts[1]) - 1, parseInt(dParts[2]), parseInt(tParts[0]), 0, 0);
+                if (parts.length >= 2) {
+                    const dParts = parts[0].split('-');
+                    const tParts = parts[1].split(':');
+                    scanHourStartMs = Date.UTC(parseInt(dParts[0]), parseInt(dParts[1]) - 1, parseInt(dParts[2]), parseInt(tParts[0]), 0, 0);
+                }
             }
 
             const nowHourStartMs = Date.UTC(nowMsk.getUTCFullYear(), nowMsk.getUTCMonth(), nowMsk.getUTCDate(), nowMsk.getUTCHours(), 0, 0);
@@ -1975,13 +1973,15 @@ DASHBOARD_HTML = """
                 }
             }
 
-            return {
-                curPd,
-                displayPd,
-                dropLimit,
-                hoursUntilDrop,
-                rate
-            };
+            return { curPd, displayPd, dropLimit, hoursUntilDrop, rate };
+        }
+
+        function getStatusBadge(status) {
+            if (status === 'insured') return '<span class="status-text status-insured">Страхован</span>';
+            if (status === 'uninsured') return '<span class="status-text status-uninsured">Без страховки</span>';
+            if (status === 'no_activity') return '<span class="status-text status-noact">Без занятости</span>';
+            if (status === 'frozen') return '<span class="status-text status-frozen">Заморожен</span>';
+            return '<span class="status-text status-new">Новый</span>';
         }
 
         async function checkAuth() {
@@ -2008,6 +2008,7 @@ DASHBOARD_HTML = """
                 }
             } catch (e) {
                 console.error('Ошибка проверки сессии:', e);
+                document.getElementById('login-screen').style.display = 'block';
             }
         }
 
@@ -2027,7 +2028,7 @@ DASHBOARD_HTML = """
                     alert(err.detail || 'Ошибка авторизации');
                 }
             } catch (e) {
-                alert(' Ошибка сети');
+                alert('Ошибка сети');
             }
         }
 
@@ -2063,13 +2064,18 @@ DASHBOARD_HTML = """
             renderViewTab();
         }
 
+        function selectScan(srv, scanId, tabName) {
+            activeServerScans[srv] = scanId;
+            if (tabName === 'view') renderViewTab();
+            if (tabName === 'manage') renderManageTab();
+        }
+
         async function fetchPaydays() {
             try {
                 const res = await fetch('/api/paydays');
                 if (res.ok) {
                     globalServerData = await res.json();
                     
-                    // Инициализация выбранных сканов
                     ALL_SERVERS.forEach(srv => {
                         if (!activeServerScans[srv] && globalServerData[srv] && globalServerData[srv].scans) {
                             const scans = globalServerData[srv].scans;
@@ -2082,7 +2088,8 @@ DASHBOARD_HTML = """
                         }
                     });
 
-                    const activeTab = document.querySelector('.tab-btn.active').id.replace('btn-tab-', '');
+                    const activeTabElem = document.querySelector('.tab-btn.active');
+                    const activeTab = activeTabElem ? activeTabElem.id.replace('btn-tab-', '') : 'view';
                     if (activeTab === 'view') renderViewTab();
                     if (activeTab === 'upcoming') renderUpcomingTab();
                     if (activeTab === 'manage') renderManageTab();
@@ -2097,7 +2104,8 @@ DASHBOARD_HTML = """
                 const res = await fetch('/api/taxes');
                 if (res.ok) {
                     globalServerTaxes = await res.json();
-                    const activeTab = document.querySelector('.tab-btn.active').id.replace('btn-tab-', '');
+                    const activeTabElem = document.querySelector('.tab-btn.active');
+                    const activeTab = activeTabElem ? activeTabElem.id.replace('btn-tab-', '') : 'view';
                     if (activeTab === 'taxes') renderTaxesTab();
                 }
             } catch (e) {
@@ -2160,6 +2168,411 @@ DASHBOARD_HTML = """
             }
         }
 
+        function renderViewTab() {
+            const container = document.getElementById('servers-view');
+            if (!container) return;
+
+            const seasonFilter = document.getElementById('filter-season').value;
+            const favFilter = document.getElementById('filter-fav').value;
+
+            let html = '';
+
+            ALL_SERVERS.forEach(srv => {
+                const srvData = globalServerData[srv] || { scans: [], season: { id: 1, display: '📱 По инфе (1)' } };
+                const seasonId = String(srvData.season ? srvData.season.id : 1);
+
+                if (seasonFilter !== 'all' && seasonFilter !== seasonId) return;
+                if (favFilter === 'fav_only' && !favoriteServers.includes(srv)) return;
+
+                const isFav = favoriteServers.includes(srv);
+                const scans = srvData.scans || [];
+
+                let activeScanId = activeServerScans[srv];
+                let currentScan = scans.find(s => s.scanId === activeScanId);
+
+                if (!currentScan && scans.length > 0) {
+                    const curPair = scans.find(s => s.isCurrentPair && s.hasPair);
+                    currentScan = curPair || scans[scans.length - 1];
+                    activeScanId = currentScan.scanId;
+                    activeServerScans[srv] = activeScanId;
+                }
+
+                html += `
+                    <div class="server-card">
+                        <div class="server-header">
+                            <div class="server-title">
+                                <span>${getServerDisplayName(srv)}</span>
+                                <span style="cursor: pointer;" onclick="toggleFavorite('${srv}')">${isFav ? '⭐' : '☆'}</span>
+                            </div>
+                            <div style="margin-top: 4px;">
+                                <span class="season-badge">${srvData.season ? srvData.season.display : ''}</span>
+                            </div>
+                        </div>
+                `;
+
+                if (scans.length > 0) {
+                    html += `<div class="scan-tabs-bar"><div class="scan-tabs-container">`;
+                    scans.forEach(s => {
+                        let badgeClass = 'single';
+                        if (s.isCurrentPair && s.hasPair) badgeClass = 'current-pair';
+                        else if (s.hasPair || s.isConfirmed) badgeClass = 'old-pair';
+
+                        const isActive = (s.scanId === activeScanId) ? 'active' : '';
+                        html += `
+                            <button class="scan-subtab ${badgeClass} ${isActive}" onclick="selectScan('${srv}', '${s.scanId}', 'view')">
+                                ${s.hourLabel || s.scanId}
+                            </button>
+                        `;
+                    });
+                    html += `</div></div>`;
+
+                    if (currentScan) {
+                        html += `
+                            <div class="scan-info-time">
+                                Время скана: <b>${currentScan.scanTime || currentScan.scanId}</b>
+                            </div>
+                            <div class="tables-grid">
+                                <div>
+                                    <div class="section-header">
+                                        <span class="section-title">🏠 Дома (${(currentScan.houses || []).length})</span>
+                                    </div>
+                                    ${renderPropertyTable(srv, currentScan.houses || [], 'house', currentScan.scanTime)}
+                                </div>
+                                <div>
+                                    <div class="section-header">
+                                        <span class="section-title">💼 Бизнесы (${(currentScan.businesses || []).length})</span>
+                                    </div>
+                                    ${renderPropertyTable(srv, currentScan.businesses || [], 'biz', currentScan.scanTime)}
+                                </div>
+                            </div>
+                        `;
+                    }
+                } else {
+                    html += `<span class="empty">Данные сканирования отсутствуют</span>`;
+                }
+
+                html += `</div>`;
+            });
+
+            if (!html) {
+                html = `<div class="empty-center">По выбранным фильтрам серверы не найдены</div>`;
+            }
+
+            container.innerHTML = html;
+        }
+
+        function renderPropertyTable(srv, items, propType, scanTimeStr) {
+            if (!items || items.length === 0) {
+                return `<span class="empty">Нет данных</span>`;
+            }
+
+            let html = `
+                <table>
+                    <thead>
+                        <tr>
+                            <th>№</th>
+                            <th>ID</th>
+                            <th>PD</th>
+                            <th>Слёт</th>
+                            <th>Статус</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+
+            items.forEach(item => {
+                const info = getPropertyInfo(item, srv, propType, scanTimeStr);
+                const propIdDisplay = (item.propId !== null && item.propId !== undefined) ? `#${item.propId}` : '—';
+                const timeLeftDisplay = (info.hoursUntilDrop !== null) 
+                    ? `<span class="time-left-badge">${info.hoursUntilDrop} ч</span>` 
+                    : '—';
+
+                html += `
+                    <tr>
+                        <td>${item.pos}</td>
+                        <td><b>${propIdDisplay}</b></td>
+                        <td><span class="pd-badge">${info.curPd} PD</span></td>
+                        <td>${timeLeftDisplay}</td>
+                        <td>${getStatusBadge(item.status)}</td>
+                    </tr>
+                `;
+            });
+
+            html += `</tbody></table>`;
+            return html;
+        }
+
+        function setUpcomingHoursFilter(hours) {
+            selectedUpcomingHours = hours;
+            document.querySelectorAll('.time-filter-btn').forEach(btn => btn.classList.remove('active'));
+            const targetBtn = document.getElementById(`btn-upcoming-${hours}h`);
+            if (targetBtn) targetBtn.classList.add('active');
+            renderUpcomingTab();
+        }
+
+        function renderUpcomingTab() {
+            const container = document.getElementById('servers-upcoming');
+            if (!container) return;
+
+            let html = '';
+
+            ALL_SERVERS.forEach(srv => {
+                const srvData = globalServerData[srv];
+                if (!srvData || !srvData.scans || srvData.scans.length === 0) return;
+
+                const scans = srvData.scans;
+                const curPair = scans.find(s => s.isCurrentPair && s.hasPair);
+                const scan = curPair || scans[scans.length - 1];
+
+                if (!scan) return;
+
+                const upcomingHouses = (scan.houses || []).filter(item => {
+                    const info = getPropertyInfo(item, srv, 'house', scan.scanTime);
+                    return info.hoursUntilDrop !== null && info.hoursUntilDrop <= selectedUpcomingHours;
+                });
+
+                const upcomingBiz = (scan.businesses || []).filter(item => {
+                    const info = getPropertyInfo(item, srv, 'biz', scan.scanTime);
+                    return info.hoursUntilDrop !== null && info.hoursUntilDrop <= selectedUpcomingHours;
+                });
+
+                if (upcomingHouses.length > 0 || upcomingBiz.length > 0) {
+                    html += `
+                        <div class="server-card">
+                            <div class="server-header">
+                                <div class="server-title">
+                                    <span>${getServerDisplayName(srv)}</span>
+                                    <span class="season-badge">${srvData.season ? srvData.season.display : ''}</span>
+                                </div>
+                                <div class="scan-info-time" style="margin-top: 6px; margin-bottom:0;">
+                                    Скан: <b>${scan.scanTime || scan.scanId}</b>
+                                </div>
+                            </div>
+                            <div class="tables-grid">
+                                <div>
+                                    <div class="section-header">
+                                        <span class="section-title">🏠 Дома (${upcomingHouses.length})</span>
+                                    </div>
+                                    ${renderPropertyTable(srv, upcomingHouses, 'house', scan.scanTime)}
+                                </div>
+                                <div>
+                                    <div class="section-header">
+                                        <span class="section-title">💼 Бизнесы (${upcomingBiz.length})</span>
+                                    </div>
+                                    ${renderPropertyTable(srv, upcomingBiz, 'biz', scan.scanTime)}
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }
+            });
+
+            if (!html) {
+                html = `<div class="empty-center">В ближайшие ${selectedUpcomingHours} ч. слётов не ожидается</div>`;
+            }
+
+            container.innerHTML = html;
+        }
+
+        function renderManageTab() {
+            const container = document.getElementById('servers-manage');
+            if (!container) return;
+
+            let html = '';
+
+            ALL_SERVERS.forEach(srv => {
+                const srvData = globalServerData[srv] || { scans: [] };
+                const scans = srvData.scans || [];
+
+                let activeScanId = activeServerScans[srv];
+                let currentScan = scans.find(s => s.scanId === activeScanId);
+
+                if (!currentScan && scans.length > 0) {
+                    currentScan = scans[scans.length - 1];
+                    activeScanId = currentScan.scanId;
+                    activeServerScans[srv] = activeScanId;
+                }
+
+                html += `
+                    <div class="server-card">
+                        <div class="server-header">
+                            <div class="server-title">
+                                <span>${getServerDisplayName(srv)}</span>
+                                ${currentScan ? `<button class="btn-delete-scan" onclick="deleteScan('${srv}', '${currentScan.scanId}')">Удалить скан</button>` : ''}
+                            </div>
+                        </div>
+                `;
+
+                if (scans.length > 0) {
+                    html += `<div class="scan-tabs-bar"><div class="scan-tabs-container">`;
+                    scans.forEach(s => {
+                        const isActive = (s.scanId === activeScanId) ? 'active' : '';
+                        html += `
+                            <button class="scan-subtab ${isActive}" onclick="selectScan('${srv}', '${s.scanId}', 'manage')">
+                                ${s.hourLabel || s.scanId}
+                            </button>
+                        `;
+                    });
+                    html += `</div></div>`;
+
+                    if (currentScan) {
+                        html += `
+                            <div class="tables-grid">
+                                <div>
+                                    <div class="section-header">
+                                        <span class="section-title">🏠 Дома</span>
+                                        <button class="btn-add" onclick="addItemPrompt('${srv}', '${currentScan.scanId}', 'house')">+ Добавить</button>
+                                    </div>
+                                    ${renderManageTable(srv, currentScan.scanId, currentScan.houses || [], 'house')}
+                                </div>
+                                <div>
+                                    <div class="section-header">
+                                        <span class="section-title">💼 Бизнесы</span>
+                                        <button class="btn-add" onclick="addItemPrompt('${srv}', '${currentScan.scanId}', 'biz')">+ Добавить</button>
+                                    </div>
+                                    ${renderManageTable(srv, currentScan.scanId, currentScan.businesses || [], 'biz')}
+                                </div>
+                            </div>
+                        `;
+                    }
+                } else {
+                    html += `<span class="empty">Нет сканов для управления</span>`;
+                }
+
+                html += `</div>`;
+            });
+
+            container.innerHTML = html;
+        }
+
+        function renderManageTable(srv, scanId, items, propType) {
+            if (!items || items.length === 0) {
+                return `<span class="empty">Список пуст</span>`;
+            }
+
+            let html = `
+                <table>
+                    <thead>
+                        <tr>
+                            <th>№</th>
+                            <th>ID / PD</th>
+                            <th>Изменить статус</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+            `;
+
+            items.forEach(item => {
+                const propIdDisplay = (item.propId !== null && item.propId !== undefined) ? `#${item.propId}` : '—';
+                const st = item.status;
+
+                html += `
+                    <tr>
+                        <td><b>${item.pos}</b></td>
+                        <td>
+                            <div><b>${propIdDisplay}</b></div>
+                            <div style="font-size: 0.72rem; color: var(--text-muted);">${item.pd} PD</div>
+                        </td>
+                        <td>
+                            <div class="status-btn-group">
+                                <button class="btn-status-pill ${st === 'insured' ? 'active-insured' : ''}" onclick="changeStatus('${srv}', '${scanId}', '${propType}', ${item.pos}, 'insured')">Страх.</button>
+                                <button class="btn-status-pill ${st === 'uninsured' ? 'active-uninsured' : ''}" onclick="changeStatus('${srv}', '${scanId}', '${propType}', ${item.pos}, 'uninsured')">Без страх.</button>
+                                <button class="btn-status-pill ${st === 'frozen' ? 'active-frozen' : ''}" onclick="changeStatus('${srv}', '${scanId}', '${propType}', ${item.pos}, 'frozen')">Замороз.</button>
+                                ${propType === 'biz' ? `<button class="btn-status-pill ${st === 'no_activity' ? 'active-noact' : ''}" onclick="changeStatus('${srv}', '${scanId}', '${propType}', ${item.pos}, 'no_activity')">Без зан.</button>` : ''}
+                            </div>
+                        </td>
+                        <td>
+                            <button class="btn-del" onclick="deleteItem('${srv}', '${scanId}', '${propType}', ${item.pos})">✕</button>
+                        </td>
+                    </tr>
+                `;
+            });
+
+            html += `</tbody></table>`;
+            return html;
+        }
+
+        async function changeStatus(server, scanId, propType, pos, status) {
+            try {
+                const res = await fetch('/api/update_status', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ server, scanId, propType, pos, status })
+                });
+                if (res.ok) {
+                    await fetchPaydays();
+                    fetchActionLogs();
+                } else {
+                    const err = await res.json();
+                    alert(err.detail || 'Ошибка обновления статуса');
+                }
+            } catch (e) {
+                alert('Ошибка сети');
+            }
+        }
+
+        async function deleteItem(server, scanId, propType, pos) {
+            if (!confirm('Удалить данный элемент?')) return;
+            try {
+                const res = await fetch('/api/delete_item', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ server, scanId, propType, pos })
+                });
+                if (res.ok) {
+                    await fetchPaydays();
+                    fetchActionLogs();
+                }
+            } catch (e) {
+                alert('Ошибка сети');
+            }
+        }
+
+        async function deleteScan(server, scanId) {
+            if (!confirm(`Удалить скан ${scanId}?`)) return;
+            try {
+                const res = await fetch('/api/delete_scan', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ server, scanId })
+                });
+                if (res.ok) {
+                    await fetchPaydays();
+                    fetchActionLogs();
+                }
+            } catch (e) {
+                alert('Ошибка сети');
+            }
+        }
+
+        async function addItemPrompt(server, scanId, propType) {
+            const pdStr = prompt("Введите количество PD (налог в пейдей):");
+            if (!pdStr) return;
+            const pd = parseInt(pdStr);
+            if (isNaN(pd)) {
+                alert("Некорректное число PD");
+                return;
+            }
+
+            const propIdStr = prompt("Введите номер (ID) имущества (или оставьте пустым):");
+            const propId = (propIdStr && !isNaN(parseInt(propIdStr))) ? parseInt(propIdStr) : null;
+
+            try {
+                const res = await fetch('/api/add_item', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ server, scanId, propType, pd, propId })
+                });
+                if (res.ok) {
+                    await fetchPaydays();
+                    fetchActionLogs();
+                }
+            } catch (e) {
+                alert('Ошибка сети');
+            }
+        }
+
         // --- КАЛЬКУЛЯТОР НАЛОГА ---
         function setCalcType(type) {
             calcState.type = type;
@@ -2196,15 +2609,15 @@ DASHBOARD_HTML = """
             const maxTax = parseFloat(document.getElementById('calc-tax-max').value) || (calcState.type === 'house' ? 104000 : 250000);
             const resBox = document.getElementById('calc-result');
 
+            if (!resBox) return;
+
             if (taxPd <= 0) {
                 resBox.style.display = 'block';
                 resBox.innerHTML = '<div style="color: #ff5252; font-weight: 700;">Укажите корректный налог за PayDay!</div>';
                 return;
             }
 
-            // Требование: при кнопке страхованный идет расчет с налогом в 2 раза меньше
             const effectiveTax = calcState.insured ? (taxPd / 2) : taxPd;
-
             const remainingTax = Math.max(0, maxTax - currentTax);
             const paydaysLeft = Math.ceil(remainingTax / effectiveTax);
 
@@ -2214,726 +2627,151 @@ DASHBOARD_HTML = """
             const dropDate = new Date(mskNow.getTime() + (paydaysLeft * 3600000));
 
             const pad = n => String(n).padStart(2, '0');
-            const dateStr = `${pad(dropDate.getDate())}.${pad(dropDate.getMonth() + 1)}.${dropDate.getFullYear()} в ${pad(dropDate.getHours())}:00 МСК`;
+            const dropTimeStr = `${pad(dropDate.getDate())}.${pad(dropDate.getMonth() + 1)}.${dropDate.getFullYear()} в ${pad(dropDate.getHours())}:00 MSK`;
 
             resBox.style.display = 'block';
             resBox.innerHTML = `
                 <div class="calc-res-grid">
                     <div class="calc-res-item">
-                        <span class="calc-res-label">До слёта осталось:</span>
-                        <span class="calc-res-val" style="color: #ffca28;">${paydaysLeft} PD <small>(~${paydaysLeft} ч.)</small></span>
+                        <span class="calc-res-label">Налог в PayDay:</span>
+                        <span class="calc-res-val" style="color: #00e676;">$${effectiveTax.toLocaleString()} ${calcState.insured ? '<small>(Страховка)</small>' : ''}</span>
                     </div>
                     <div class="calc-res-item">
-                        <span class="calc-res-label">Расчетный налог:</span>
-                        <span class="calc-res-val" style="color: #00e676;">${effectiveTax} $ / PD ${calcState.insured ? '<small style="color: #81c784;">(в 2 раза меньше)</small>' : ''}</span>
+                        <span class="calc-res-label">Осталось налога:</span>
+                        <span class="calc-res-val" style="color: #ffca28;">$${remainingTax.toLocaleString()}</span>
                     </div>
                     <div class="calc-res-item">
-                        <span class="calc-res-label">Остаток налога до лимита:</span>
-                        <span class="calc-res-val" style="color: #40c4ff;">${remainingTax.toLocaleString('ru-RU')} $</span>
+                        <span class="calc-res-label">Осталось PayDay (часов):</span>
+                        <span class="calc-res-val" style="color: #00e5ff;">${paydaysLeft} ч.</span>
                     </div>
                     <div class="calc-res-item">
                         <span class="calc-res-label">Примерное время слёта:</span>
-                        <span class="calc-res-val" style="color: #ff5252;">${dateStr}</span>
+                        <span class="calc-res-val" style="color: #ff5252;">${dropTimeStr}</span>
                     </div>
                 </div>
             `;
         }
 
-        // --- РЕНДЕР ТАБА НАЛОГИ ---
         function renderTaxesTab() {
             const container = document.getElementById('taxes-container');
             if (!container) return;
 
-            let calcServerOpts = `<option value="">-- Выберите сервер (автозаполнение) --</option>`;
-            ALL_SERVERS.forEach(srv => {
-                calcServerOpts += `<option value="${srv}">${getServerDisplayName(srv)}</option>`;
-            });
+            const isAdmin = currentUser && currentUser.role === 'admin';
 
             let html = `
                 <div class="taxes-layout">
-                    <!-- Калькулятор налога -->
                     <div class="tax-calc-card">
                         <div class="tax-calc-header">
-                            <span>🧮 Калькулятор налога</span>
+                            <span>🧮 Калькулятор слёта имущества</span>
                         </div>
-                        <div class="tax-calc-body">
-                            <div class="tax-calc-row">
-                                <div class="tax-calc-field">
-                                    <label>Тип имущества:</label>
-                                    <div class="calc-type-toggle">
-                                        <button id="calc-type-house" class="calc-type-btn ${calcState.type === 'house' ? 'active' : ''}" onclick="setCalcType('house')">🏠 Дом</button>
-                                        <button id="calc-type-biz" class="calc-type-btn ${calcState.type === 'biz' ? 'active' : ''}" onclick="setCalcType('biz')">🏢 Бизнес</button>
-                                    </div>
-                                </div>
-                                <div class="tax-calc-field">
-                                    <label>Сервер:</label>
-                                    <select id="calc-server-select" class="filter-select" onchange="onCalcServerChange()">
-                                        ${calcServerOpts}
-                                    </select>
+                        <div class="tax-calc-row">
+                            <div class="tax-calc-field">
+                                <label>Тип имущества:</label>
+                                <div class="calc-type-toggle">
+                                    <button id="calc-type-house" class="calc-type-btn ${calcState.type === 'house' ? 'active' : ''}" onclick="setCalcType('house')">🏠 Дом</button>
+                                    <button id="calc-type-biz" class="calc-type-btn ${calcState.type === 'biz' ? 'active' : ''}" onclick="setCalcType('biz')">💼 Бизнес</button>
                                 </div>
                             </div>
-                            <div class="tax-calc-row">
-                                <div class="tax-calc-field">
-                                    <label>Налог за PayDay ($):</label>
-                                    <input type="number" id="calc-tax-pd" placeholder="Например: 1000" class="filter-select">
-                                </div>
-                                <div class="tax-calc-field">
-                                    <label>Текущий налог ($):</label>
-                                    <input type="number" id="calc-tax-current" placeholder="Например: 50000" class="filter-select">
-                                </div>
-                                <div class="tax-calc-field">
-                                    <label>Макс. налог ($):</label>
-                                    <input type="number" id="calc-tax-max" value="${calcState.type === 'house' ? 104000 : 250000}" class="filter-select">
+                            <div class="tax-calc-field">
+                                <label>Наличие страховки:</label>
+                                <div class="calc-type-toggle">
+                                    <button id="calc-insurance-yes" class="calc-type-btn ${calcState.insured ? 'active' : ''}" onclick="setCalcInsurance(true)">Со страховкой</button>
+                                    <button id="calc-insurance-no" class="calc-type-btn ${!calcState.insured ? 'active' : ''}" onclick="setCalcInsurance(false)">Без страховки</button>
                                 </div>
                             </div>
-                            <div class="tax-calc-row">
-                                <div class="tax-calc-field">
-                                    <label>Страховка:</label>
-                                    <div class="calc-type-toggle">
-                                        <button id="calc-insurance-yes" class="calc-type-btn ${calcState.insured ? 'active' : ''}" onclick="setCalcInsurance(true)">🛡️ Страхованный</button>
-                                        <button id="calc-insurance-no" class="calc-type-btn ${!calcState.insured ? 'active' : ''}" onclick="setCalcInsurance(false)">❌ Без страховки</button>
-                                    </div>
-                                </div>
-                                <div class="tax-calc-field" style="justify-content: flex-end;">
-                                    <button class="btn-calc-submit" onclick="calculateTax()">Рассчитать</button>
-                                </div>
-                            </div>
-                            <div id="calc-result" class="calc-result-box" style="display: none;"></div>
                         </div>
+                        <div class="tax-calc-row">
+                            <div class="tax-calc-field">
+                                <label>Выберите сервер:</label>
+                                <select id="calc-server-select" class="filter-select" style="width: 100%;" onchange="onCalcServerChange()">
+                                    <option value="">-- Авто-выбор налога --</option>
+                                    ${ALL_SERVERS.map(s => `<option value="${s}">${getServerDisplayName(s)}</option>`).join('')}
+                                </select>
+                            </div>
+                            <div class="tax-calc-field">
+                                <label>Налог в PayDay ($):</label>
+                                <input type="number" id="calc-tax-pd" class="filter-select" placeholder="Например: 1200" style="width: 100%;">
+                            </div>
+                        </div>
+                        <div class="tax-calc-row">
+                            <div class="tax-calc-field">
+                                <label>Текущий накопившийся налог ($):</label>
+                                <input type="number" id="calc-tax-current" class="filter-select" placeholder="0" value="0" style="width: 100%;">
+                            </div>
+                            <div class="tax-calc-field">
+                                <label>Максимальный налог ($):</label>
+                                <input type="number" id="calc-tax-max" class="filter-select" value="${calcState.type === 'house' ? 104000 : 250000}" style="width: 100%;">
+                            </div>
+                        </div>
+                        <button class="btn-calc-submit" onclick="calculateTax()">Рассчитать время слёта</button>
+
+                        <div id="calc-result" class="calc-result-box" style="display: none;"></div>
                     </div>
 
-                    <!-- Компактная аккуратная таблица налогов -->
                     <div class="taxes-table-card">
                         <div class="tax-calc-header">
-                            <span>💰 Таблица налогов по серверам</span>
-                            <span style="font-size: 0.78rem; color: var(--text-muted); font-weight: 500;">Установка базовых налогов ($/PD)</span>
+                            <span>💵 Таблица налогов по серверам</span>
                         </div>
-                        <div style="overflow-x: auto;">
-                            <table class="taxes-table-compact">
-                                <thead>
-                                    <tr>
-                                        <th>Сервер</th>
-                                        <th>Налог на дом ($)</th>
-                                        <th>Налог на бизнес ($)</th>
-                                        ${currentUser && currentUser.role === 'admin' ? '<th style="text-align: right;">Действие</th>' : ''}
-                                    </tr>
-                                </thead>
-                                <tbody>
+                        <table class="taxes-table-compact">
+                            <thead>
+                                <tr>
+                                    <th>Сервер</th>
+                                    <th>Налог на дом ($)</th>
+                                    <th>Налог на бизнес ($)</th>
+                                    ${isAdmin ? '<th>Действие</th>' : ''}
+                                </tr>
+                            </thead>
+                            <tbody>
             `;
 
             ALL_SERVERS.forEach(srv => {
-                const taxData = globalServerTaxes[srv] || { house_tax: 0, biz_tax: 0 };
-                const isAdmin = currentUser && currentUser.role === 'admin';
-
+                const t = globalServerTaxes[srv] || { house_tax: 0, biz_tax: 0 };
                 html += `
                     <tr>
-                        <td style="font-weight: 700;">${getServerDisplayName(srv)}</td>
+                        <td><b>${getServerDisplayName(srv)}</b></td>
                         <td>
-                            ${isAdmin 
-                                ? `<input type="number" id="tax-house-${srv}" value="${taxData.house_tax}" class="tax-input-compact">`
-                                : `<span style="color: #00e676; font-weight: 700;">${taxData.house_tax.toLocaleString('ru-RU')} $</span>`
-                            }
+                            ${isAdmin ? `<input type="number" id="tax-h-${srv}" value="${t.house_tax}" class="tax-input-compact">` : `$${t.house_tax}`}
                         </td>
                         <td>
-                            ${isAdmin 
-                                ? `<input type="number" id="tax-biz-${srv}" value="${taxData.biz_tax}" class="tax-input-compact">`
-                                : `<span style="color: #00e676; font-weight: 700;">${taxData.biz_tax.toLocaleString('ru-RU')} $</span>`
-                            }
+                            ${isAdmin ? `<input type="number" id="tax-b-${srv}" value="${t.biz_tax}" class="tax-input-compact">` : `$${t.biz_tax}`}
                         </td>
-                        ${isAdmin ? `
-                            <td style="text-align: right;">
-                                <button onclick="saveServerTax('${srv}')" class="btn-save-tax-compact">Сохранить</button>
-                            </td>
-                        ` : ''}
+                        ${isAdmin ? `<td><button class="btn-save-tax-compact" onclick="saveTaxCompact('${srv}')">Сохранить</button></td>` : ''}
                     </tr>
                 `;
             });
 
-            html += `
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-                </div>
-            `;
-
+            html += `</tbody></table></div></div>`;
             container.innerHTML = html;
         }
 
-        async function saveServerTax(srv) {
-            const houseVal = parseInt(document.getElementById(`tax-house-${srv}`).value) || 0;
-            const bizVal = parseInt(document.getElementById(`tax-biz-${srv}`).value) || 0;
+        async function saveTaxCompact(server) {
+            const hElem = document.getElementById(`tax-h-${server}`);
+            const bElem = document.getElementById(`tax-b-${server}`);
+            if (!hElem || !bElem) return;
+
+            const house_tax = parseInt(hElem.value) || 0;
+            const biz_tax = parseInt(bElem.value) || 0;
 
             try {
                 const res = await fetch('/api/taxes/update', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ server: srv, house_tax: houseVal, biz_tax: bizVal })
+                    body: JSON.stringify({ server, house_tax, biz_tax })
                 });
                 if (res.ok) {
-                    alert(`Налоги для ${srv} успешно сохранены!`);
-                    fetchTaxes();
+                    await fetchTaxes();
+                    alert(`Налоги для ${server} успешно обновлены`);
                 } else {
-                    const err = await res.json();
-                    alert(`Ошибка: ${err.detail || 'Не удалось сохранить'}`);
+                    alert('Ошибка при сохранении налогов');
                 }
             } catch (e) {
                 alert('Ошибка сети');
             }
         }
 
-        function renderViewTab() {
-            const container = document.getElementById('servers-view');
-            if (!container) return;
-            container.innerHTML = '';
-
-            const seasonFilter = document.getElementById('filter-season').value;
-            const favFilter = document.getElementById('filter-fav').value;
-
-            ALL_SERVERS.forEach(srv => {
-                const srvInfo = globalServerData[srv];
-                if (!srvInfo) return;
-
-                const isFav = favoriteServers.includes(srv);
-                if (favFilter === 'fav_only' && !isFav) return;
-                if (seasonFilter !== 'all' && String(srvInfo.season.id) !== seasonFilter) return;
-
-                const card = document.createElement('div');
-                card.className = 'server-card';
-
-                const scans = srvInfo.scans || [];
-                const activeScanId = activeServerScans[srv];
-                const activeScan = scans.find(s => s.scanId === activeScanId) || scans[scans.length - 1];
-
-                let scanTabsHtml = '';
-                if (scans.length > 0) {
-                    scanTabsHtml += '<div class="scan-tabs-bar"><div class="scan-tabs-container">';
-                    scans.forEach(s => {
-                        let cls = 'scan-subtab';
-                        if (s.isCurrentPair && s.hasPair) cls += ' current-pair';
-                        else if (s.hasPair) cls += ' old-pair';
-                        else cls += ' single';
-
-                        if (activeScan && s.scanId === activeScan.scanId) cls += ' active';
-                        
-                        scanTabsHtml += `<button class="${cls}" onclick="selectServerScan('${srv}', '${s.scanId}')">${s.hourLabel}</button>`;
-                    });
-                    scanTabsHtml += '</div></div>';
-                }
-
-                let tablesHtml = '<div class="tables-grid">';
-                
-                // Таблица домов
-                tablesHtml += '<div><div class="section-header"><span class="section-title">🏠 Дома</span></div>';
-                if (activeScan && activeScan.houses && activeScan.houses.length > 0) {
-                    tablesHtml += '<table><thead><tr><th>№</th><th>PD</th><th>ID</th></tr></thead><tbody>';
-                    activeScan.houses.forEach(h => {
-                        const pInfo = getPropertyInfo(h, srv, 'house', activeScan.scanTime);
-                        const isDrop = pInfo.curPd <= pInfo.dropLimit;
-                        const pdColor = isDrop ? '#ff5252' : '#e2e8f0';
-                        const propIdStr = h.propId ? `#${h.propId}` : '—';
-
-                        tablesHtml += `
-                            <tr>
-                                <td><b>${h.pos}</b></td>
-                                <td><span class="pd-badge" style="color:${pdColor}">${pInfo.displayPd} PD</span></td>
-                                <td><b>${propIdStr}</b></td>
-                            </tr>
-                        `;
-                    });
-                    tablesHtml += '</tbody></table>';
-                } else {
-                    tablesHtml += '<span class="empty">Нет данных</span>';
-                }
-                tablesHtml += '</div>';
-
-                // Таблица бизнесов
-                tablesHtml += '<div><div class="section-header"><span class="section-title">🏢 Бизнесы</span></div>';
-                if (activeScan && activeScan.businesses && activeScan.businesses.length > 0) {
-                    tablesHtml += '<table><thead><tr><th>№</th><th>PD</th><th>ID</th></tr></thead><tbody>';
-                    activeScan.businesses.forEach(b => {
-                        const pInfo = getPropertyInfo(b, srv, 'biz', activeScan.scanTime);
-                        const isDrop = pInfo.curPd <= pInfo.dropLimit;
-                        const pdColor = isDrop ? '#ff5252' : '#e2e8f0';
-                        const propIdStr = b.propId ? `#${b.propId}` : '—';
-
-                        tablesHtml += `
-                            <tr>
-                                <td><b>${b.pos}</b></td>
-                                <td><span class="pd-badge" style="color:${pdColor}">${pInfo.displayPd} PD</span></td>
-                                <td><b>${propIdStr}</b></td>
-                            </tr>
-                        `;
-                    });
-                    tablesHtml += '</tbody></table>';
-                } else {
-                    tablesHtml += '<span class="empty">Нет данных</span>';
-                }
-                tablesHtml += '</div></div>';
-
-                card.innerHTML = `
-                    <div class="server-header">
-                        <div class="server-title">
-                            <span>${getServerDisplayName(srv)}</span>
-                            <span style="cursor:pointer;" onclick="toggleFavorite('${srv}')">${isFav ? '⭐' : '☆'}</span>
-                        </div>
-                        <div style="margin-top: 4px;">
-                            <span class="season-badge">${srvInfo.season.display}</span>
-                        </div>
-                    </div>
-                    ${scanTabsHtml}
-                    ${tablesHtml}
-                `;
-
-                container.appendChild(card);
-            });
-        }
-
-        function selectServerScan(srv, scanId) {
-            activeServerScans[srv] = scanId;
-            renderViewTab();
-        }
-
-        function setUpcomingHoursFilter(hours) {
-            selectedUpcomingHours = hours;
-            document.querySelectorAll('.time-filter-btn').forEach(b => b.classList.remove('active'));
-            const btn = document.getElementById(`btn-upcoming-${hours}h`);
-            if (btn) btn.classList.add('active');
-            renderUpcomingTab();
-        }
-
-        function renderUpcomingTab() {
-            const container = document.getElementById('servers-upcoming');
-            if (!container) return;
-            container.innerHTML = '';
-
-            let totalCount = 0;
-
-            ALL_SERVERS.forEach(srv => {
-                const srvInfo = globalServerData[srv];
-                if (!srvInfo) return;
-
-                const scan = srvInfo.latestConfirmedScan;
-                if (!scan) return;
-
-                const upcomingHouses = [];
-                (scan.houses || []).forEach(h => {
-                    const pInfo = getPropertyInfo(h, srv, 'house', scan.scanTime);
-                    if (pInfo.hoursUntilDrop !== null && pInfo.hoursUntilDrop <= selectedUpcomingHours) {
-                        upcomingHouses.push({ ...h, pInfo });
-                    }
-                });
-
-                const upcomingBiz = [];
-                (scan.businesses || []).forEach(b => {
-                    const pInfo = getPropertyInfo(b, srv, 'biz', scan.scanTime);
-                    if (pInfo.hoursUntilDrop !== null && pInfo.hoursUntilDrop <= selectedUpcomingHours) {
-                        upcomingBiz.push({ ...b, pInfo });
-                    }
-                });
-
-                if (upcomingHouses.length === 0 && upcomingBiz.length === 0) return;
-
-                totalCount++;
-                const card = document.createElement('div');
-                card.className = 'server-card';
-
-                let tablesHtml = '<div class="tables-grid">';
-
-                tablesHtml += '<div><div class="section-header"><span class="section-title">🏠 Дома</span></div>';
-                if (upcomingHouses.length > 0) {
-                    tablesHtml += '<table><thead><tr><th>№</th><th>PD</th><th>Слёт через</th></tr></thead><tbody>';
-                    upcomingHouses.forEach(h => {
-                        const hLeft = h.pInfo.hoursUntilDrop === 0 ? 'Сейчас' : `~${h.pInfo.hoursUntilDrop} ч.`;
-                        tablesHtml += `
-                            <tr>
-                                <td><b>${h.pos}</b></td>
-                                <td><span class="pd-badge">${h.pInfo.displayPd} PD</span></td>
-                                <td><span class="time-left-badge">${hLeft}</span></td>
-                            </tr>
-                        `;
-                    });
-                    tablesHtml += '</tbody></table>';
-                } else {
-                    tablesHtml += '<span class="empty">Нет ближайших</span>';
-                }
-                tablesHtml += '</div>';
-
-                tablesHtml += '<div><div class="section-header"><span class="section-title">🏢 Бизнесы</span></div>';
-                if (upcomingBiz.length > 0) {
-                    tablesHtml += '<table><thead><tr><th>№</th><th>PD</th><th>Слёт через</th></tr></thead><tbody>';
-                    upcomingBiz.forEach(b => {
-                        const hLeft = b.pInfo.hoursUntilDrop === 0 ? 'Сейчас' : `~${b.pInfo.hoursUntilDrop} ч.`;
-                        tablesHtml += `
-                            <tr>
-                                <td><b>${b.pos}</b></td>
-                                <td><span class="pd-badge">${b.pInfo.displayPd} PD</span></td>
-                                <td><span class="time-left-badge">${hLeft}</span></td>
-                            </tr>
-                        `;
-                    });
-                    tablesHtml += '</tbody></table>';
-                } else {
-                    tablesHtml += '<span class="empty">Нет ближайших</span>';
-                }
-                tablesHtml += '</div></div>';
-
-                card.innerHTML = `
-                    <div class="server-header">
-                        <div class="server-title">
-                            <span>${getServerDisplayName(srv)}</span>
-                            <span class="season-badge">${srvInfo.season.display}</span>
-                        </div>
-                    </div>
-                    <div class="scan-info-time">Подтвержденный скан: <b>${scan.hourLabel}</b></div>
-                    ${tablesHtml}
-                `;
-
-                container.appendChild(card);
-            });
-
-            if (totalCount === 0) {
-                container.innerHTML = `<div class="empty-center">В ближайшие ${selectedUpcomingHours} ч. слётов не ожидается</div>`;
-            }
-        }
-
-        // РЕНДЕР КНОПОК СТАТУСА (В УПРАВЛЕНИИ)
-        function renderStatusButtons(srv, scanId, propType, pos, currentStatus) {
-            const isBiz = (propType === 'biz' || propType === 'businesses');
-            
-            const statuses = [
-                { id: 'insured', label: 'Застрахован', cls: 'active-insured' },
-                { id: 'uninsured', label: 'Без страховки', cls: 'active-uninsured' },
-                { id: 'frozen', label: 'Заморожен', cls: 'active-frozen' }
-            ];
-
-            // Для бизнесов добавляем "Без занятости"
-            if (isBiz) {
-                statuses.push({ id: 'no_activity', label: 'Без занятости', cls: 'active-noact' });
-            }
-
-            return `
-                <div class="status-btn-group">
-                    ${statuses.map(st => `
-                        <button class="btn-status-pill ${currentStatus === st.id ? st.cls : ''}"
-                                onclick="updateItemStatus('${srv}', '${scanId}', '${propType}', ${pos}, '${st.id}')"
-                                title="${st.label}">
-                            ${st.label}
-                        </button>
-                    `).join('')}
-                </div>
-            `;
-        }
-
-        function renderManageTab() {
-            const container = document.getElementById('servers-manage');
-            if (!container) return;
-            container.innerHTML = '';
-
-            ALL_SERVERS.forEach(srv => {
-                const srvInfo = globalServerData[srv];
-                if (!srvInfo || !srvInfo.scans || srvInfo.scans.length === 0) return;
-
-                const card = document.createElement('div');
-                card.className = 'server-card';
-
-                const scans = srvInfo.scans;
-                const activeScanId = activeServerScans[srv] || scans[scans.length - 1].scanId;
-                const activeScan = scans.find(s => s.scanId === activeScanId) || scans[scans.length - 1];
-
-                let scanTabsHtml = '<div class="scan-tabs-bar"><div class="scan-tabs-container">';
-                scans.forEach(s => {
-                    let cls = 'scan-subtab';
-                    if (s.isCurrentPair && s.hasPair) cls += ' current-pair';
-                    else if (s.hasPair) cls += ' old-pair';
-                    else cls += ' single';
-
-                    if (activeScan && s.scanId === activeScan.scanId) cls += ' active';
-                    
-                    scanTabsHtml += `<button class="${cls}" onclick="selectServerScanManage('${srv}', '${s.scanId}')">${s.hourLabel}</button>`;
-                });
-                scanTabsHtml += `</div><button class="btn-delete-scan" onclick="deleteScan('${srv}', '${activeScan.scanId}')">Удалить скан</button></div>`;
-
-                let tablesHtml = '<div class="tables-grid">';
-
-                // Управление Домами
-                tablesHtml += '<div><div class="section-header"><span class="section-title">🏠 Дома</span><button class="btn-add" onclick="openAddItemModal(\'${srv}\', \'${activeScan.scanId}\', \'house\')">+ Добавить</button></div>';
-                if (activeScan && activeScan.houses && activeScan.houses.length > 0) {
-                    tablesHtml += '<table><thead><tr><th>№</th><th>PD</th><th>Статус</th><th>Действия</th></tr></thead><tbody>';
-                    activeScan.houses.forEach(h => {
-                        tablesHtml += `
-                            <tr>
-                                <td><b>${h.pos}</b></td>
-                                <td><span class="pd-badge">${h.pd} PD</span></td>
-                                <td>${renderStatusButtons(srv, activeScan.scanId, 'house', h.pos, h.status)}</td>
-                                <td><button class="btn-del" onclick="deleteItem('${srv}', '${activeScan.scanId}', 'house', ${h.pos})">✕</button></td>
-                            </tr>
-                        `;
-                    });
-                    tablesHtml += '</tbody></table>';
-                } else {
-                    tablesHtml += '<span class="empty">Нет записей</span>';
-                }
-                tablesHtml += '</div>';
-
-                // Управление Бизнесами
-                tablesHtml += '<div><div class="section-header"><span class="section-title">🏢 Бизнесы</span><button class="btn-add" onclick="openAddItemModal(\'${srv}\', \'${activeScan.scanId}\', \'biz\')">+ Добавить</button></div>';
-                if (activeScan && activeScan.businesses && activeScan.businesses.length > 0) {
-                    tablesHtml += '<table><thead><tr><th>№</th><th>PD</th><th>Статус</th><th>Действия</th></tr></thead><tbody>';
-                    activeScan.businesses.forEach(b => {
-                        tablesHtml += `
-                            <tr>
-                                <td><b>${b.pos}</b></td>
-                                <td><span class="pd-badge">${b.pd} PD</span></td>
-                                <td>${renderStatusButtons(srv, activeScan.scanId, 'biz', b.pos, b.status)}</td>
-                                <td><button class="btn-del" onclick="deleteItem('${srv}', '${activeScan.scanId}', 'biz', ${b.pos})">✕</button></td>
-                            </tr>
-                        `;
-                    });
-                    tablesHtml += '</tbody></table>';
-                } else {
-                    tablesHtml += '<span class="empty">Нет записей</span>';
-                }
-                tablesHtml += '</div></div>';
-
-                card.innerHTML = `
-                    <div class="server-header">
-                        <div class="server-title">
-                            <span>${getServerDisplayName(srv)}</span>
-                            <span class="season-badge">${srvInfo.season.display}</span>
-                        </div>
-                    </div>
-                    ${scanTabsHtml}
-                    ${tablesHtml}
-                `;
-
-                container.appendChild(card);
-            });
-        }
-
-        function selectServerScanManage(srv, scanId) {
-            activeServerScans[srv] = scanId;
-            renderManageTab();
-        }
-
-        async function updateItemStatus(srv, scanId, propType, pos, newStatus) {
-            try {
-                const res = await fetch('/api/update_status', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ server: srv, scanId: scanId, propType: propType, pos: pos, status: newStatus })
-                });
-                if (res.ok) {
-                    fetchPaydays();
-                    fetchActionLogs();
-                } else {
-                    const err = await res.json();
-                    alert(err.detail || 'Ошибка изменения статуса');
-                }
-            } catch (e) {
-                alert('Ошибка сети');
-            }
-        }
-
-        async function deleteItem(srv, scanId, propType, pos) {
-            if (!confirm('Удалить эту позицию?')) return;
-            try {
-                const res = await fetch('/api/delete_item', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ server: srv, scanId: scanId, propType: propType, pos: pos })
-                });
-                if (res.ok) {
-                    fetchPaydays();
-                    fetchActionLogs();
-                }
-            } catch (e) {
-                alert('Ошибка сети');
-            }
-        }
-
-        async function deleteScan(srv, scanId) {
-            if (!confirm('Удалить весь этот скан?')) return;
-            try {
-                const res = await fetch('/api/delete_scan', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ server: srv, scanId: scanId })
-                });
-                if (res.ok) {
-                    fetchPaydays();
-                    fetchActionLogs();
-                }
-            } catch (e) {
-                alert('Ошибка сети');
-            }
-        }
-
-        async function openAddItemModal(srv, scanId, propType) {
-            const pdStr = prompt('Введите количество PD:');
-            if (!pdStr) return;
-            const pd = parseInt(pdStr);
-            if (isNaN(pd)) return alert('Некорректное число');
-
-            const idStr = prompt('Введите ID имущества (необязательно):');
-            const propId = idStr ? parseInt(idStr) : null;
-
-            try {
-                const res = await fetch('/api/add_item', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ server: srv, scanId: scanId, propType: propType, pd: pd, propId: propId })
-                });
-                if (res.ok) {
-                    fetchPaydays();
-                    fetchActionLogs();
-                }
-            } catch (e) {
-                alert('Ошибка сети');
-            }
-        }
-
-        // --- АДМИН ПАНЕЛЬ ---
-        async function renderAdminTab() {
+        function renderAdminTab() {
             fetchAdminUsers();
             fetchAdminScanLogs();
-        }
-
-        async function fetchAdminUsers() {
-            try {
-                const res = await fetch('/api/admin/users');
-                if (res.ok) {
-                    const users = await res.json();
-                    renderAdminUsersTable(users);
-                }
-            } catch (e) {
-                console.error('Ошибка пользователей:', e);
-            }
-        }
-
-        function renderAdminUsersTable(users) {
-            const container = document.getElementById('admin-users-table');
-            if (!container) return;
-
-            if (!users || users.length === 0) {
-                container.innerHTML = '<span class="empty">Нет пользователей</span>';
-                return;
-            }
-
-            let html = `
-                <table style="width: 100%; border-collapse: collapse; font-size: 0.88rem;">
-                    <thead>
-                        <tr>
-                            <th style="padding: 10px; border-bottom: 1px solid rgba(255,255,255,0.1); color: var(--accent-orange);">ID</th>
-                            <th style="padding: 10px; border-bottom: 1px solid rgba(255,255,255,0.1); color: var(--accent-orange);">Логин</th>
-                            <th style="padding: 10px; border-bottom: 1px solid rgba(255,255,255,0.1); color: var(--accent-orange);">Роль</th>
-                            <th style="padding: 10px; border-bottom: 1px solid rgba(255,255,255,0.1); color: var(--accent-orange);">Доступ</th>
-                            <th style="padding: 10px; border-bottom: 1px solid rgba(255,255,255,0.1); color: var(--accent-orange);">Действия</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-            `;
-
-            users.forEach(u => {
-                const isAdminUser = (u.username === 'admin');
-
-                let accessCell = '';
-                if (isAdminUser) {
-                    accessCell = `<span class="status-text status-insured">Главный админ</span>`;
-                } else {
-                    accessCell = `
-                        <button onclick="toggleUserAccess(${u.id}, ${!u.is_allowed})" 
-                                class="btn-status-pill ${u.is_allowed ? 'active-insured' : 'active-uninsured'}">
-                            ${u.is_allowed ? 'Разрешен' : 'Заблокирован'}
-                        </button>
-                    `;
-                }
-
-                let actionsCell = '';
-                if (isAdminUser) {
-                    actionsCell = `<span style="color: var(--text-muted); font-size: 0.8rem;">—</span>`;
-                } else {
-                    actionsCell = `
-                        <div style="display: flex; gap: 8px; align-items: center;">
-                            <button onclick="openChangePasswordModal(${u.id}, '${u.username}')" class="btn-subtab" style="padding: 4px 8px; font-size: 0.75rem;">Пароль</button>
-                            <button onclick="deleteUser(${u.id})" class="btn-user-del">Удалить</button>
-                        </div>
-                    `;
-                }
-
-                let roleCell = '';
-                if (isAdminUser) {
-                    roleCell = `<span style="font-weight: 800; color: #ffca28;">ADMIN</span>`;
-                } else {
-                    roleCell = `
-                        <select onchange="updateUserRole(${u.id}, this.value)" class="filter-select" style="padding: 4px 8px; font-size: 0.8rem;">
-                            <option value="user" ${u.role === 'user' ? 'selected' : ''}>User</option>
-                            <option value="support" ${u.role === 'support' ? 'selected' : ''}>Support</option>
-                            <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin</option>
-                        </select>
-                    `;
-                }
-
-                html += `
-                    <tr>
-                        <td style="padding: 10px; border-bottom: 1px solid rgba(255,255,255,0.05);">${u.id}</td>
-                        <td style="padding: 10px; border-bottom: 1px solid rgba(255,255,255,0.05); font-weight: 700;">${u.username}</td>
-                        <td style="padding: 10px; border-bottom: 1px solid rgba(255,255,255,0.05);">${roleCell}</td>
-                        <td style="padding: 10px; border-bottom: 1px solid rgba(255,255,255,0.05);">${accessCell}</td>
-                        <td style="padding: 10px; border-bottom: 1px solid rgba(255,255,255,0.05);">${actionsCell}</td>
-                    </tr>
-                `;
-            });
-
-            html += `</tbody></table>`;
-            container.innerHTML = html;
-        }
-
-        async function fetchAdminScanLogs() {
-            try {
-                const res = await fetch('/api/admin/scan_logs');
-                if (res.ok) {
-                    const logs = await res.json();
-                    renderAdminScanLogsTable(logs);
-                }
-            } catch (e) {
-                console.error('Ошибка логов сканирования:', e);
-            }
-        }
-
-        function renderAdminScanLogsTable(logs) {
-            const container = document.getElementById('admin-scan-logs-table');
-            if (!container) return;
-
-            if (!logs || logs.length === 0) {
-                container.innerHTML = '<span class="empty">Нет логов сканирования</span>';
-                return;
-            }
-
-            let html = `
-                <table style="width: 100%; border-collapse: collapse; font-size: 0.85rem;">
-                    <thead>
-                        <tr>
-                            <th style="padding: 8px; border-bottom: 1px solid rgba(255,255,255,0.1); color: var(--accent-orange);">Время</th>
-                            <th style="padding: 8px; border-bottom: 1px solid rgba(255,255,255,0.1); color: var(--accent-orange);">Сервер</th>
-                            <th style="padding: 8px; border-bottom: 1px solid rgba(255,255,255,0.1); color: var(--accent-orange);">Сканнер</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-            `;
-
-            logs.forEach(l => {
-                html += `
-                    <tr>
-                        <td style="padding: 8px; border-bottom: 1px solid rgba(255,255,255,0.05); color: #ffca28; font-weight: 700;">${l.created_at}</td>
-                        <td style="padding: 8px; border-bottom: 1px solid rgba(255,255,255,0.05); font-weight: 700;">${getServerDisplayName(l.server)}</td>
-                        <td style="padding: 8px; border-bottom: 1px solid rgba(255,255,255,0.05); color: #8e9bb0;">${l.scanner}</td>
-                    </tr>
-                `;
-            });
-
-            html += `</tbody></table>`;
-            container.innerHTML = html;
         }
 
         async function handleCreateUser() {
@@ -2941,7 +2779,10 @@ DASHBOARD_HTML = """
             const p = document.getElementById('new-password').value;
             const r = document.getElementById('new-role').value;
 
-            if (!u || !p) return alert('Заполните логин и пароль');
+            if (!u || !p) {
+                alert('Заполните логин и пароль');
+                return;
+            }
 
             try {
                 const res = await fetch('/api/admin/create_user', {
@@ -2950,97 +2791,163 @@ DASHBOARD_HTML = """
                     body: JSON.stringify({ username: u, password: p, role: r })
                 });
                 if (res.ok) {
-                    alert('Пользователь создан!');
                     document.getElementById('new-username').value = '';
                     document.getElementById('new-password').value = '';
                     fetchAdminUsers();
                 } else {
                     const err = await res.json();
-                    alert(err.detail || 'Ошибка создания');
+                    alert(err.detail || 'Ошибка создания пользователя');
                 }
             } catch (e) {
                 alert('Ошибка сети');
             }
         }
 
-        async function toggleUserAccess(userId, isAllowed) {
+        async function fetchAdminUsers() {
+            try {
+                const res = await fetch('/api/admin/users');
+                if (res.ok) {
+                    const users = await res.json();
+                    const container = document.getElementById('admin-users-table');
+                    if (!container) return;
+
+                    let html = `
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Логин</th>
+                                    <th>Роль</th>
+                                    <th>Доступ</th>
+                                    <th>Действия</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                    `;
+
+                    users.forEach(u => {
+                        html += `
+                            <tr>
+                                <td>${u.id}</td>
+                                <td><b>${u.username}</b></td>
+                                <td><span class="season-badge">${u.role}</span></td>
+                                <td>
+                                    <button class="btn-status-pill ${u.is_allowed ? 'active-insured' : 'active-uninsured'}" onclick="toggleAccess(${u.id}, ${!u.is_allowed})">
+                                        ${u.is_allowed ? 'Разрешен' : 'Заблокирован'}
+                                    </button>
+                                </td>
+                                <td>
+                                    <button class="btn-add" style="margin-right: 4px;" onclick="promptRole(${u.id})">Роль</button>
+                                    <button class="btn-add" style="margin-right: 4px; background: #5c6bc0;" onclick="promptPassword(${u.id})">Пароль</button>
+                                    ${u.username !== 'admin' ? `<button class="btn-user-del" onclick="deleteUser(${u.id})">Удалить</button>` : ''}
+                                </td>
+                            </tr>
+                        `;
+                    });
+
+                    html += `</tbody></table>`;
+                    container.innerHTML = html;
+                }
+            } catch (e) {
+                console.error('Ошибка загрузки пользователей:', e);
+            }
+        }
+
+        async function toggleAccess(userId, isAllowed) {
             try {
                 const res = await fetch('/api/admin/toggle_access', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ user_id: userId, is_allowed: isAllowed })
                 });
-                if (res.ok) {
-                    fetchAdminUsers();
-                } else {
-                    const err = await res.json();
-                    alert(err.detail || 'Ошибка изменения доступа');
-                }
-            } catch (e) {
-                alert('Ошибка сети');
-            }
+                if (res.ok) fetchAdminUsers();
+            } catch (e) { alert('Ошибка сети'); }
+        }
+
+        async function promptRole(userId) {
+            const role = prompt("Введите новую роль (user, support, admin):");
+            if (!role) return;
+            try {
+                const res = await fetch('/api/admin/update_role', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: userId, role })
+                });
+                if (res.ok) fetchAdminUsers();
+                else { const err = await res.json(); alert(err.detail || 'Ошибка'); }
+            } catch (e) { alert('Ошибка сети'); }
+        }
+
+        async function promptPassword(userId) {
+            const new_password = prompt("Введите новый пароль:");
+            if (!new_password) return;
+            try {
+                const res = await fetch('/api/admin/change_password', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ user_id: userId, new_password })
+                });
+                if (res.ok) alert("Пароль успешно изменен");
+                else { const err = await res.json(); alert(err.detail || 'Ошибка'); }
+            } catch (e) { alert('Ошибка сети'); }
         }
 
         async function deleteUser(userId) {
-            if (!confirm('Вы уверены, что хотите удалить пользователя?')) return;
+            if (!confirm("Удалить пользователя?")) return;
             try {
                 const res = await fetch('/api/admin/delete_user', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ user_id: userId })
                 });
-                if (res.ok) {
-                    fetchAdminUsers();
-                } else {
-                    const err = await res.json();
-                    alert(err.detail || 'Ошибка удаления');
-                }
-            } catch (e) {
-                alert('Ошибка сети');
-            }
+                if (res.ok) fetchAdminUsers();
+            } catch (e) { alert('Ошибка сети'); }
         }
 
-        async function updateUserRole(userId, newRole) {
+        async function fetchAdminScanLogs() {
             try {
-                const res = await fetch('/api/admin/update_role', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ user_id: userId, role: newRole })
-                });
+                const res = await fetch('/api/admin/scan_logs');
                 if (res.ok) {
-                    fetchAdminUsers();
-                } else {
-                    const err = await res.json();
-                    alert(err.detail || 'Ошибка обновления роли');
+                    const logs = await res.json();
+                    const container = document.getElementById('admin-scan-logs-table');
+                    if (!container) return;
+
+                    if (logs.length === 0) {
+                        container.innerHTML = '<span class="empty">Логи отсутствуют</span>';
+                        return;
+                    }
+
+                    let html = `
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Время</th>
+                                    <th>Сервер</th>
+                                    <th>Сканнер</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                    `;
+
+                    logs.forEach(l => {
+                        html += `
+                            <tr>
+                                <td style="color: #ffca28;">${l.created_at || '—'}</td>
+                                <td><b>${getServerDisplayName(l.server)}</b></td>
+                                <td style="color: #00e5ff;">${l.scanner}</td>
+                            </tr>
+                        `;
+                    });
+
+                    html += `</tbody></table>`;
+                    container.innerHTML = html;
                 }
             } catch (e) {
-                alert('Ошибка сети');
+                console.error('Ошибка загрузки логов:', e);
             }
         }
 
-        async function openChangePasswordModal(userId, username) {
-            const newPw = prompt(`Введите новый пароль для ${username}:`);
-            if (!newPw) return;
-
-            try {
-                const res = await fetch('/api/admin/change_password', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ user_id: userId, new_password: newPw })
-                });
-                if (res.ok) {
-                    alert('Пароль успешно изменен!');
-                } else {
-                    const err = await res.json();
-                    alert(err.detail || 'Ошибка смены пароля');
-                }
-            } catch (e) {
-                alert('Ошибка сети');
-            }
-        }
-
-        // ИНИЦИАЛИЗАЦИЯ
-        window.onload = () => {
+        window.onload = function() {
             checkAuth();
             updateLotteryTimer();
             setInterval(updateLotteryTimer, 1000);
