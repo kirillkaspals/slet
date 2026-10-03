@@ -43,7 +43,7 @@ SEASONS_MAP = {
     2: "⌨ Скорострелы",
     3: "🏎️ Автогонки",
     4: "✈️ По новому",
-    5: "🏍️️ Мотогонки"
+    5: "🏍 Мотогонки"
 }
 
 BASE_SERVER_SEASONS = {
@@ -461,7 +461,7 @@ async def process_hourly_payday():
                     continue
 
                 st = h.get("status", "insured")
-                if not is_restart_hour and st != "frozen":
+                if st != "frozen":
                     decrement = 1 if st == "insured" else 2
                     h["pd"] -= decrement
                 
@@ -478,7 +478,7 @@ async def process_hourly_payday():
                     continue
 
                 st = b.get("status", "insured")
-                if not is_restart_hour and st != "frozen":
+                if st != "frozen":
                     decrement = 1 if st == "insured" else (2 if st == "uninsured" else 4)
                     b["pd"] -= decrement
                 
@@ -1974,12 +1974,14 @@ DASHBOARD_HTML = """
 
             let paydaysApplied = 0;
             while (paydaysApplied < neededPayDays) {
-                if (targetTime.getHours() !== 5) {
-                    paydaysApplied++;
-                }
+                paydaysApplied++;
                 if (paydaysApplied < neededPayDays) {
                     targetTime.setHours(targetTime.getHours() + 1);
                 }
+            }
+
+            if (targetTime.getHours() === 5) {
+                targetTime.setHours(6);
             }
 
             let firstNextHour = new Date(mskNow);
@@ -2309,17 +2311,19 @@ DASHBOARD_HTML = """
 
         function initDashboard() {
             const containerManage = document.getElementById('servers-manage');
+            if (!containerManage) return;
             containerManage.innerHTML = '';
 
             const canManage = currentUser && (currentUser.role === 'admin' || currentUser.role === 'support');
 
             if (canManage) {
                 ALL_SERVERS.forEach(srv => {
+                    const displayName = getServerDisplayName(srv);
                     const cardManage = `
                         <div class="server-card">
                             <div class="server-header">
                                 <div class="server-title">
-                                    <span>${getServerDisplayName(srv)}</span>
+                                    <span>${displayName}</span>
                                     <span class="season-badge season-badge-${srv}">Загрузка...</span>
                                 </div>
                             </div>
@@ -2347,30 +2351,38 @@ DASHBOARD_HTML = """
                     containerManage.insertAdjacentHTML('beforeend', cardManage);
                 });
             }
-
-            renderViewTab();
             loadData();
-            setInterval(loadData, 10000);
-            
-            updateLotteryTimer();
-            setInterval(updateLotteryTimer, 1000);
         }
 
-        document.addEventListener('DOMContentLoaded', checkAuth);
+        setInterval(updateLotteryTimer, 1000);
+        setInterval(loadData, 30000);
+        window.onload = checkAuth;
     </script>
 </head>
 <body>
     <h1>Arizona RP — Мониторинг Слётов</h1>
-
-    <!-- Экран входа -->
-    <div id="login-screen" class="login-box" style="display: none;">
-        <h2>Авторизация</h2>
-        <input type="text" id="login-username" placeholder="Логин" onkeydown="if(event.key==='Enter') handleLogin()"><br>
-        <input type="password" id="login-password" placeholder="Пароль" onkeydown="if(event.key==='Enter') handleLogin()"><br>
-        <button type="button" onclick="handleLogin()">Войти</button>
+    
+    <div class="lottery-banner">
+        <div class="lottery-info">
+            <span class="lottery-icon">🎟️</span>
+            <div>
+                <div class="lottery-title">Лотерейный билет</div>
+                <div class="lottery-sub">Списание произойдёт в <b>21:10 МСК</b></div>
+            </div>
+        </div>
+        <div class="lottery-countdown">
+            <span class="lottery-label">До слёта:</span>
+            <span class="lottery-timer" id="lottery-timer">00:00:00</span>
+        </div>
     </div>
 
-    <!-- Основной Дашборд -->
+    <div id="login-screen" class="login-box" style="display: none;">
+        <h2>Авторизация</h2>
+        <input type="text" id="login-username" placeholder="Логин">
+        <input type="password" id="login-password" placeholder="Пароль">
+        <button onclick="handleLogin()">Войти</button>
+    </div>
+
     <div id="main-dashboard" style="display: none;">
         <div class="user-nav">
             <span id="user-info"></span>
@@ -2378,13 +2390,12 @@ DASHBOARD_HTML = """
         </div>
 
         <div class="tabs">
-            <button id="btn-tab-view" class="tab-btn active" onclick="switchTab('view')">👁 Общий вид</button>
-            <button id="btn-tab-upcoming" class="tab-btn" onclick="switchTab('upcoming')">🔥 Ближайшие</button>
-            <button id="btn-tab-manage" class="tab-btn" onclick="switchTab('manage')">⚙ Управление</button>
+            <button id="btn-tab-view" class="tab-btn active" onclick="switchTab('view')">📊 Просмотр</button>
+            <button id="btn-tab-upcoming" class="tab-btn" onclick="switchTab('upcoming')">🚨 Скоро слетят</button>
+            <button id="btn-tab-manage" class="tab-btn" onclick="switchTab('manage')">⚙️️ Управление</button>
             <button id="btn-tab-admin" class="tab-btn" onclick="switchTab('admin')">👑 Админ-панель</button>
         </div>
 
-        <!-- Вкладка 1: Общий вид -->
         <div id="tab-view" class="tab-content active">
             <div class="filter-panel">
                 <div class="filter-group">
@@ -2395,22 +2406,20 @@ DASHBOARD_HTML = """
                         <option value="2">⌨ Скорострелы (2)</option>
                         <option value="3">🏎️ Автогонки (3)</option>
                         <option value="4">✈️ По новому (4)</option>
-                        <option value="5">🏍️ Мотогонки (5)</option>
+                        <option value="5">🏍 Мотогонки (5)</option>
                     </select>
                 </div>
                 <div class="filter-group">
                     <label for="filter-fav">Избранное:</label>
                     <select id="filter-fav" class="filter-select" onchange="renderViewTab()">
-                        <option value="all">Все серверы</option>
-                        <option value="fav_only">⭐ Только избранные</option>
+                        <option value="all">Все сервера</option>
+                        <option value="fav_only">⭐ Только избранное</option>
                     </select>
                 </div>
             </div>
-            
             <div id="servers-view" class="servers-container"></div>
         </div>
 
-        <!-- Вкладка 2: Ближайшие -->
         <div id="tab-upcoming" class="tab-content">
             <div class="upcoming-filters">
                 <button id="btn-upcoming-1h" class="time-filter-btn active" onclick="setUpcomingHoursFilter(1)">В этот час</button>
@@ -2420,31 +2429,35 @@ DASHBOARD_HTML = """
             <div id="servers-upcoming" class="servers-container"></div>
         </div>
 
-        <!-- Вкладка 3: Управление -->
         <div id="tab-manage" class="tab-content">
             <div id="servers-manage" class="servers-container"></div>
         </div>
 
-        <!-- Вкладка 4: Админ-панель -->
         <div id="tab-admin" class="tab-content">
-            <div class="filter-panel" style="flex-direction: column; align-items: stretch; max-width: 900px;">
-                <h3 style="margin-top:0; color: var(--accent-orange);">Управление пользователями</h3>
-                
-                <div style="display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap;">
-                    <input type="text" id="new-username" placeholder="Логин" style="padding: 8px; border-radius: 4px; border: 1px solid #263043; background: #0f121a; color: #fff;">
-                    <input type="password" id="new-password" placeholder="Пароль" style="padding: 8px; border-radius: 4px; border: 1px solid #263043; background: #0f121a; color: #fff;">
-                    <select id="new-role" class="select-role">
-                        <option value="user">User</option>
-                        <option value="support">Support</option>
-                        <option value="admin">Admin</option>
-                    </select>
-                    <button class="btn-add" onclick="handleCreateUser()">+ Создать аккаунт</button>
+            <div style="max-width: 1200px; margin: 0 auto;">
+                <div class="server-card" style="margin-bottom: 20px;">
+                    <div class="section-title" style="margin-bottom: 12px;">Создать пользователя</div>
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                        <input type="text" id="new-username" placeholder="Логин" style="padding: 8px; background: #0f121a; border: 1px solid #263043; color: #fff; border-radius: 4px;">
+                        <input type="password" id="new-password" placeholder="Пароль" style="padding: 8px; background: #0f121a; border: 1px solid #263043; color: #fff; border-radius: 4px;">
+                        <select id="new-role" class="select-role">
+                            <option value="user">User</option>
+                            <option value="support">Support</option>
+                            <option value="admin">Admin</option>
+                        </select>
+                        <button class="btn-add" onclick="handleCreateUser()">Создать</button>
+                    </div>
                 </div>
 
-                <div id="admin-users-table"></div>
+                <div class="server-card" style="margin-bottom: 20px;">
+                    <div class="section-title" style="margin-bottom: 12px;">Пользователи</div>
+                    <div id="admin-users-table"></div>
+                </div>
 
-                <h3 style="margin-top:25px; color: var(--accent-orange);">История сканирований (Логи за сегодня)</h3>
-                <div id="admin-scan-logs-table"></div>
+                <div class="server-card">
+                    <div class="section-title" style="margin-bottom: 12px;">Логи сканирований за сегодня</div>
+                    <div id="admin-scan-logs-table"></div>
+                </div>
             </div>
         </div>
     </div>
