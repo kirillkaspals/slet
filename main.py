@@ -633,7 +633,7 @@ async def get_scan_logs(username: str = Depends(verify_admin)):
 @app.post("/api/admin/toggle_access")
 async def toggle_access(data: ToggleAccessModel, username: str = Depends(verify_admin)):
     if not db_pool:
-        raise HTTPException(status_code=53, detail="БД недоступна")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="БД недоступна")
     async with db_pool.acquire() as conn:
         await conn.execute("UPDATE users SET is_allowed = $1 WHERE id = $2", data.is_allowed, data.user_id)
     return {"status": "success"}
@@ -641,7 +641,7 @@ async def toggle_access(data: ToggleAccessModel, username: str = Depends(verify_
 @app.post("/api/admin/create_user")
 async def create_user(data: CreateUserModel, username: str = Depends(verify_admin)):
     if not db_pool:
-        raise HTTPException(status_code=53, detail="БД недоступна")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="БД недоступна")
     role = data.role if data.role in ["user", "support", "admin"] else "user"
     hashed_pw = pwd_context.hash(data.password)
     async with db_pool.acquire() as conn:
@@ -658,7 +658,7 @@ async def create_user(data: CreateUserModel, username: str = Depends(verify_admi
 @app.post("/api/admin/delete_user")
 async def delete_user(data: DeleteUserModel, current_admin: str = Depends(verify_admin)):
     if not db_pool:
-        raise HTTPException(status_code=53, detail="БД недоступна")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="БД недоступна")
     async with db_pool.acquire() as conn:
         target = await conn.fetchrow("SELECT username FROM users WHERE id = $1", data.user_id)
         if not target:
@@ -678,7 +678,7 @@ async def delete_user(data: DeleteUserModel, current_admin: str = Depends(verify
 @app.post("/api/admin/update_role")
 async def update_role(data: UpdateRoleModel, current_admin: str = Depends(verify_admin)):
     if not db_pool:
-        raise HTTPException(status_code=53, detail="БД недоступна")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="БД недоступна")
     if data.role not in ["user", "support", "admin"]:
         raise HTTPException(status_code=400, detail="Недопустимая роль")
         
@@ -696,7 +696,7 @@ async def update_role(data: UpdateRoleModel, current_admin: str = Depends(verify
 @app.post("/api/admin/change_password")
 async def change_password(data: ChangePasswordModel, current_admin: str = Depends(verify_admin)):
     if not db_pool:
-        raise HTTPException(status_code=53, detail="БД недоступна")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="БД недоступна")
     if not data.new_password or len(data.new_password.strip()) < 4:
         raise HTTPException(status_code=400, detail="Пароль слишком короткий (минимум 4 символа)")
 
@@ -1631,6 +1631,7 @@ DASHBOARD_HTML = """
                     document.getElementById('btn-tab-admin').style.display = isAdmin ? 'inline-block' : 'none';
                     
                     initDashboard();
+                    loadData();
                 } else {
                     document.getElementById('login-screen').style.display = 'block';
                     document.getElementById('main-dashboard').style.display = 'none';
@@ -2334,14 +2335,14 @@ DASHBOARD_HTML = """
                             <div class="tables-grid">
                                 <div>
                                     <div class="section-header">
-                                        <span class="section-title">Дома</span>
+                                        <div class="section-title">Дома</div>
                                         <button class="btn-add" onclick="addItemPrompt('${srv}', 'house')">+ Дом</button>
                                     </div>
                                     <div id="houses-manage-${srv}"></div>
                                 </div>
                                 <div>
                                     <div class="section-header">
-                                        <span class="section-title">Бизнесы</span>
+                                        <div class="section-title">Бизнесы</div>
                                         <button class="btn-add" onclick="addItemPrompt('${srv}', 'biz')">+ Бизнес</button>
                                     </div>
                                     <div id="biz-manage-${srv}"></div>
@@ -2351,23 +2352,22 @@ DASHBOARD_HTML = """
                     containerManage.insertAdjacentHTML('beforeend', cardManage);
                 });
             }
-            loadData();
         }
 
-        setInterval(updateLotteryTimer, 1000);
-        setInterval(loadData, 30000);
-        window.onload = checkAuth;
+        window.onload = function() {
+            checkAuth();
+            setInterval(updateLotteryTimer, 1000);
+            setInterval(loadData, 30000);
+        };
     </script>
 </head>
 <body>
-    <h1>Arizona RP — Мониторинг Слётов</h1>
-    
     <div class="lottery-banner">
         <div class="lottery-info">
-            <span class="lottery-icon">🎟️</span>
+            <div class="lottery-icon">🎰</div>
             <div>
-                <div class="lottery-title">Лотерейный билет</div>
-                <div class="lottery-sub">Списание произойдёт в <b>21:10 МСК</b></div>
+                <div class="lottery-title">Лотерея Arizona RP</div>
+                <div class="lottery-sub">Слёт билетов производится каждый день в <b>21:10 МСК</b></div>
             </div>
         </div>
         <div class="lottery-countdown">
@@ -2376,26 +2376,31 @@ DASHBOARD_HTML = """
         </div>
     </div>
 
+    <h1>Arizona RP — Мониторинг Слётов</h1>
+
+    <!-- Форма Авторизации -->
     <div id="login-screen" class="login-box" style="display: none;">
         <h2>Авторизация</h2>
-        <input type="text" id="login-username" placeholder="Логин">
-        <input type="password" id="login-password" placeholder="Пароль">
+        <input type="text" id="login-username" placeholder="Логин" onkeypress="if(event.key==='Enter') handleLogin()">
+        <input type="password" id="login-password" placeholder="Пароль" onkeypress="if(event.key==='Enter') handleLogin()">
         <button onclick="handleLogin()">Войти</button>
     </div>
 
+    <!-- Основной Дашборд -->
     <div id="main-dashboard" style="display: none;">
         <div class="user-nav">
-            <span id="user-info"></span>
+            <span id="user-info">Загрузка...</span>
             <button class="btn-logout" onclick="handleLogout()">Выйти</button>
         </div>
 
         <div class="tabs">
-            <button id="btn-tab-view" class="tab-btn active" onclick="switchTab('view')">📊 Просмотр</button>
-            <button id="btn-tab-upcoming" class="tab-btn" onclick="switchTab('upcoming')">🚨 Скоро слетят</button>
-            <button id="btn-tab-manage" class="tab-btn" onclick="switchTab('manage')">⚙️️ Управление</button>
-            <button id="btn-tab-admin" class="tab-btn" onclick="switchTab('admin')">👑 Админ-панель</button>
+            <button class="tab-btn active" id="btn-tab-view" onclick="switchTab('view')">📊 Мониторинг</button>
+            <button class="tab-btn" id="btn-tab-upcoming" onclick="switchTab('upcoming')">⏰ Ближайшие слёты</button>
+            <button class="tab-btn" id="btn-tab-manage" onclick="switchTab('manage')" style="display: none;">⚙️ Управление</button>
+            <button class="tab-btn" id="btn-tab-admin" onclick="switchTab('admin')" style="display: none;">👑 Админ-панель</button>
         </div>
 
+        <!-- Вкладка: Мониторинг -->
         <div id="tab-view" class="tab-content active">
             <div class="filter-panel">
                 <div class="filter-group">
@@ -2413,13 +2418,14 @@ DASHBOARD_HTML = """
                     <label for="filter-fav">Избранное:</label>
                     <select id="filter-fav" class="filter-select" onchange="renderViewTab()">
                         <option value="all">Все сервера</option>
-                        <option value="fav_only">⭐ Только избранное</option>
+                        <option value="fav_only">Только избранные ⭐</option>
                     </select>
                 </div>
             </div>
             <div id="servers-view" class="servers-container"></div>
         </div>
 
+        <!-- Вкладка: Ближайшие слёты -->
         <div id="tab-upcoming" class="tab-content">
             <div class="upcoming-filters">
                 <button id="btn-upcoming-1h" class="time-filter-btn active" onclick="setUpcomingHoursFilter(1)">В этот час</button>
@@ -2429,38 +2435,42 @@ DASHBOARD_HTML = """
             <div id="servers-upcoming" class="servers-container"></div>
         </div>
 
+        <!-- Вкладка: Управление -->
         <div id="tab-manage" class="tab-content">
             <div id="servers-manage" class="servers-container"></div>
         </div>
 
+        <!-- Вкладка: Админка -->
         <div id="tab-admin" class="tab-content">
-            <div style="max-width: 1200px; margin: 0 auto;">
-                <div class="server-card" style="margin-bottom: 20px;">
-                    <div class="section-title" style="margin-bottom: 12px;">Создать пользователя</div>
-                    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                        <input type="text" id="new-username" placeholder="Логин" style="padding: 8px; background: #0f121a; border: 1px solid #263043; color: #fff; border-radius: 4px;">
-                        <input type="password" id="new-password" placeholder="Пароль" style="padding: 8px; background: #0f121a; border: 1px solid #263043; color: #fff; border-radius: 4px;">
-                        <select id="new-role" class="select-role">
-                            <option value="user">User</option>
-                            <option value="support">Support</option>
-                            <option value="admin">Admin</option>
-                        </select>
-                        <button class="btn-add" onclick="handleCreateUser()">Создать</button>
-                    </div>
+            <div class="server-card" style="max-width: 1000px; margin: 0 auto 20px auto;">
+                <h3 style="margin-top: 0; color: var(--accent-orange);">Создание пользователя</h3>
+                <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 10px;">
+                    <input type="text" id="new-username" placeholder="Логин" style="padding: 8px; background: #0f121a; border: 1px solid #263043; color: #fff; border-radius: 6px;">
+                    <input type="password" id="new-password" placeholder="Пароль" style="padding: 8px; background: #0f121a; border: 1px solid #263043; color: #fff; border-radius: 6px;">
+                    <select id="new-role" class="select-role">
+                        <option value="user">User</option>
+                        <option value="support">Support</option>
+                        <option value="admin">Admin</option>
+                    </select>
+                    <button class="btn-add" style="padding: 8px 16px; font-size: 0.9rem;" onclick="handleCreateUser()">Создать</button>
                 </div>
+            </div>
 
-                <div class="server-card" style="margin-bottom: 20px;">
-                    <div class="section-title" style="margin-bottom: 12px;">Пользователи</div>
-                    <div id="admin-users-table"></div>
-                </div>
+            <div class="server-card" style="max-width: 1000px; margin: 0 auto 20px auto;">
+                <h3 style="margin-top: 0; color: var(--accent-orange);">Список пользователей</h3>
+                <div id="admin-users-table" style="overflow-x: auto;"></div>
+            </div>
 
-                <div class="server-card">
-                    <div class="section-title" style="margin-bottom: 12px;">Логи сканирований за сегодня</div>
-                    <div id="admin-scan-logs-table"></div>
-                </div>
+            <div class="server-card" style="max-width: 1000px; margin: 0 auto;">
+                <h3 style="margin-top: 0; color: var(--accent-orange);">Логи сканирований (последние 200)</h3>
+                <div id="admin-scan-logs-table" style="overflow-x: auto; max-height: 400px; overflow-y: auto;"></div>
             </div>
         </div>
     </div>
 </body>
 </html>
 """
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main_2:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)), reload=True)
