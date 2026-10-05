@@ -411,13 +411,13 @@ def get_latest_confirmed_scan(scans: List[dict]) -> Optional[dict]:
         return None
     current_pair_scans = [s for s in scans if s.get("isCurrentPair", False) and s.get("hasPair", False)]
     if current_pair_scans:
-        return current_pair_scans[-1]
+        return current_pair_scans[-1]  # Возвращает второй (более свежий) скан подтвержденной пары
     
     confirmed_scans = [s for s in scans if s.get("hasPair", False) or s.get("isConfirmed", False)]
     if confirmed_scans:
         return confirmed_scans[-1]
         
-    return scans[-1]
+    return None  # Для одиночных сканов без пары возвращаем None
 
 # --- АЛГОРИТМ УМНОГО СОПОСТАВЛЕНИЯ ---
 def find_pairs_with_offset(prev_items: List[dict], curr_entries: List[PropertyEntry], prop_type: str):
@@ -1556,6 +1556,19 @@ DASHBOARD_HTML = """
             border-color: #ffb74d; 
         }
 
+        /* Одиночный скан, который не нашел пару (красный) */
+        .scan-subtab.single-failed { 
+            background-color: rgba(213, 0, 0, 0.25); 
+            color: #ff5252; 
+            border-color: #ff1744; 
+        }
+        .scan-subtab.single-failed.active { 
+            background-color: #d50000; 
+            color: #ffffff; 
+            border-color: #ff5252; 
+            box-shadow: 0 0 8px rgba(213, 0, 0, 0.5);
+        }
+
         .scan-subtab:hover:not(.active) { opacity: 1; filter: brightness(1.2); }
 
         .btn-delete-scan { 
@@ -1714,6 +1727,7 @@ DASHBOARD_HTML = """
                 <button id="btn-upcoming-1h" class="time-filter-btn active" onclick="setUpcomingHoursFilter(1)">В течение 1ч</button>
                 <button id="btn-upcoming-2h" class="time-filter-btn" onclick="setUpcomingHoursFilter(2)">В течение 2ч</button>
                 <button id="btn-upcoming-3h" class="time-filter-btn" onclick="setUpcomingHoursFilter(3)">В течение 3ч</button>
+                <button id="btn-upcoming-4h" class="time-filter-btn" onclick="setUpcomingHoursFilter(4)">В течение 4ч</button>
                 <button id="btn-upcoming-5h" class="time-filter-btn" onclick="setUpcomingHoursFilter(5)">В течение 5ч</button>
             </div>
             <div id="servers-upcoming" class="servers-container"></div>
@@ -1987,7 +2001,7 @@ DASHBOARD_HTML = """
             selectedUpcomingHours = hours;
             document.querySelectorAll('.time-filter-btn').forEach(btn => btn.classList.remove('active'));
             document.getElementById(`btn-upcoming-${hours}h`).classList.add('active');
-            loadData();
+            renderUpcomingTab();
         }
 
         function toggleManualLogs() {
@@ -2268,7 +2282,7 @@ DASHBOARD_HTML = """
 
         function calculateDropInfo(pd, status, typeRules) {
             if (status === 'frozen') {
-                return { text: '❄️ Заморожен', isFrozen: true, paydays: null, hourSteps: null };
+                return { text: '❄️ Заморожен', isFrozen: true, paydays: null, hoursLeft: null };
             }
 
             const rules = typeRules || { insured: 2, uninsured_min: 2, uninsured_max: 3 };
@@ -2283,329 +2297,18 @@ DASHBOARD_HTML = """
                 dropLimit = rules.uninsured_min;
             }
 
-            const neededPayDays = Math.max(0, Math.ceil((pd - (dropLimit - 1)) / decrement));
-
-            const now = new Date();
-            const utcTime = now.getTime() + (now.getTimezoneOffset() * 60000);
-            const mskNow = new Date(utcTime + (3 * 3600000));
-
-            let targetTime = new Date(mskNow);
-            targetTime.setMinutes(0, 0, 0);
-            targetTime.setHours(targetTime.getHours() + 1);
-
-            let paydaysApplied = 0;
-            while (paydaysApplied < neededPayDays) {
-                paydaysApplied++;
-                if (paydaysApplied < neededPayDays) {
-                    targetTime.setHours(targetTime.getHours() + 1);
-                }
+            const neededPD = pd - dropLimit;
+            if (neededPD < 0) {
+                return { text: 'СЛЁТ!', isDrop: true, paydays: 0, hoursLeft: 0 };
             }
 
-            if (targetTime.getHours() === 5) {
-                targetTime.setHours(6);
-            }
-
-            let firstNextHour = new Date(mskNow);
-            firstNextHour.setMinutes(0, 0, 0);
-            firstNextHour.setHours(firstNextHour.getHours() + 1);
-
-            const hourSteps = Math.round((targetTime.getTime() - firstNextHour.getTime()) / 3600000) + 1;
-
-            const diffMs = targetTime.getTime() - mskNow.getTime();
-            if (diffMs <= 0) return { text: '< 1 мин', isFrozen: false, paydays: neededPayDays, hourSteps: 1 };
-
-            const totalMinutes = Math.floor(diffMs / 60000);
-            const hours = Math.floor(totalMinutes / 60);
-            const minutes = totalMinutes % 60;
-
-            let timeStr = '';
-            if (hours > 0) timeStr += `${hours} ч `;
-            timeStr += `${minutes} мин`;
-
-            return { text: timeStr, isFrozen: false, paydays: neededPayDays, hourSteps: hourSteps };
-        }
-
-        function calculateDropTime(pd, status, typeRules) {
-            return calculateDropInfo(pd, status, typeRules);
-        }
-
-        function renderTable(items, server, scanId, type, interactive = true, isDropTab = false, info = {}) {
-            if (!items || items.length === 0) return '<span class="empty">Нет данных</span>';
-            
-            let html = '<table><tr><th>№</th><th>ID</th><th>PD</th><th>Статус</th>' + 
-                       (!interactive ? '<th>Слёт</th>' : '') + 
-                       (interactive ? '<th></th>' : '') + '</tr>';
-            
-            items.forEach((item) => {
-                const st = item.status || 'insured';
-                const isPending = item.isPendingPair;
-                const displayPd = interactive ? (item.basePd !== undefined ? item.basePd : item.pd) : item.pd;
-                const badgeClass = interactive ? 'pd-badge-fixed' : (isDropTab ? 'pd-badge-drop' : 'pd-badge');
-
-                let statusControl = '';
-                if (interactive) {
-                    statusControl = `
-                        <div class="btn-group">
-                            <button class="btn-opt ${st === 'insured' && !isPending ? 'active-insured' : ''}" onclick="setStatus('${server}', '${scanId}', '${type}', ${item.pos}, 'insured')">Страх.</button>
-                            <button class="btn-opt ${st === 'uninsured' && !isPending ? 'active-uninsured' : ''}" onclick="setStatus('${server}', '${scanId}', '${type}', ${item.pos}, 'uninsured')">Не страх.</button>
-                            ${type === 'biz' ? `<button class="btn-opt ${st === 'no_activity' && !isPending ? 'active-noact' : ''}" onclick="setStatus('${server}', '${scanId}', 'biz',${item.pos}, 'no_activity')">Без зан.</button>` : ''}
-                            <button class="btn-opt ${st === 'frozen' && !isPending ? 'active-frozen' : ''}" onclick="setStatus('${server}', '${scanId}', '${type}', ${item.pos}, 'frozen')">Заморожен</button>
-                        </div>
-                        ${isPending ? '<span class="status-pending">⏳ Новый</span>' : ''}`;
-                } else {
-                    if (isPending) {
-                        statusControl = `<span class="status-pending">⏳ Новый</span>`;
-                    } else {
-                        let label = 'Страховка';
-                        let classNm = 'status-insured';
-                        
-                        if (st === 'uninsured') { label = 'Без страх.'; classNm = 'status-uninsured'; }
-                        else if (st === 'no_activity') { label = 'Без зан.'; classNm = 'status-noact'; }
-                        else if (st === 'frozen') { label = '❄️ Заморожен'; classNm = 'status-frozen'; }
-
-                        statusControl = `<span class="status-text ${classNm}">${label}</span>`;
-                    }
-                }
-
-                let dropTimeTd = '';
-                if (!interactive) {
-                    if (isPending) {
-                        dropTimeTd = '<td><span class="empty">—</span></td>';
-                    } else {
-                        const typeRules = getPropRules(info, type);
-                        const dropInfo = calculateDropTime(item.pd, st, typeRules);
-                        const badgeStyle = dropInfo.isFrozen ? 'time-left-frozen' : 'time-left-badge';
-                        dropTimeTd = `<td><span class="${badgeStyle}">${dropInfo.text}</span></td>`;
-                    }
-                }
-
-                html += `<tr>
-                    <td>${item.pos}</td>
-                    <td>${item.propId ? '№' + item.propId : '—'}</td>
-                    <td><span class="${badgeClass}">${displayPd}</span></td>
-                    <td>${statusControl}</td>
-                    ${dropTimeTd}
-                    ${interactive ? `<td><button class="btn-del" onclick="deleteItem('${server}', '${scanId}', '${type}',${item.pos})">✖</button></td>` : ''}
-                </tr>`;
-            });
-            return html + '</table>';
-        }
-
-        function getConfirmedScanTimeText(info) {
-            if (!info || !info.scans || info.scans.length === 0) {
-                return 'Скан: нет';
-            }
-            const confirmedScans = info.scans.filter(s => s.hasPair || s.isConfirmed);
-            if (confirmedScans.length === 0) {
-                return 'Скан: нет';
-            }
-            const lastScan = confirmedScans[confirmedScans.length - 1];
-            const rawTime = lastScan.scanTime || lastScan.scanId || '';
-            if (!rawTime) return 'Скан: нет';
-
-            try {
-                const parts = rawTime.trim().split(' ');
-                const dateParts = parts[0].split('-');
-                if (dateParts.length === 3) {
-                    const formattedDate = `${dateParts[2]}.${dateParts[1]}.${dateParts[0]}`;
-                    const timeParts = parts[1] ? parts[1].split(':') : ['00', '00'];
-                    const formattedTime = `${timeParts[0]}:${timeParts[1]}`;
-                    return `Скан: ${formattedDate} ${formattedTime}`;
-                }
-            } catch(e) {}
-
-            return `Скан: ${rawTime}`;
-        }
-
-        function renderViewTab() {
-            const containerView = document.getElementById('servers-view');
-            if (!containerView) return;
-
-            const seasonFilter = document.getElementById('filter-season').value;
-            const favFilter = document.getElementById('filter-fav').value;
-
-            let filteredServers = ALL_SERVERS.filter(srv => {
-                const info = globalServerData[srv];
-                if (!info) return true;
-
-                if (seasonFilter !== 'all') {
-                    if (!info.season || String(info.season.id) !== seasonFilter) {
-                        return false;
-                    }
-                }
-
-                if (favFilter === 'fav_only') {
-                    if (!favoriteServers.includes(srv)) {
-                        return false;
-                    }
-                }
-
-                return true;
-            });
-
-            containerView.innerHTML = '';
-
-            if (filteredServers.length === 0) {
-                containerView.innerHTML = '<div class="empty-center">Нет серверов, соответствующих выбранным фильтрам</div>';
-                return;
-            }
-
-            filteredServers.forEach(srv => {
-                const isFav = favoriteServers.includes(srv);
-                const starIcon = isFav ? '⭐' : '☆';
-                const displayName = getServerDisplayName(srv);
-                const info = globalServerData[srv];
-                const seasonDisplay = info && info.season ? info.season.display : '—';
-                const scanTimeText = getConfirmedScanTimeText(info);
-
-                const scan = info ? info.latestConfirmedScan : null;
-                const housesHtml = scan ? renderTable(scan.houses, srv, scan.scanId, 'house', false, false, info) : '<span class="empty">Нет данных</span>';
-                const bizHtml = scan ? renderTable(scan.businesses, srv, scan.scanId, 'biz', false, false, info) : '<span class="empty">Нет данных</span>';
-
-                const card = `
-                    <div class="server-card">
-                        <div class="server-header">
-                            <div class="server-title">
-                                <span><span class="fav-btn" onclick="toggleFavorite('${srv}')">${starIcon}</span>${displayName}</span>
-                                <span class="season-badge">${seasonDisplay}</span>
-                            </div>
-                            <div style="font-size: 0.72rem; color: var(--text-muted); margin-top: 4px;">${scanTimeText}</div>
-                        </div>
-                        <div class="tables-grid">
-                            <div>
-                                <div class="section-header">
-                                    <span class="section-title">Дома</span>
-                                </div>
-                                ${housesHtml}
-                            </div>
-                            <div>
-                                <div class="section-header">
-                                    <span class="section-title">Бизнесы</span>
-                                </div>
-                                ${bizHtml}
-                            </div>
-                        </div>
-                    </div>`;
-                containerView.insertAdjacentHTML('beforeend', card);
-            });
-        }
-
-        function renderUpcomingTab() {
-            const containerUpcoming = document.getElementById('servers-upcoming');
-            if (!containerUpcoming) return;
-
-            containerUpcoming.innerHTML = '';
-            let foundCount = 0;
-
-            ALL_SERVERS.forEach(srv => {
-                const info = globalServerData[srv];
-                if (!info || !info.latestConfirmedScan) return;
-
-                const scan = info.latestConfirmedScan;
-                const houseRules = getPropRules(info, 'house');
-                const bizRules = getPropRules(info, 'biz');
-
-                const upcomingHouses = (scan.houses || []).filter(h => {
-                    if (h.isPendingPair) return false;
-                    const dropInfo = calculateDropTime(h.pd, h.status, houseRules);
-                    return !dropInfo.isFrozen && dropInfo.hourSteps <= selectedUpcomingHours;
-                });
-
-                const upcomingBiz = (scan.businesses || []).filter(b => {
-                    if (b.isPendingPair) return false;
-                    const dropInfo = calculateDropTime(b.pd, b.status, bizRules);
-                    return !dropInfo.isFrozen && dropInfo.hourSteps <= selectedUpcomingHours;
-                });
-
-                if (upcomingHouses.length === 0 && upcomingBiz.length === 0) return;
-
-                foundCount++;
-                const displayName = getServerDisplayName(srv);
-                const seasonDisplay = info.season ? info.season.display : '—';
-                const scanTimeText = getConfirmedScanTimeText(info);
-
-                const housesHtml = renderTable(upcomingHouses, srv, scan.scanId, 'house', false, true, info);
-                const bizHtml = renderTable(upcomingBiz, srv, scan.scanId, 'biz', false, true, info);
-
-                const card = `
-                    <div class="server-card">
-                        <div class="server-header">
-                            <div class="server-title">
-                                <span>${displayName}</span>
-                                <span class="season-badge">${seasonDisplay}</span>
-                            </div>
-                            <div style="font-size: 0.72rem; color: var(--text-muted); margin-top: 4px;">${scanTimeText}</div>
-                        </div>
-                        <div class="tables-grid">
-                            <div>
-                                <div class="section-header">
-                                    <span class="section-title">Дома</span>
-                                </div>
-                                ${housesHtml}
-                            </div>
-                            <div>
-                                <div class="section-header">
-                                    <span class="section-title">Бизнесы</span>
-                                </div>
-                                ${bizHtml}
-                            </div>
-                        </div>
-                    </div>`;
-                containerUpcoming.insertAdjacentHTML('beforeend', card);
-            });
-
-            if (foundCount === 0) {
-                containerUpcoming.innerHTML = `<div class="empty-center">В ближайшие ${selectedUpcomingHours} ч. слётов не ожидается</div>`;
-            }
-        }
-
-        function renderManageTab() {
-            ALL_SERVERS.forEach(srv => {
-                const info = globalServerData[srv];
-                const tabsContainer = document.getElementById(`scan-tabs-${srv}`);
-                const delBtn = document.getElementById(`btn-del-scan-${srv}`);
-                const housesDiv = document.getElementById(`houses-manage-${srv}`);
-                const bizDiv = document.getElementById(`biz-manage-${srv}`);
-
-                if (!info || !info.scans || info.scans.length === 0) {
-                    if (tabsContainer) tabsContainer.innerHTML = '<span class="empty">Нет сканов</span>';
-                    if (delBtn) delBtn.style.display = 'none';
-                    if (housesDiv) housesDiv.innerHTML = '<span class="empty">Нет данных</span>';
-                    if (bizDiv) bizDiv.innerHTML = '<span class="empty">Нет данных</span>';
-                    return;
-                }
-
-                const scans = info.scans;
-                if (!activeServerScans[srv] || !scans.find(s => s.scanId === activeServerScans[srv])) {
-                    activeServerScans[srv] = scans[scans.length - 1].scanId;
-                }
-                const activeScanId = activeServerScans[srv];
-
-                let tabsHtml = '';
-                scans.forEach(s => {
-                    const isAct = s.scanId === activeScanId;
-                    let tabClass = 'scan-subtab';
-                    if (s.isCurrentPair) {
-                        tabClass += ' current-pair';
-                    } else if (s.hasPair || s.isConfirmed) {
-                        tabClass += ' old-pair';
-                    } else {
-                        tabClass += ' single';
-                    }
-                    if (isAct) tabClass += ' active';
-
-                    tabsHtml += `<button class="${tabClass}" onclick="selectScanTab('${srv}', '${s.scanId}')">${s.hourLabel}</button>`;
-                });
-
-                if (tabsContainer) tabsContainer.innerHTML = tabsHtml;
-                if (delBtn) delBtn.style.display = 'inline-block';
-
-                const currentScan = scans.find(s => s.scanId === activeScanId);
-                if (currentScan) {
-                    if (housesDiv) housesDiv.innerHTML = renderTable(currentScan.houses, srv, activeScanId, 'house', true, false, info);
-                    if (bizDiv) bizDiv.innerHTML = renderTable(currentScan.businesses, srv, activeScanId, 'biz', true, false, info);
-                }
-            });
+            const hoursLeft = Math.ceil(neededPD / decrement);
+            return {
+                text: `${hoursLeft}ч (${pd} PD)`,
+                isDrop: false,
+                hoursLeft: hoursLeft,
+                paydays: pd
+            };
         }
 
         async function loadData() {
@@ -2617,14 +2320,317 @@ DASHBOARD_HTML = """
                 renderViewTab();
                 renderUpcomingTab();
                 renderManageTab();
-            } catch(e) {
+            } catch (e) {
                 console.error(e);
             }
         }
 
-        document.addEventListener('DOMContentLoaded', () => {
-            checkAuth();
-        });
+        function renderViewTab() {
+            const container = document.getElementById('servers-view');
+            if (!container) return;
+            container.innerHTML = '';
+
+            const seasonFilter = document.getElementById('filter-season').value;
+            const favFilter = document.getElementById('filter-fav').value;
+
+            ALL_SERVERS.forEach(srv => {
+                const info = globalServerData[srv];
+                if (!info) return;
+
+                if (seasonFilter !== 'all' && String(info.season.id) !== seasonFilter) {
+                    return;
+                }
+
+                const isFav = favoriteServers.includes(srv);
+                if (favFilter === 'fav_only' && !isFav) {
+                    return;
+                }
+
+                const displayName = getServerDisplayName(srv);
+                const favStar = isFav ? '⭐' : '☆';
+                const scan = info.latestConfirmedScan; // Исключительно второй скан от подтвержденной пары
+
+                let housesRows = '';
+                let bizRows = '';
+
+                if (scan && scan.houses && scan.houses.length > 0) {
+                    scan.houses.forEach(h => {
+                        const dropInfo = calculateDropInfo(h.pd, h.status, getPropRules(info, 'house'));
+                        let badgeClass = 'pd-badge';
+                        if (dropInfo.isDrop) badgeClass = 'pd-badge-drop';
+                        else if (h.status === 'frozen') badgeClass = 'pd-badge-fixed';
+
+                        const idStr = h.propId ? `№${h.propId}` : `поз. ${h.pos}`;
+                        housesRows += `<tr>
+                            <td>${idStr}</td>
+                            <td><span class="${badgeClass}">${dropInfo.text}</span></td>
+                        </tr>`;
+                    });
+                } else {
+                    housesRows = '<tr><td colspan="2" class="empty">Нет домов</td></tr>';
+                }
+
+                if (scan && scan.businesses && scan.businesses.length > 0) {
+                    scan.businesses.forEach(b => {
+                        const dropInfo = calculateDropInfo(b.pd, b.status, getPropRules(info, 'biz'));
+                        let badgeClass = 'pd-badge';
+                        if (dropInfo.isDrop) badgeClass = 'pd-badge-drop';
+                        else if (b.status === 'frozen') badgeClass = 'pd-badge-fixed';
+
+                        const idStr = b.propId ? `№${b.propId}` : `поз. ${b.pos}`;
+                        bizRows += `<tr>
+                            <td>${idStr}</td>
+                            <td><span class="${badgeClass}">${dropInfo.text}</span></td>
+                        </tr>`;
+                    });
+                } else {
+                    bizRows = '<tr><td colspan="2" class="empty">Нет бизнесов</td></tr>';
+                }
+
+                const cardHtml = `
+                    <div class="server-card">
+                        <div class="server-header">
+                            <div class="server-title">
+                                <span><span class="fav-btn" onclick="toggleFavorite('${srv}')">${favStar}</span>${displayName}</span>
+                                <span class="season-badge">${info.season.name}</span>
+                            </div>
+                        </div>
+                        <div class="tables-grid">
+                            <div>
+                                <div class="section-header"><span class="section-title">Дома</span></div>
+                                <table>${housesRows}</table>
+                            </div>
+                            <div>
+                                <div class="section-header"><span class="section-title">Бизнесы</span></div>
+                                <table>${bizRows}</table>
+                            </div>
+                        </div>
+                    </div>`;
+                container.insertAdjacentHTML('beforeend', cardHtml);
+            });
+
+            if (container.children.length === 0) {
+                container.innerHTML = '<div class="empty-center">Нет серверов, соответствующих выбранным фильтрам</div>';
+            }
+        }
+
+        function renderUpcomingTab() {
+            const container = document.getElementById('servers-upcoming');
+            if (!container) return;
+            container.innerHTML = '';
+
+            ALL_SERVERS.forEach(srv => {
+                const info = globalServerData[srv];
+                if (!info) return;
+
+                const displayName = getServerDisplayName(srv);
+                const scan = info.latestConfirmedScan;
+                if (!scan) return;
+
+                const upcomingHouses = [];
+                if (scan.houses) {
+                    scan.houses.forEach(h => {
+                        const dropInfo = calculateDropInfo(h.pd, h.status, getPropRules(info, 'house'));
+                        if (dropInfo.hoursLeft !== undefined && dropInfo.hoursLeft !== null && dropInfo.hoursLeft <= selectedUpcomingHours) {
+                            upcomingHouses.push({ ...h, dropInfo });
+                        }
+                    });
+                }
+
+                const upcomingBiz = [];
+                if (scan.businesses) {
+                    scan.businesses.forEach(b => {
+                        const dropInfo = calculateDropInfo(b.pd, b.status, getPropRules(info, 'biz'));
+                        if (dropInfo.hoursLeft !== undefined && dropInfo.hoursLeft !== null && dropInfo.hoursLeft <= selectedUpcomingHours) {
+                            upcomingBiz.push({ ...b, dropInfo });
+                        }
+                    });
+                }
+
+                if (upcomingHouses.length === 0 && upcomingBiz.length === 0) return;
+
+                let housesRows = '';
+                if (upcomingHouses.length > 0) {
+                    upcomingHouses.forEach(h => {
+                        const badgeClass = h.dropInfo.isDrop ? 'pd-badge-drop' : 'pd-badge';
+                        const idStr = h.propId ? `№${h.propId}` : `поз. ${h.pos}`;
+                        housesRows += `<tr>
+                            <td>${idStr}</td>
+                            <td><span class="${badgeClass}">${h.dropInfo.text}</span></td>
+                        </tr>`;
+                    });
+                } else {
+                    housesRows = '<tr><td colspan="2" class="empty">Нет слётов</td></tr>';
+                }
+
+                let bizRows = '';
+                if (upcomingBiz.length > 0) {
+                    upcomingBiz.forEach(b => {
+                        const badgeClass = b.dropInfo.isDrop ? 'pd-badge-drop' : 'pd-badge';
+                        const idStr = b.propId ? `№${b.propId}` : `поз. ${b.pos}`;
+                        bizRows += `<tr>
+                            <td>${idStr}</td>
+                            <td><span class="${badgeClass}">${b.dropInfo.text}</span></td>
+                        </tr>`;
+                    });
+                } else {
+                    bizRows = '<tr><td colspan="2" class="empty">Нет слётов</td></tr>';
+                }
+
+                const cardHtml = `
+                    <div class="server-card">
+                        <div class="server-header">
+                            <div class="server-title">
+                                <span>${displayName}</span>
+                                <span class="season-badge">${info.season.name}</span>
+                            </div>
+                        </div>
+                        <div class="tables-grid">
+                            <div>
+                                <div class="section-header"><span class="section-title">Дома</span></div>
+                                <table>${housesRows}</table>
+                            </div>
+                            <div>
+                                <div class="section-header"><span class="section-title">Бизнесы</span></div>
+                                <table>${bizRows}</table>
+                            </div>
+                        </div>
+                    </div>`;
+                container.insertAdjacentHTML('beforeend', cardHtml);
+            });
+
+            if (container.children.length === 0) {
+                container.innerHTML = `<div class="empty-center">Нет слётов в течение ${selectedUpcomingHours}ч</div>`;
+            }
+        }
+
+        function renderManageTab() {
+            ALL_SERVERS.forEach(srv => {
+                const info = globalServerData[srv];
+                const containerHouses = document.getElementById(`houses-manage-${srv}`);
+                const containerBiz = document.getElementById(`biz-manage-${srv}`);
+                const containerTabs = document.getElementById(`scan-tabs-${srv}`);
+                const delBtn = document.getElementById(`btn-del-scan-${srv}`);
+
+                if (!containerHouses || !containerBiz || !containerTabs) return;
+
+                if (!info || !info.scans || info.scans.length === 0) {
+                    containerTabs.innerHTML = '<span class="empty">Нет сканов</span>';
+                    containerHouses.innerHTML = '<span class="empty">Нет данных</span>';
+                    containerBiz.innerHTML = '<span class="empty">Нет данных</span>';
+                    if (delBtn) delBtn.style.display = 'none';
+                    return;
+                }
+
+                const scans = info.scans;
+                if (!activeServerScans[srv] || !scans.some(s => s.scanId === activeServerScans[srv])) {
+                    activeServerScans[srv] = scans[scans.length - 1].scanId;
+                }
+
+                if (delBtn) delBtn.style.display = 'inline-block';
+
+                let tabsHtml = '';
+                scans.forEach(s => {
+                    let statusText = "";
+                    let subtabClass = "";
+
+                    if (s.hasPair || s.isConfirmed) {
+                        if (s.isOutdated) {
+                            statusText = "устарел(для подтвержденной пары сканов которые уже неактуальны)";
+                            subtabClass = "old-pair";
+                        } else {
+                            statusText = "подтвержденная пара";
+                            subtabClass = "current-pair";
+                        }
+                    } else {
+                        if (s.isOutdated) {
+                            statusText = "одиночный скан(не нашел пару)";
+                            subtabClass = "single-failed";
+                        } else {
+                            statusText = "ожидает пары";
+                            subtabClass = "single";
+                        }
+                    }
+
+                    let dateStr = "";
+                    let timeStr = "";
+                    if (s.scanTime) {
+                        const parts = s.scanTime.split(" ");
+                        dateStr = parts[0] || "";
+                        timeStr = parts[1] || "";
+                    } else if (s.scanId) {
+                        const parts = s.scanId.split(" ");
+                        dateStr = parts[0] || "";
+                        timeStr = parts[1] || "";
+                    }
+
+                    const titleAttr = `Дата: ${dateStr}&#10;Время: ${timeStr}&#10;Статус: ${statusText}`;
+                    const isActive = s.scanId === activeServerScans[srv];
+                    tabsHtml += `<button class="scan-subtab ${subtabClass} ${isActive ? 'active' : ''}" title="${titleAttr}" onclick="selectScanTab('${srv}', '${s.scanId}')">${s.hourLabel || timeStr}</button>`;
+                });
+                containerTabs.innerHTML = tabsHtml;
+
+                const currScan = scans.find(s => s.scanId === activeServerScans[srv]);
+                if (!currScan) {
+                    containerHouses.innerHTML = '<span class="empty">Скан не выбран</span>';
+                    containerBiz.innerHTML = '<span class="empty">Скан не выбран</span>';
+                    return;
+                }
+
+                // Таблица домов
+                if (currScan.houses && currScan.houses.length > 0) {
+                    let hHtml = '<table><tr><th>ID</th><th>PD</th><th>Статус</th><th></th></tr>';
+                    currScan.houses.forEach(h => {
+                        const idStr = h.propId ? `№${h.propId}` : `поз.${h.pos}`;
+                        const st = h.status || 'insured';
+                        
+                        hHtml += `<tr>
+                            <td>${idStr}</td>
+                            <td><b>${h.pd}</b></td>
+                            <td>
+                                <div class="btn-group">
+                                    <button class="btn-opt ${st === 'insured' ? 'active-insured' : ''}" onclick="setStatus('${srv}', '${currScan.scanId}', 'house', ${h.pos}, 'insured')">Страх</button>
+                                    <button class="btn-opt ${st === 'uninsured' ? 'active-uninsured' : ''}" onclick="setStatus('${srv}', '${currScan.scanId}', 'house', ${h.pos}, 'uninsured')">Без</button>
+                                    <button class="btn-opt ${st === 'frozen' ? 'active-frozen' : ''}" onclick="setStatus('${srv}', '${currScan.scanId}', 'house', ${h.pos}, 'frozen')">Замороз</button>
+                                </div>
+                            </td>
+                            <td><button class="btn-del" onclick="deleteItem('${srv}', '${currScan.scanId}', 'house', ${h.pos})">✕</button></td>
+                        </tr>`;
+                    });
+                    containerHouses.innerHTML = hHtml + '</table>';
+                } else {
+                    containerHouses.innerHTML = '<span class="empty">Нет домов</span>';
+                }
+
+                // Таблица бизнесов
+                if (currScan.businesses && currScan.businesses.length > 0) {
+                    let bHtml = '<table><tr><th>ID</th><th>PD</th><th>Статус</th><th></th></tr>';
+                    currScan.businesses.forEach(b => {
+                        const idStr = b.propId ? `№${b.propId}` : `поз.${b.pos}`;
+                        const st = b.status || 'insured';
+
+                        bHtml += `<tr>
+                            <td>${idStr}</td>
+                            <td><b>${b.pd}</b></td>
+                            <td>
+                                <div class="btn-group">
+                                    <button class="btn-opt ${st === 'insured' ? 'active-insured' : ''}" onclick="setStatus('${srv}', '${currScan.scanId}', 'biz', ${b.pos}, 'insured')">Страх</button>
+                                    <button class="btn-opt ${st === 'uninsured' ? 'active-uninsured' : ''}" onclick="setStatus('${srv}', '${currScan.scanId}', 'biz', ${b.pos}, 'uninsured')">Без</button>
+                                    <button class="btn-opt ${st === 'no_activity' ? 'active-noact' : ''}" onclick="setStatus('${srv}', '${currScan.scanId}', 'biz', ${b.pos}, 'no_activity')">Без зан</button>
+                                    <button class="btn-opt ${st === 'frozen' ? 'active-frozen' : ''}" onclick="setStatus('${srv}', '${currScan.scanId}', 'biz', ${b.pos}, 'frozen')">Замороз</button>
+                                </div>
+                            </td>
+                            <td><button class="btn-del" onclick="deleteItem('${srv}', '${currScan.scanId}', 'biz', ${b.pos})">✕</button></td>
+                        </tr>`;
+                    });
+                    containerBiz.innerHTML = bHtml + '</table>';
+                } else {
+                    containerBiz.innerHTML = '<span class="empty">Нет бизнесов</span>';
+                }
+            });
+        }
+
+        window.onload = checkAuth;
     </script>
 </body>
 </html>
