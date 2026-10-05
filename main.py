@@ -470,7 +470,6 @@ async def process_hourly_payday():
     now_msk = datetime.now(MSK_TZ)
     is_restart_hour = (now_msk.hour == 5)
 
-    # Очистка логов сканов и ручных действий каждый день в 0:00 МСК
     if now_msk.hour == 0:
         global manual_action_logs_mem
         manual_action_logs_mem.clear()
@@ -1206,6 +1205,7 @@ DASHBOARD_HTML = """
             -webkit-text-fill-color: transparent;
         }
 
+        /* Баннер Лотереи */
         .lottery-banner {
             background: linear-gradient(135deg, rgba(255, 152, 0, 0.15), rgba(156, 39, 176, 0.2));
             border: 1px solid rgba(255, 152, 0, 0.4);
@@ -1266,6 +1266,7 @@ DASHBOARD_HTML = """
             letter-spacing: 1px;
         }
 
+        /* Auth Screen */
         .login-box { 
             max-width: 380px; 
             margin: 80px auto; 
@@ -1316,6 +1317,7 @@ DASHBOARD_HTML = """
             box-shadow: 0 4px 15px var(--accent-orange-glow);
         }
 
+        /* Top Navigation */
         .user-nav { 
             display: flex; 
             justify-content: space-between; 
@@ -1343,6 +1345,7 @@ DASHBOARD_HTML = """
             color: #fff;
         }
 
+        /* Tabs Navigation */
         .tabs { 
             display: flex; 
             justify-content: center; 
@@ -1376,6 +1379,7 @@ DASHBOARD_HTML = """
         .tab-content { display: none; }
         .tab-content.active { display: block; }
 
+        /* Filter Controls */
         .upcoming-filters { display: flex; justify-content: center; gap: 10px; margin-bottom: 20px; }
         .time-filter-btn { 
             background-color: var(--card-bg); 
@@ -1431,6 +1435,7 @@ DASHBOARD_HTML = """
         }
         .fav-btn:hover { transform: scale(1.3); }
 
+        /* GRID FOR SERVERS */
         .servers-container { 
             display: grid; 
             grid-template-columns: repeat(1, 1fr); 
@@ -1449,6 +1454,7 @@ DASHBOARD_HTML = """
             .servers-container { grid-template-columns: repeat(4, 1fr); }
         }
 
+        /* Server Card Styling */
         .server-card { 
             background-color: var(--card-bg); 
             border: 1px solid var(--card-border); 
@@ -1641,6 +1647,122 @@ DASHBOARD_HTML = """
         .empty { color: #546e7a; font-style: italic; font-size: 0.78rem; display: block; padding: 4px 0; }
         .empty-center { text-align: center; color: var(--text-muted); font-style: italic; padding: 30px; background-color: var(--card-bg); border-radius: 10px; border: 1px solid var(--card-border); max-width: 600px; margin: 0 auto; grid-column: 1 / -1; }
     </style>
+</head>
+<body>
+    <div id="login-screen" class="login-box" style="display:none;">
+        <h2>Авторизация</h2>
+        <input type="text" id="login-username" placeholder="Логин">
+        <input type="password" id="login-password" placeholder="Пароль">
+        <button onclick="handleLogin()">Войти</button>
+    </div>
+
+    <div id="main-dashboard" style="display:none;">
+        <div class="user-nav">
+            <span id="user-info"></span>
+            <button class="btn-logout" onclick="handleLogout()">Выйти</button>
+        </div>
+
+        <div class="lottery-banner">
+            <div class="lottery-info">
+                <div class="lottery-icon">🎰</div>
+                <div>
+                    <div class="lottery-title">Розыгрыш Лотереи</div>
+                    <div class="lottery-sub">Ежедневно в <b>21:10 МСК</b></div>
+                </div>
+            </div>
+            <div class="lottery-countdown">
+                <span class="lottery-label">До розыгрыша:</span>
+                <span id="lottery-timer" class="lottery-timer">00:00:00</span>
+            </div>
+        </div>
+
+        <div class="tabs">
+            <button id="btn-tab-view" class="tab-btn active" onclick="switchTab('view')">Общий вид</button>
+            <button id="btn-tab-upcoming" class="tab-btn" onclick="switchTab('upcoming')">Ближайшие слёты</button>
+            <button id="btn-tab-manage" class="tab-btn" onclick="switchTab('manage')" style="display:none;">Управление</button>
+            <button id="btn-tab-admin" class="tab-btn" onclick="switchTab('admin')" style="display:none;">Админ-панель</button>
+        </div>
+
+        <!-- Общий вид -->
+        <div id="tab-view" class="tab-content active">
+            <div class="filter-panel">
+                <div class="filter-group">
+                    <label>Сезон:</label>
+                    <select id="filter-season" class="filter-select" onchange="renderViewTab()">
+                        <option value="all">Все сезоны</option>
+                        <option value="1">📱 По инфе (1)</option>
+                        <option value="2">⌨ Скорострелы (2)</option>
+                        <option value="3">🏎️ Автогонки (3)</option>
+                        <option value="4">✈️ По новому (4)</option>
+                        <option value="5">🏍 Мотогонки (5)</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label>Избранное:</label>
+                    <select id="filter-fav" class="filter-select" onchange="renderViewTab()">
+                        <option value="all">Все сервера</option>
+                        <option value="fav_only">Только избранные ⭐</option>
+                    </select>
+                </div>
+            </div>
+            <div id="servers-view" class="servers-container"></div>
+        </div>
+
+        <!-- Ближайшие слёты -->
+        <div id="tab-upcoming" class="tab-content">
+            <div class="upcoming-filters">
+                <button id="btn-upcoming-1h" class="time-filter-btn active" onclick="setUpcomingHoursFilter(1)">В течение 1ч</button>
+                <button id="btn-upcoming-2h" class="time-filter-btn" onclick="setUpcomingHoursFilter(2)">В течение 2ч</button>
+                <button id="btn-upcoming-3h" class="time-filter-btn" onclick="setUpcomingHoursFilter(3)">В течение 3ч</button>
+                <button id="btn-upcoming-5h" class="time-filter-btn" onclick="setUpcomingHoursFilter(5)">В течение 5ч</button>
+            </div>
+            <div id="servers-upcoming" class="servers-container"></div>
+        </div>
+
+        <!-- Управление -->
+        <div id="tab-manage" class="tab-content">
+            <div style="max-width:1600px; margin:0 auto 20px auto; background:var(--card-bg); border:1px solid var(--card-border); border-radius:10px; padding:15px;">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <h3 style="margin:0; font-size:1rem; color:var(--accent-orange);">История ручных действий</h3>
+                    <button id="btn-toggle-manual-log" class="btn-add" onclick="toggleManualLogs()">▲ Свернуть</button>
+                </div>
+                <div id="manual-logs-content" style="margin-top:10px;">
+                    <div id="manual-logs-table-container"></div>
+                </div>
+            </div>
+            <div id="servers-manage" class="servers-container"></div>
+        </div>
+
+        <!-- Админ-панель -->
+        <div id="tab-admin" class="tab-content">
+            <div style="max-width:1200px; margin:0 auto; display:flex; flex-direction:column; gap:20px;">
+                <div style="background:var(--card-bg); border:1px solid var(--card-border); border-radius:10px; padding:20px;">
+                    <h3 style="margin-top:0; color:var(--accent-orange);">Создать пользователя</h3>
+                    <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+                        <input type="text" id="new-username" placeholder="Логин" style="background:#0f121a; border:1px solid #263043; color:#fff; padding:8px; border-radius:6px;">
+                        <input type="password" id="new-password" placeholder="Пароль" style="background:#0f121a; border:1px solid #263043; color:#fff; padding:8px; border-radius:6px;">
+                        <select id="new-role" class="select-role">
+                            <option value="user">User</option>
+                            <option value="support">Support</option>
+                            <option value="admin">Admin</option>
+                        </select>
+                        <button class="btn-add" style="padding:8px 16px;" onclick="handleCreateUser()">Создать</button>
+                    </div>
+                </div>
+
+                <div style="background:var(--card-bg); border:1px solid var(--card-border); border-radius:10px; padding:20px;">
+                    <h3 style="margin-top:0; color:var(--accent-orange);">Пользователи</h3>
+                    <div id="admin-users-table"></div>
+                </div>
+
+                <div style="background:var(--card-bg); border:1px solid var(--card-border); border-radius:10px; padding:20px;">
+                    <h3 style="margin-top:0; color:var(--accent-orange);">Логи сканирований</h3>
+                    <div id="admin-scan-logs-table"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script>
         const ALL_SERVERS = [
             "Phoenix", "Tucson", "Scottdale", "Chandler", "Brainburg",
@@ -1712,30 +1834,6 @@ DASHBOARD_HTML = """
             }
             localStorage.setItem('fav_servers', JSON.stringify(favoriteServers));
             renderViewTab();
-        }
-
-        function getLastConfirmedScanTime(srv) {
-            const info = globalServerData[srv];
-            if (!info || !info.scans || info.scans.length === 0) return '—';
-            
-            const confirmedScans = info.scans.filter(s => s.hasPair || s.isConfirmed);
-            if (confirmedScans.length === 0) return '—';
-            
-            const lastScan = confirmedScans[confirmedScans.length - 1];
-            if (!lastScan) return '—';
-            
-            const timeRaw = lastScan.scanTime || lastScan.scanId;
-            if (!timeRaw) return '—';
-            
-            const parts = timeRaw.split(' ');
-            if (parts.length >= 2) {
-                const dateParts = parts[0].split('-');
-                if (dateParts.length === 3) {
-                    const timePart = parts[1].substring(0, 5);
-                    return `${dateParts[2]}.${dateParts[1]}.${dateParts[0]} ${timePart}`;
-                }
-            }
-            return timeRaw;
         }
 
         function initDashboard() {
@@ -2293,6 +2391,32 @@ DASHBOARD_HTML = """
             return html + '</table>';
         }
 
+        function getConfirmedScanTimeText(info) {
+            if (!info || !info.scans || info.scans.length === 0) {
+                return 'Скан: нет';
+            }
+            const confirmedScans = info.scans.filter(s => s.hasPair || s.isConfirmed);
+            if (confirmedScans.length === 0) {
+                return 'Скан: нет';
+            }
+            const lastScan = confirmedScans[confirmedScans.length - 1];
+            const rawTime = lastScan.scanTime || lastScan.scanId || '';
+            if (!rawTime) return 'Скан: нет';
+
+            try {
+                const parts = rawTime.trim().split(' ');
+                const dateParts = parts[0].split('-');
+                if (dateParts.length === 3) {
+                    const formattedDate = `${dateParts[2]}.${dateParts[1]}.${dateParts[0]}`;
+                    const timeParts = parts[1] ? parts[1].split(':') : ['00', '00'];
+                    const formattedTime = `${timeParts[0]}:${timeParts[1]}`;
+                    return `Скан: ${formattedDate} ${formattedTime}`;
+                }
+            } catch(e) {}
+
+            return `Скан: ${rawTime}`;
+        }
+
         function renderViewTab() {
             const containerView = document.getElementById('servers-view');
             if (!containerView) return;
@@ -2330,40 +2454,39 @@ DASHBOARD_HTML = """
                 const isFav = favoriteServers.includes(srv);
                 const starIcon = isFav ? '⭐' : '☆';
                 const displayName = getServerDisplayName(srv);
-                const info = globalServerData[srv] || {};
-                const seasonDisplay = info.season ? info.season.display : '—';
-                const lastScanTime = getLastConfirmedScanTime(srv);
+                const info = globalServerData[srv];
+                const seasonDisplay = info && info.season ? info.season.display : '—';
+                const scanTimeText = getConfirmedScanTimeText(info);
 
-                const latestScan = info.latestConfirmedScan;
-                const houses = latestScan ? latestScan.houses || [] : [];
-                const biz = latestScan ? latestScan.businesses || [] : [];
+                const scan = info ? info.latestConfirmedScan : null;
+                const housesHtml = scan ? renderTable(scan.houses, srv, scan.scanId, 'house', false, false, info) : '<span class="empty">Нет данных</span>';
+                const bizHtml = scan ? renderTable(scan.businesses, srv, scan.scanId, 'biz', false, false, info) : '<span class="empty">Нет данных</span>';
 
-                const housesHtml = renderTable(houses, srv, null, 'house', false, false, info);
-                const bizHtml = renderTable(biz, srv, null, 'biz', false, false, info);
-
-                const cardView = `
+                const card = `
                     <div class="server-card">
                         <div class="server-header">
                             <div class="server-title">
                                 <span><span class="fav-btn" onclick="toggleFavorite('${srv}')">${starIcon}</span>${displayName}</span>
                                 <span class="season-badge">${seasonDisplay}</span>
                             </div>
-                            <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 4px;">
-                                Последний скан: <span style="color: #00e676; font-weight: 600;">${lastScanTime}</span>
-                            </div>
+                            <div style="font-size: 0.72rem; color: var(--text-muted); margin-top: 4px;">${scanTimeText}</div>
                         </div>
                         <div class="tables-grid">
                             <div>
-                                <div class="section-header"><span class="section-title">Дома</span></div>
+                                <div class="section-header">
+                                    <span class="section-title">Дома</span>
+                                </div>
                                 ${housesHtml}
                             </div>
                             <div>
-                                <div class="section-header"><span class="section-title">Бизнесы</span></div>
+                                <div class="section-header">
+                                    <span class="section-title">Бизнесы</span>
+                                </div>
                                 ${bizHtml}
                             </div>
                         </div>
                     </div>`;
-                containerView.insertAdjacentHTML('beforeend', cardView);
+                containerView.insertAdjacentHTML('beforeend', card);
             });
         }
 
@@ -2371,285 +2494,138 @@ DASHBOARD_HTML = """
             const containerUpcoming = document.getElementById('servers-upcoming');
             if (!containerUpcoming) return;
 
-            const seasonFilter = document.getElementById('filter-season-upcoming').value;
-            const favFilter = document.getElementById('filter-fav-upcoming').value;
-
             containerUpcoming.innerHTML = '';
-
-            let hasAnyUpcoming = false;
+            let foundCount = 0;
 
             ALL_SERVERS.forEach(srv => {
                 const info = globalServerData[srv];
-                if (!info) return;
+                if (!info || !info.latestConfirmedScan) return;
 
-                if (seasonFilter !== 'all') {
-                    if (!info.season || String(info.season.id) !== seasonFilter) return;
-                }
-
-                if (favFilter === 'fav_only') {
-                    if (!favoriteServers.includes(srv)) return;
-                }
-
-                const latestScan = info.latestConfirmedScan;
-                if (!latestScan) return;
-
+                const scan = info.latestConfirmedScan;
                 const houseRules = getPropRules(info, 'house');
                 const bizRules = getPropRules(info, 'biz');
 
-                const upcomingHouses = (latestScan.houses || []).filter(item => {
-                    if (item.isPendingPair) return false;
-                    const dropInfo = calculateDropTime(item.pd, item.status || 'insured', houseRules);
-                    return !dropInfo.isFrozen && dropInfo.hourSteps !== null && dropInfo.hourSteps <= selectedUpcomingHours;
+                const upcomingHouses = (scan.houses || []).filter(h => {
+                    if (h.isPendingPair) return false;
+                    const dropInfo = calculateDropTime(h.pd, h.status, houseRules);
+                    return !dropInfo.isFrozen && dropInfo.hourSteps <= selectedUpcomingHours;
                 });
 
-                const upcomingBiz = (latestScan.businesses || []).filter(item => {
-                    if (item.isPendingPair) return false;
-                    const dropInfo = calculateDropTime(item.pd, item.status || 'insured', bizRules);
-                    return !dropInfo.isFrozen && dropInfo.hourSteps !== null && dropInfo.hourSteps <= selectedUpcomingHours;
+                const upcomingBiz = (scan.businesses || []).filter(b => {
+                    if (b.isPendingPair) return false;
+                    const dropInfo = calculateDropTime(b.pd, b.status, bizRules);
+                    return !dropInfo.isFrozen && dropInfo.hourSteps <= selectedUpcomingHours;
                 });
 
                 if (upcomingHouses.length === 0 && upcomingBiz.length === 0) return;
 
-                hasAnyUpcoming = true;
-
-                const isFav = favoriteServers.includes(srv);
-                const starIcon = isFav ? '⭐' : '☆';
+                foundCount++;
                 const displayName = getServerDisplayName(srv);
                 const seasonDisplay = info.season ? info.season.display : '—';
-                const lastScanTime = getLastConfirmedScanTime(srv);
+                const scanTimeText = getConfirmedScanTimeText(info);
 
-                const housesHtml = renderTable(upcomingHouses, srv, null, 'house', false, true, info);
-                const bizHtml = renderTable(upcomingBiz, srv, null, 'biz', false, true, info);
+                const housesHtml = renderTable(upcomingHouses, srv, scan.scanId, 'house', false, true, info);
+                const bizHtml = renderTable(upcomingBiz, srv, scan.scanId, 'biz', false, true, info);
 
-                const cardUpcoming = `
+                const card = `
                     <div class="server-card">
                         <div class="server-header">
                             <div class="server-title">
-                                <span><span class="fav-btn" onclick="toggleFavorite('${srv}')">${starIcon}</span>${displayName}</span>
+                                <span>${displayName}</span>
                                 <span class="season-badge">${seasonDisplay}</span>
                             </div>
-                            <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 4px;">
-                                Последний скан: <span style="color: #00e676; font-weight: 600;">${lastScanTime}</span>
-                            </div>
+                            <div style="font-size: 0.72rem; color: var(--text-muted); margin-top: 4px;">${scanTimeText}</div>
                         </div>
                         <div class="tables-grid">
                             <div>
-                                <div class="section-header"><span class="section-title">Дома</span></div>
+                                <div class="section-header">
+                                    <span class="section-title">Дома</span>
+                                </div>
                                 ${housesHtml}
                             </div>
                             <div>
-                                <div class="section-header"><span class="section-title">Бизнесы</span></div>
+                                <div class="section-header">
+                                    <span class="section-title">Бизнесы</span>
+                                </div>
                                 ${bizHtml}
                             </div>
                         </div>
                     </div>`;
-                containerUpcoming.insertAdjacentHTML('beforeend', cardUpcoming);
+                containerUpcoming.insertAdjacentHTML('beforeend', card);
             });
 
-            if (!hasAnyUpcoming) {
-                containerUpcoming.innerHTML = '<div class="empty-center">В ближайшее время слётов не ожидается</div>';
+            if (foundCount === 0) {
+                containerUpcoming.innerHTML = `<div class="empty-center">В ближайшие ${selectedUpcomingHours} ч. слётов не ожидается</div>`;
             }
+        }
+
+        function renderManageTab() {
+            ALL_SERVERS.forEach(srv => {
+                const info = globalServerData[srv];
+                const tabsContainer = document.getElementById(`scan-tabs-${srv}`);
+                const delBtn = document.getElementById(`btn-del-scan-${srv}`);
+                const housesDiv = document.getElementById(`houses-manage-${srv}`);
+                const bizDiv = document.getElementById(`biz-manage-${srv}`);
+
+                if (!info || !info.scans || info.scans.length === 0) {
+                    if (tabsContainer) tabsContainer.innerHTML = '<span class="empty">Нет сканов</span>';
+                    if (delBtn) delBtn.style.display = 'none';
+                    if (housesDiv) housesDiv.innerHTML = '<span class="empty">Нет данных</span>';
+                    if (bizDiv) bizDiv.innerHTML = '<span class="empty">Нет данных</span>';
+                    return;
+                }
+
+                const scans = info.scans;
+                if (!activeServerScans[srv] || !scans.find(s => s.scanId === activeServerScans[srv])) {
+                    activeServerScans[srv] = scans[scans.length - 1].scanId;
+                }
+                const activeScanId = activeServerScans[srv];
+
+                let tabsHtml = '';
+                scans.forEach(s => {
+                    const isAct = s.scanId === activeScanId;
+                    let tabClass = 'scan-subtab';
+                    if (s.isCurrentPair) {
+                        tabClass += ' current-pair';
+                    } else if (s.hasPair || s.isConfirmed) {
+                        tabClass += ' old-pair';
+                    } else {
+                        tabClass += ' single';
+                    }
+                    if (isAct) tabClass += ' active';
+
+                    tabsHtml += `<button class="${tabClass}" onclick="selectScanTab('${srv}', '${s.scanId}')">${s.hourLabel}</button>`;
+                });
+
+                if (tabsContainer) tabsContainer.innerHTML = tabsHtml;
+                if (delBtn) delBtn.style.display = 'inline-block';
+
+                const currentScan = scans.find(s => s.scanId === activeScanId);
+                if (currentScan) {
+                    if (housesDiv) housesDiv.innerHTML = renderTable(currentScan.houses, srv, activeScanId, 'house', true, false, info);
+                    if (bizDiv) bizDiv.innerHTML = renderTable(currentScan.businesses, srv, activeScanId, 'biz', true, false, info);
+                }
+            });
         }
 
         async function loadData() {
             try {
                 const res = await fetch('/api/paydays');
                 if (!res.ok) return;
-                const data = await res.json();
-                globalServerData = data;
-
-                ALL_SERVERS.forEach(srv => {
-                    const srvInfo = data[srv];
-                    if (!srvInfo) return;
-
-                    const scans = srvInfo.scans || [];
-                    const tabsContainer = document.getElementById(`scan-tabs-${srv}`);
-                    const btnDelScan = document.getElementById(`btn-del-scan-${srv}`);
-
-                    if (tabsContainer) {
-                        tabsContainer.innerHTML = '';
-                        if (scans.length === 0) {
-                            tabsContainer.innerHTML = '<span class="empty">Нет сканов</span>';
-                            if (btnDelScan) btnDelScan.style.display = 'none';
-                        } else {
-                            if (btnDelScan) btnDelScan.style.display = 'inline-block';
-
-                            if (!activeServerScans[srv] || !scans.find(s => s.scanId === activeServerScans[srv])) {
-                                activeServerScans[srv] = scans[scans.length - 1].scanId;
-                            }
-
-                            scans.forEach(s => {
-                                let badgeClass = 'single';
-                                if (s.isCurrentPair) badgeClass = 'current-pair';
-                                else if (s.hasPair || s.isConfirmed) badgeClass = 'old-pair';
-
-                                const isActive = activeServerScans[srv] === s.scanId ? 'active' : '';
-                                const subtab = `<button class="scan-subtab ${badgeClass} ${isActive}" onclick="selectScanTab('${srv}', '${s.scanId}')">${s.hourLabel}</button>`;
-                                tabsContainer.insertAdjacentHTML('beforeend', subtab);
-                            });
-                        }
-                    }
-
-                    const selectedScanId = activeServerScans[srv];
-                    const currentScan = scans.find(s => s.scanId === selectedScanId);
-
-                    const housesElem = document.getElementById(`houses-manage-${srv}`);
-                    const bizElem = document.getElementById(`biz-manage-${srv}`);
-
-                    if (housesElem) {
-                        housesElem.innerHTML = currentScan ? renderTable(currentScan.houses, srv, selectedScanId, 'house', true, false, srvInfo) : '<span class="empty">Нет данных</span>';
-                    }
-                    if (bizElem) {
-                        bizElem.innerHTML = currentScan ? renderTable(currentScan.businesses, srv, selectedScanId, 'biz', true, false, srvInfo) : '<span class="empty">Нет данных</span>';
-                    }
-                });
+                globalServerData = await res.json();
 
                 renderViewTab();
                 renderUpcomingTab();
-            } catch(e) { console.error(e); }
+                renderManageTab();
+            } catch(e) {
+                console.error(e);
+            }
         }
 
-        window.onload = function() {
+        document.addEventListener('DOMContentLoaded', () => {
             checkAuth();
-            setInterval(loadData, 30000);
-        };
+        });
     </script>
-</head>
-<body>
-    <div id="login-screen" class="login-box" style="display:none;">
-        <h2>Авторизация</h2>
-        <input type="text" id="login-username" placeholder="Логин">
-        <input type="password" id="login-password" placeholder="Пароль">
-        <button onclick="handleLogin()">Войти</button>
-    </div>
-
-    <div id="main-dashboard" style="display:none;">
-        <div class="user-nav">
-            <div id="user-info"></div>
-            <button class="btn-logout" onclick="handleLogout()">Выйти</button>
-        </div>
-
-        <div class="lottery-banner">
-            <div class="lottery-info">
-                <span class="lottery-icon">🎰</span>
-                <div>
-                    <div class="lottery-title">Лотерейный билет</div>
-                    <div class="lottery-sub">Слёт билетов происходит каждый день в <b>21:10 МСК</b></div>
-                </div>
-            </div>
-            <div class="lottery-countdown">
-                <span class="lottery-label">До слёта:</span>
-                <span id="lottery-timer" class="lottery-timer">00:00:00</span>
-            </div>
-        </div>
-
-        <h1>Arizona RP — Мониторинг Слётов</h1>
-
-        <div class="tabs">
-            <button id="btn-tab-view" class="tab-btn active" onclick="switchTab('view')">Общий вид</button>
-            <button id="btn-tab-upcoming" class="tab-btn" onclick="switchTab('upcoming')">Ближайшие слёты</button>
-            <button id="btn-tab-manage" class="tab-btn" onclick="switchTab('manage')" style="display:none;">Управление</button>
-            <button id="btn-tab-admin" class="tab-btn" onclick="switchTab('admin')" style="display:none;">Админ панель</button>
-        </div>
-
-        <!-- Таб: Общий вид -->
-        <div id="tab-view" class="tab-content active">
-            <div class="filter-panel">
-                <div class="filter-group">
-                    <label>Сезон:</label>
-                    <select id="filter-season" class="filter-select" onchange="renderViewTab()">
-                        <option value="all">Все сезоны</option>
-                        <option value="1">📱 По инфе (1)</option>
-                        <option value="2">⌨ Скорострелы (2)</option>
-                        <option value="3">🏎️ Автогонки (3)</option>
-                        <option value="4">✈️ По новому (4)</option>
-                        <option value="5">🏍 Мотогонки (5)</option>
-                    </select>
-                </div>
-                <div class="filter-group">
-                    <label>Избранное:</label>
-                    <select id="filter-fav" class="filter-select" onchange="renderViewTab()">
-                        <option value="all">Все серверы</option>
-                        <option value="fav_only">Только избранные ⭐</option>
-                    </select>
-                </div>
-            </div>
-            <div id="servers-view" class="servers-container"></div>
-        </div>
-
-        <!-- Таб: Ближайшие слёты -->
-        <div id="tab-upcoming" class="tab-content">
-            <div class="upcoming-filters">
-                <button id="btn-upcoming-1h" class="time-filter-btn active" onclick="setUpcomingHoursFilter(1)">В течение 1 ч</button>
-                <button id="btn-upcoming-2h" class="time-filter-btn" onclick="setUpcomingHoursFilter(2)">В течение 2 ч</button>
-                <button id="btn-upcoming-3h" class="time-filter-btn" onclick="setUpcomingHoursFilter(3)">В течение 3 ч</button>
-            </div>
-            <div class="filter-panel">
-                <div class="filter-group">
-                    <label>Сезон:</label>
-                    <select id="filter-season-upcoming" class="filter-select" onchange="renderUpcomingTab()">
-                        <option value="all">Все сезоны</option>
-                        <option value="1">📱 По инфе (1)</option>
-                        <option value="2">⌨ Скорострелы (2)</option>
-                        <option value="3">🏎️ Автогонки (3)</option>
-                        <option value="4">✈️ По новому (4)</option>
-                        <option value="5">🏍 Мотогонки (5)</option>
-                    </select>
-                </div>
-                <div class="filter-group">
-                    <label>Избранное:</label>
-                    <select id="filter-fav-upcoming" class="filter-select" onchange="renderUpcomingTab()">
-                        <option value="all">Все серверы</option>
-                        <option value="fav_only">Только избранные ⭐</option>
-                    </select>
-                </div>
-            </div>
-            <div id="servers-upcoming" class="servers-container"></div>
-        </div>
-
-        <!-- Таб: Управление -->
-        <div id="tab-manage" class="tab-content">
-            <div id="manual-logs-panel" style="max-width: 1600px; margin: 0 auto 20px auto; background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 10px; padding: 14px 20px;">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                    <span style="font-size: 0.9rem; font-weight: 700; color: var(--accent-orange); text-transform: uppercase;">📋 Лог ручных действий за сегодня</span>
-                    <button id="btn-toggle-manual-log" class="btn-add" style="background-color: #37474f;" onclick="toggleManualLogs()">▲ Свернуть</button>
-                </div>
-                <div id="manual-logs-content">
-                    <div id="manual-logs-table-container"></div>
-                </div>
-            </div>
-            <div id="servers-manage" class="servers-container"></div>
-        </div>
-
-        <!-- Таб: Админ панель -->
-        <div id="tab-admin" class="tab-content">
-            <div style="max-width: 1200px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px;">
-                <div style="background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 10px; padding: 20px;">
-                    <h3 style="margin-top: 0; color: var(--accent-orange);">Создать нового пользователя</h3>
-                    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                        <input type="text" id="new-username" placeholder="Логин" style="background: #0f121a; color: #fff; border: 1px solid #263043; padding: 8px; border-radius: 6px;">
-                        <input type="password" id="new-password" placeholder="Пароль" style="background: #0f121a; color: #fff; border: 1px solid #263043; padding: 8px; border-radius: 6px;">
-                        <select id="new-role" class="select-role" style="padding: 8px;">
-                            <option value="user">User</option>
-                            <option value="support">Support</option>
-                            <option value="admin">Admin</option>
-                        </select>
-                        <button class="btn-add" style="padding: 8px 16px; background: linear-gradient(135deg, #ff9800, #f57c00);" onclick="handleCreateUser()">Создать</button>
-                    </div>
-                </div>
-
-                <div style="background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 10px; padding: 20px;">
-                    <h3 style="margin-top: 0; color: var(--accent-orange);">Управление пользователями</h3>
-                    <div id="admin-users-table"></div>
-                </div>
-
-                <div style="background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 10px; padding: 20px;">
-                    <h3 style="margin-top: 0; color: var(--accent-orange);">Логи сканирований (со скрипта)</h3>
-                    <div id="admin-scan-logs-table"></div>
-                </div>
-            </div>
-        </div>
-    </div>
 </body>
 </html>
 """
