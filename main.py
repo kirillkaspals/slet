@@ -1484,7 +1484,7 @@ DASHBOARD_HTML = """
             align-items: center; 
         }
         .season-badge { 
-            font-size: 0.7rem; 
+            font-size: 0.75rem; 
             background: rgba(255, 152, 0, 0.12); 
             color: #ffb74d; 
             border: 1px solid rgba(255, 152, 0, 0.3); 
@@ -1556,7 +1556,6 @@ DASHBOARD_HTML = """
             border-color: #ffb74d; 
         }
 
-        /* Одиночный скан, который не нашел пару (красный) */
         .scan-subtab.single-failed { 
             background-color: rgba(213, 0, 0, 0.25); 
             color: #ff5252; 
@@ -1614,11 +1613,11 @@ DASHBOARD_HTML = """
         th { background-color: var(--table-header); color: var(--text-muted); font-weight: 600; font-size: 0.72rem; }
         tr:hover td { background-color: var(--table-row-hover); }
 
-        .pd-badge { background-color: #37474f; color: #eceff1; padding: 2px 5px; border-radius: 4px; font-weight: 700; font-size: 0.72rem; }
-        .pd-badge-drop { background-color: #b71c1c; color: #ffee58; padding: 2px 5px; border-radius: 4px; font-weight: 800; font-size: 0.72rem; animation: pulse 1.5s infinite; }
-        .pd-badge-fixed { background-color: #1a237e; color: #82b1ff; border: 1px solid #304ffe; padding: 2px 5px; border-radius: 4px; font-weight: 700; font-size: 0.72rem; }
+        .pd-badge { background-color: #37474f; color: #eceff1; padding: 2px 5px; border-radius: 4px; font-weight: 700; font-size: 0.72rem; display: inline-block; }
+        .pd-badge-drop { background-color: #b71c1c; color: #ffee58; padding: 2px 5px; border-radius: 4px; font-weight: 800; font-size: 0.72rem; display: inline-block; animation: pulse 1.5s infinite; }
+        .pd-badge-fixed { background-color: #1a237e; color: #82b1ff; border: 1px solid #304ffe; padding: 2px 5px; border-radius: 4px; font-weight: 700; font-size: 0.72rem; display: inline-block; }
         
-        .time-left-badge { font-weight: 700; color: #ffb74d; font-size: 0.75rem; background-color: rgba(255, 152, 0, 0.1); padding: 2px 5px; border-radius: 4px; border: 1px solid rgba(255, 152, 0, 0.3); }
+        .time-left-badge { font-weight: 700; color: #ffb74d; font-size: 0.75rem; }
         .time-left-frozen { font-weight: 700; color: #64b5f6; font-size: 0.75rem; }
 
         @keyframes pulse {
@@ -1670,6 +1669,8 @@ DASHBOARD_HTML = """
     </div>
 
     <div id="main-dashboard" style="display:none;">
+        <h1>Arizona RP — Мониторинг Слётов</h1>
+
         <div class="user-nav">
             <span id="user-info"></span>
             <button class="btn-logout" onclick="handleLogout()">Выйти</button>
@@ -2280,35 +2281,54 @@ DASHBOARD_HTML = """
             } catch(e) { console.error(e); }
         }
 
-        function calculateDropInfo(pd, status, typeRules) {
+        function calculateDropInfo(pd, status, propType, dropLimit = 2) {
             if (status === 'frozen') {
-                return { text: '❄️ Заморожен', isFrozen: true, paydays: null, hoursLeft: null };
+                return { text: 'Заморожен', badgeClass: 'pd-badge-fixed', hoursLeft: Infinity };
             }
 
-            const rules = typeRules || { insured: 2, uninsured_min: 2, uninsured_max: 3 };
-            let decrement = 1;
-            let dropLimit = rules.insured;
-
+            let rate = 1;
             if (status === 'uninsured') {
-                decrement = 2;
-                dropLimit = rules.uninsured_min;
+                rate = 2;
             } else if (status === 'no_activity') {
-                decrement = 4;
-                dropLimit = rules.uninsured_min;
+                rate = (propType === 'biz') ? 4 : 2;
             }
 
-            const neededPD = pd - dropLimit;
-            if (neededPD < 0) {
-                return { text: 'СЛЁТ!', isDrop: true, paydays: 0, hoursLeft: 0 };
+            let hoursLeft = Math.ceil(pd / rate);
+            if (hoursLeft < 0) hoursLeft = 0;
+
+            const now = new Date();
+            const utcMs = now.getTime() + (now.getTimezoneOffset() * 60000);
+            const mskNow = new Date(utcMs + (3 * 3600000));
+
+            const dropDate = new Date(mskNow.getTime() + hoursLeft * 3600000);
+            dropDate.setMinutes(0, 0, 0);
+
+            const pad = n => String(n).padStart(2, '0');
+            const timeStr = `${pad(dropDate.getHours())}:00`;
+
+            const isToday = dropDate.getDate() === mskNow.getDate() && dropDate.getMonth() === mskNow.getMonth();
+            const tomorrow = new Date(mskNow);
+            tomorrow.setDate(tomorrow.getDate() + 1);
+            const isTomorrow = dropDate.getDate() === tomorrow.getDate() && dropDate.getMonth() === tomorrow.getMonth();
+
+            let text = '';
+            if (hoursLeft === 0 || (hoursLeft === 1 && mskNow.getMinutes() >= 55)) {
+                text = 'В этом часе';
+            } else if (isToday) {
+                text = `Сегодня в ${timeStr}`;
+            } else if (isTomorrow) {
+                text = `Завтра в ${timeStr}`;
+            } else {
+                text = `${pad(dropDate.getDate())}.${pad(dropDate.getMonth() + 1)} в ${timeStr}`;
             }
 
-            const hoursLeft = Math.ceil(neededPD / decrement);
-            return {
-                text: `${hoursLeft}ч (${pd} PD)`,
-                isDrop: false,
-                hoursLeft: hoursLeft,
-                paydays: pd
-            };
+            let statusNote = '';
+            if (status === 'uninsured') statusNote = ' (Б/С)';
+            if (status === 'no_activity') statusNote = ' (Б/З)';
+
+            const badgeClass = (pd <= dropLimit) ? 'pd-badge-drop' : 'pd-badge';
+
+            return { text: text + statusNote, badgeClass, hoursLeft, dropDate };
         }
 
         async function loadData() {
@@ -2317,99 +2337,135 @@ DASHBOARD_HTML = """
                 if (!res.ok) return;
                 globalServerData = await res.json();
 
+                ALL_SERVERS.forEach(srv => {
+                    const info = globalServerData[srv];
+                    if (info && info.scans && info.scans.length > 0) {
+                        if (!activeServerScans[srv]) {
+                            const latestConf = info.latestConfirmedScan;
+                            if (latestConf) {
+                                activeServerScans[srv] = latestConf.scanId;
+                            } else {
+                                activeServerScans[srv] = info.scans[info.scans.length - 1].scanId;
+                            }
+                        }
+                    }
+                });
+
                 renderViewTab();
                 renderUpcomingTab();
                 renderManageTab();
-            } catch (e) {
-                console.error(e);
+            } catch(e) {
+                console.error("Ошибка загрузки сканов:", e);
             }
         }
 
         function renderViewTab() {
             const container = document.getElementById('servers-view');
             if (!container) return;
-            container.innerHTML = '';
 
             const seasonFilter = document.getElementById('filter-season').value;
             const favFilter = document.getElementById('filter-fav').value;
+
+            container.innerHTML = '';
 
             ALL_SERVERS.forEach(srv => {
                 const info = globalServerData[srv];
                 if (!info) return;
 
-                if (seasonFilter !== 'all' && String(info.season.id) !== seasonFilter) {
-                    return;
-                }
-
                 const isFav = favoriteServers.includes(srv);
-                if (favFilter === 'fav_only' && !isFav) {
-                    return;
-                }
+                if (favFilter === 'fav_only' && !isFav) return;
+
+                const seasonInfo = info.season;
+                if (seasonFilter !== 'all' && String(seasonInfo.id) !== String(seasonFilter)) return;
 
                 const displayName = getServerDisplayName(srv);
-                const favStar = isFav ? '⭐' : '☆';
-                const scan = info.latestConfirmedScan; // Исключительно второй скан от подтвержденной пары
+                const starSymbol = isFav ? '⭐' : '☆';
 
-                let housesRows = '';
-                let bizRows = '';
+                const scans = info.scans || [];
+                const activeScanId = activeServerScans[srv];
+                const selectedScan = scans.find(s => s.scanId === activeScanId) || scans[scans.length - 1];
 
-                if (scan && scan.houses && scan.houses.length > 0) {
-                    scan.houses.forEach(h => {
-                        const dropInfo = calculateDropInfo(h.pd, h.status, getPropRules(info, 'house'));
-                        let badgeClass = 'pd-badge';
-                        if (dropInfo.isDrop) badgeClass = 'pd-badge-drop';
-                        else if (h.status === 'frozen') badgeClass = 'pd-badge-fixed';
+                let tabsHtml = '';
+                scans.forEach(s => {
+                    const isActive = selectedScan && s.scanId === selectedScan.scanId;
+                    let tabClass = 'scan-subtab';
+                    if (s.isCurrentPair) {
+                        tabClass += ' current-pair';
+                    } else if (s.hasPair || s.isConfirmed) {
+                        tabClass += ' old-pair';
+                    } else if (s.isOutdated) {
+                        tabClass += ' single-failed';
+                    } else {
+                        tabClass += ' single';
+                    }
+                    if (isActive) tabClass += ' active';
 
-                        const idStr = h.propId ? `№${h.propId}` : `поз. ${h.pos}`;
-                        housesRows += `<tr>
-                            <td>${idStr}</td>
-                            <td><span class="${badgeClass}">${dropInfo.text}</span></td>
+                    tabsHtml += `<button class="${tabClass}" onclick="selectScanTab('${srv}', '${s.scanId}')">${s.hourLabel}</button>`;
+                });
+
+                let housesHtml = '';
+                if (selectedScan && selectedScan.houses && selectedScan.houses.length > 0) {
+                    housesHtml = '<table><tr><th>ID</th><th>ПД</th><th>Слёт</th></tr>';
+                    selectedScan.houses.forEach(h => {
+                        const dropLimit = getPropRules(info, 'house').insured;
+                        const dropInfo = calculateDropInfo(h.pd, h.status, 'house', dropLimit);
+                        const idDisplay = h.propId !== null && h.propId !== undefined ? h.propId : '-';
+                        housesHtml += `<tr>
+                            <td><b>${idDisplay}</b></td>
+                            <td><span class="${dropInfo.badgeClass}">${h.pd} PD</span></td>
+                            <td><span class="time-left-badge">${dropInfo.text}</span></td>
                         </tr>`;
                     });
+                    housesHtml += '</table>';
                 } else {
-                    housesRows = '<tr><td colspan="2" class="empty">Нет домов</td></tr>';
+                    housesHtml = '<span class="empty">Нет данных</span>';
                 }
 
-                if (scan && scan.businesses && scan.businesses.length > 0) {
-                    scan.businesses.forEach(b => {
-                        const dropInfo = calculateDropInfo(b.pd, b.status, getPropRules(info, 'biz'));
-                        let badgeClass = 'pd-badge';
-                        if (dropInfo.isDrop) badgeClass = 'pd-badge-drop';
-                        else if (b.status === 'frozen') badgeClass = 'pd-badge-fixed';
-
-                        const idStr = b.propId ? `№${b.propId}` : `поз. ${b.pos}`;
-                        bizRows += `<tr>
-                            <td>${idStr}</td>
-                            <td><span class="${badgeClass}">${dropInfo.text}</span></td>
+                let bizHtml = '';
+                if (selectedScan && selectedScan.businesses && selectedScan.businesses.length > 0) {
+                    bizHtml = '<table><tr><th>ID</th><th>ПД</th><th>Слёт</th></tr>';
+                    selectedScan.businesses.forEach(b => {
+                        const dropLimit = getPropRules(info, 'biz').insured;
+                        const dropInfo = calculateDropInfo(b.pd, b.status, 'biz', dropLimit);
+                        const idDisplay = b.propId !== null && b.propId !== undefined ? b.propId : '-';
+                        bizHtml += `<tr>
+                            <td><b>${idDisplay}</b></td>
+                            <td><span class="${dropInfo.badgeClass}">${b.pd} PD</span></td>
+                            <td><span class="time-left-badge">${dropInfo.text}</span></td>
                         </tr>`;
                     });
+                    bizHtml += '</table>';
                 } else {
-                    bizRows = '<tr><td colspan="2" class="empty">Нет бизнесов</td></tr>';
+                    bizHtml = '<span class="empty">Нет данных</span>';
                 }
 
                 const cardHtml = `
                     <div class="server-card">
                         <div class="server-header">
                             <div class="server-title">
-                                <span><span class="fav-btn" onclick="toggleFavorite('${srv}')">${favStar}</span>${displayName}</span>
-                                <span class="season-badge">${info.season.name}</span>
+                                <span><span class="fav-btn" onclick="toggleFavorite('${srv}')">${starSymbol}</span>${displayName}</span>
+                                <span class="season-badge">${seasonInfo.display}</span>
                             </div>
+                        </div>
+                        <div class="scan-tabs-bar">
+                            <div class="scan-tabs-container">${tabsHtml}</div>
                         </div>
                         <div class="tables-grid">
                             <div>
                                 <div class="section-header"><span class="section-title">Дома</span></div>
-                                <table>${housesRows}</table>
+                                ${housesHtml}
                             </div>
                             <div>
                                 <div class="section-header"><span class="section-title">Бизнесы</span></div>
-                                <table>${bizRows}</table>
+                                ${bizHtml}
                             </div>
                         </div>
                     </div>`;
+
                 container.insertAdjacentHTML('beforeend', cardHtml);
             });
 
-            if (container.children.length === 0) {
+            if (!container.hasChildNodes()) {
                 container.innerHTML = '<div class="empty-center">Нет серверов, соответствующих выбранным фильтрам</div>';
             }
         }
@@ -2419,62 +2475,70 @@ DASHBOARD_HTML = """
             if (!container) return;
             container.innerHTML = '';
 
+            let totalMatches = 0;
+
             ALL_SERVERS.forEach(srv => {
                 const info = globalServerData[srv];
                 if (!info) return;
 
-                const displayName = getServerDisplayName(srv);
-                const scan = info.latestConfirmedScan;
-                if (!scan) return;
+                const scans = info.scans || [];
+                const activeScanId = activeServerScans[srv];
+                const selectedScan = scans.find(s => s.scanId === activeScanId) || scans[scans.length - 1];
 
-                const upcomingHouses = [];
-                if (scan.houses) {
-                    scan.houses.forEach(h => {
-                        const dropInfo = calculateDropInfo(h.pd, h.status, getPropRules(info, 'house'));
-                        if (dropInfo.hoursLeft !== undefined && dropInfo.hoursLeft !== null && dropInfo.hoursLeft <= selectedUpcomingHours) {
-                            upcomingHouses.push({ ...h, dropInfo });
-                        }
-                    });
-                }
+                if (!selectedScan) return;
 
-                const upcomingBiz = [];
-                if (scan.businesses) {
-                    scan.businesses.forEach(b => {
-                        const dropInfo = calculateDropInfo(b.pd, b.status, getPropRules(info, 'biz'));
-                        if (dropInfo.hoursLeft !== undefined && dropInfo.hoursLeft !== null && dropInfo.hoursLeft <= selectedUpcomingHours) {
-                            upcomingBiz.push({ ...b, dropInfo });
-                        }
-                    });
-                }
+                const upcomingHouses = (selectedScan.houses || []).filter(h => {
+                    const dropLimit = getPropRules(info, 'house').insured;
+                    const dropInfo = calculateDropInfo(h.pd, h.status, 'house', dropLimit);
+                    return dropInfo.hoursLeft <= selectedUpcomingHours;
+                });
+
+                const upcomingBiz = (selectedScan.businesses || []).filter(b => {
+                    const dropLimit = getPropRules(info, 'biz').insured;
+                    const dropInfo = calculateDropInfo(b.pd, b.status, 'biz', dropLimit);
+                    return dropInfo.hoursLeft <= selectedUpcomingHours;
+                });
 
                 if (upcomingHouses.length === 0 && upcomingBiz.length === 0) return;
 
-                let housesRows = '';
+                totalMatches++;
+                const displayName = getServerDisplayName(srv);
+                const seasonInfo = info.season;
+
+                let housesHtml = '';
                 if (upcomingHouses.length > 0) {
+                    housesHtml = '<table><tr><th>ID</th><th>ПД</th><th>Слёт</th></tr>';
                     upcomingHouses.forEach(h => {
-                        const badgeClass = h.dropInfo.isDrop ? 'pd-badge-drop' : 'pd-badge';
-                        const idStr = h.propId ? `№${h.propId}` : `поз. ${h.pos}`;
-                        housesRows += `<tr>
-                            <td>${idStr}</td>
-                            <td><span class="${badgeClass}">${h.dropInfo.text}</span></td>
+                        const dropLimit = getPropRules(info, 'house').insured;
+                        const dropInfo = calculateDropInfo(h.pd, h.status, 'house', dropLimit);
+                        const idDisplay = h.propId !== null && h.propId !== undefined ? h.propId : '-';
+                        housesHtml += `<tr>
+                            <td><b>${idDisplay}</b></td>
+                            <td><span class="${dropInfo.badgeClass}">${h.pd} PD</span></td>
+                            <td><span class="time-left-badge">${dropInfo.text}</span></td>
                         </tr>`;
                     });
+                    housesHtml += '</table>';
                 } else {
-                    housesRows = '<tr><td colspan="2" class="empty">Нет слётов</td></tr>';
+                    housesHtml = '<span class="empty">Нет близких слётов</span>';
                 }
 
-                let bizRows = '';
+                let bizHtml = '';
                 if (upcomingBiz.length > 0) {
+                    bizHtml = '<table><tr><th>ID</th><th>ПД</th><th>Слёт</th></tr>';
                     upcomingBiz.forEach(b => {
-                        const badgeClass = b.dropInfo.isDrop ? 'pd-badge-drop' : 'pd-badge';
-                        const idStr = b.propId ? `№${b.propId}` : `поз. ${b.pos}`;
-                        bizRows += `<tr>
-                            <td>${idStr}</td>
-                            <td><span class="${badgeClass}">${b.dropInfo.text}</span></td>
+                        const dropLimit = getPropRules(info, 'biz').insured;
+                        const dropInfo = calculateDropInfo(b.pd, b.status, 'biz', dropLimit);
+                        const idDisplay = b.propId !== null && b.propId !== undefined ? b.propId : '-';
+                        bizHtml += `<tr>
+                            <td><b>${idDisplay}</b></td>
+                            <td><span class="${dropInfo.badgeClass}">${b.pd} PD</span></td>
+                            <td><span class="time-left-badge">${dropInfo.text}</span></td>
                         </tr>`;
                     });
+                    bizHtml += '</table>';
                 } else {
-                    bizRows = '<tr><td colspan="2" class="empty">Нет слётов</td></tr>';
+                    bizHtml = '<span class="empty">Нет близких слётов</span>';
                 }
 
                 const cardHtml = `
@@ -2482,155 +2546,128 @@ DASHBOARD_HTML = """
                         <div class="server-header">
                             <div class="server-title">
                                 <span>${displayName}</span>
-                                <span class="season-badge">${info.season.name}</span>
+                                <span class="season-badge">${seasonInfo.display}</span>
                             </div>
                         </div>
                         <div class="tables-grid">
                             <div>
                                 <div class="section-header"><span class="section-title">Дома</span></div>
-                                <table>${housesRows}</table>
+                                ${housesHtml}
                             </div>
                             <div>
                                 <div class="section-header"><span class="section-title">Бизнесы</span></div>
-                                <table>${bizRows}</table>
+                                ${bizHtml}
                             </div>
                         </div>
                     </div>`;
+
                 container.insertAdjacentHTML('beforeend', cardHtml);
             });
 
-            if (container.children.length === 0) {
-                container.innerHTML = `<div class="empty-center">Нет слётов в течение ${selectedUpcomingHours}ч</div>`;
+            if (totalMatches === 0) {
+                container.innerHTML = `<div class="empty-center">В ближайшие ${selectedUpcomingHours} ч слётов имущества не обнаружено</div>`;
             }
         }
 
         function renderManageTab() {
             ALL_SERVERS.forEach(srv => {
                 const info = globalServerData[srv];
-                const containerHouses = document.getElementById(`houses-manage-${srv}`);
-                const containerBiz = document.getElementById(`biz-manage-${srv}`);
-                const containerTabs = document.getElementById(`scan-tabs-${srv}`);
-                const delBtn = document.getElementById(`btn-del-scan-${srv}`);
+                const scanTabsElem = document.getElementById(`scan-tabs-${srv}`);
+                const housesElem = document.getElementById(`houses-manage-${srv}`);
+                const bizElem = document.getElementById(`biz-manage-${srv}`);
+                const btnDelScan = document.getElementById(`btn-del-scan-${srv}`);
 
-                if (!containerHouses || !containerBiz || !containerTabs) return;
+                if (!scanTabsElem || !housesElem || !bizElem) return;
 
                 if (!info || !info.scans || info.scans.length === 0) {
-                    containerTabs.innerHTML = '<span class="empty">Нет сканов</span>';
-                    containerHouses.innerHTML = '<span class="empty">Нет данных</span>';
-                    containerBiz.innerHTML = '<span class="empty">Нет данных</span>';
-                    if (delBtn) delBtn.style.display = 'none';
+                    scanTabsElem.innerHTML = '<span class="empty">Нет сканов</span>';
+                    housesElem.innerHTML = '<span class="empty">Нет данных</span>';
+                    bizElem.innerHTML = '<span class="empty">Нет данных</span>';
+                    if (btnDelScan) btnDelScan.style.display = 'none';
                     return;
                 }
 
                 const scans = info.scans;
-                if (!activeServerScans[srv] || !scans.some(s => s.scanId === activeServerScans[srv])) {
-                    activeServerScans[srv] = scans[scans.length - 1].scanId;
-                }
+                const activeScanId = activeServerScans[srv];
+                const selectedScan = scans.find(s => s.scanId === activeScanId) || scans[scans.length - 1];
 
-                if (delBtn) delBtn.style.display = 'inline-block';
+                if (btnDelScan) {
+                    btnDelScan.style.display = selectedScan ? 'inline-block' : 'none';
+                }
 
                 let tabsHtml = '';
                 scans.forEach(s => {
-                    let statusText = "";
-                    let subtabClass = "";
-
-                    if (s.hasPair || s.isConfirmed) {
-                        if (s.isOutdated) {
-                            statusText = "устарел(для подтвержденной пары сканов которые уже неактуальны)";
-                            subtabClass = "old-pair";
-                        } else {
-                            statusText = "подтвержденная пара";
-                            subtabClass = "current-pair";
-                        }
+                    const isActive = selectedScan && s.scanId === selectedScan.scanId;
+                    let tabClass = 'scan-subtab';
+                    if (s.isCurrentPair) {
+                        tabClass += ' current-pair';
+                    } else if (s.hasPair || s.isConfirmed) {
+                        tabClass += ' old-pair';
+                    } else if (s.isOutdated) {
+                        tabClass += ' single-failed';
                     } else {
-                        if (s.isOutdated) {
-                            statusText = "одиночный скан(не нашел пару)";
-                            subtabClass = "single-failed";
-                        } else {
-                            statusText = "ожидает пары";
-                            subtabClass = "single";
-                        }
+                        tabClass += ' single';
                     }
+                    if (isActive) tabClass += ' active';
 
-                    let dateStr = "";
-                    let timeStr = "";
-                    if (s.scanTime) {
-                        const parts = s.scanTime.split(" ");
-                        dateStr = parts[0] || "";
-                        timeStr = parts[1] || "";
-                    } else if (s.scanId) {
-                        const parts = s.scanId.split(" ");
-                        dateStr = parts[0] || "";
-                        timeStr = parts[1] || "";
-                    }
-
-                    const titleAttr = `Дата: ${dateStr}&#10;Время: ${timeStr}&#10;Статус: ${statusText}`;
-                    const isActive = s.scanId === activeServerScans[srv];
-                    tabsHtml += `<button class="scan-subtab ${subtabClass} ${isActive ? 'active' : ''}" title="${titleAttr}" onclick="selectScanTab('${srv}', '${s.scanId}')">${s.hourLabel || timeStr}</button>`;
+                    tabsHtml += `<button class="${tabClass}" onclick="selectScanTab('${srv}', '${s.scanId}')">${s.hourLabel}</button>`;
                 });
-                containerTabs.innerHTML = tabsHtml;
+                scanTabsElem.innerHTML = tabsHtml;
 
-                const currScan = scans.find(s => s.scanId === activeServerScans[srv]);
-                if (!currScan) {
-                    containerHouses.innerHTML = '<span class="empty">Скан не выбран</span>';
-                    containerBiz.innerHTML = '<span class="empty">Скан не выбран</span>';
-                    return;
-                }
+                if (selectedScan) {
+                    // Таблица домов
+                    if (selectedScan.houses && selectedScan.houses.length > 0) {
+                        let html = '<table><tr><th>ID</th><th>ПД</th><th>Статус</th><th></th></tr>';
+                        selectedScan.houses.forEach(h => {
+                            const idDisplay = h.propId !== null && h.propId !== undefined ? h.propId : '-';
+                            const st = h.status || 'insured';
 
-                // Таблица домов
-                if (currScan.houses && currScan.houses.length > 0) {
-                    let hHtml = '<table><tr><th>ID</th><th>PD</th><th>Статус</th><th></th></tr>';
-                    currScan.houses.forEach(h => {
-                        const idStr = h.propId ? `№${h.propId}` : `поз.${h.pos}`;
-                        const st = h.status || 'insured';
-                        
-                        hHtml += `<tr>
-                            <td>${idStr}</td>
-                            <td><b>${h.pd}</b></td>
-                            <td>
-                                <div class="btn-group">
-                                    <button class="btn-opt ${st === 'insured' ? 'active-insured' : ''}" onclick="setStatus('${srv}', '${currScan.scanId}', 'house', ${h.pos}, 'insured')">Страх</button>
-                                    <button class="btn-opt ${st === 'uninsured' ? 'active-uninsured' : ''}" onclick="setStatus('${srv}', '${currScan.scanId}', 'house', ${h.pos}, 'uninsured')">Без</button>
-                                    <button class="btn-opt ${st === 'frozen' ? 'active-frozen' : ''}" onclick="setStatus('${srv}', '${currScan.scanId}', 'house', ${h.pos}, 'frozen')">Замороз</button>
-                                </div>
-                            </td>
-                            <td><button class="btn-del" onclick="deleteItem('${srv}', '${currScan.scanId}', 'house', ${h.pos})">✕</button></td>
-                        </tr>`;
-                    });
-                    containerHouses.innerHTML = hHtml + '</table>';
-                } else {
-                    containerHouses.innerHTML = '<span class="empty">Нет домов</span>';
-                }
+                            const btnInsured = `<button class="btn-opt ${st==='insured'?'active-insured':''}" onclick="setStatus('${srv}', '${selectedScan.scanId}', 'house', ${h.pos}, 'insured')">Стр</button>`;
+                            const btnUninsured = `<button class="btn-opt ${st==='uninsured'?'active-uninsured':''}" onclick="setStatus('${srv}', '${selectedScan.scanId}', 'house', ${h.pos}, 'uninsured')">Б/С</button>`;
+                            const btnFrozen = `<button class="btn-opt ${st==='frozen'?'active-frozen':''}" onclick="setStatus('${srv}', '${selectedScan.scanId}', 'house', ${h.pos}, 'frozen')">Зам</button>`;
 
-                // Таблица бизнесов
-                if (currScan.businesses && currScan.businesses.length > 0) {
-                    let bHtml = '<table><tr><th>ID</th><th>PD</th><th>Статус</th><th></th></tr>';
-                    currScan.businesses.forEach(b => {
-                        const idStr = b.propId ? `№${b.propId}` : `поз.${b.pos}`;
-                        const st = b.status || 'insured';
+                            html += `<tr>
+                                <td><b>${idDisplay}</b></td>
+                                <td><span class="pd-badge">${h.pd} PD</span></td>
+                                <td><div class="btn-group">${btnInsured}${btnUninsured}${btnFrozen}</div></td>
+                                <td><button class="btn-del" onclick="deleteItem('${srv}', '${selectedScan.scanId}', 'house', ${h.pos})">✕</button></td>
+                            </tr>`;
+                        });
+                        housesElem.innerHTML = html + '</table>';
+                    } else {
+                        housesElem.innerHTML = '<span class="empty">Нет домов</span>';
+                    }
 
-                        bHtml += `<tr>
-                            <td>${idStr}</td>
-                            <td><b>${b.pd}</b></td>
-                            <td>
-                                <div class="btn-group">
-                                    <button class="btn-opt ${st === 'insured' ? 'active-insured' : ''}" onclick="setStatus('${srv}', '${currScan.scanId}', 'biz', ${b.pos}, 'insured')">Страх</button>
-                                    <button class="btn-opt ${st === 'uninsured' ? 'active-uninsured' : ''}" onclick="setStatus('${srv}', '${currScan.scanId}', 'biz', ${b.pos}, 'uninsured')">Без</button>
-                                    <button class="btn-opt ${st === 'no_activity' ? 'active-noact' : ''}" onclick="setStatus('${srv}', '${currScan.scanId}', 'biz', ${b.pos}, 'no_activity')">Без зан</button>
-                                    <button class="btn-opt ${st === 'frozen' ? 'active-frozen' : ''}" onclick="setStatus('${srv}', '${currScan.scanId}', 'biz', ${b.pos}, 'frozen')">Замороз</button>
-                                </div>
-                            </td>
-                            <td><button class="btn-del" onclick="deleteItem('${srv}', '${currScan.scanId}', 'biz', ${b.pos})">✕</button></td>
-                        </tr>`;
-                    });
-                    containerBiz.innerHTML = bHtml + '</table>';
-                } else {
-                    containerBiz.innerHTML = '<span class="empty">Нет бизнесов</span>';
+                    // Таблица бизнесов
+                    if (selectedScan.businesses && selectedScan.businesses.length > 0) {
+                        let html = '<table><tr><th>ID</th><th>ПД</th><th>Статус</th><th></th></tr>';
+                        selectedScan.businesses.forEach(b => {
+                            const idDisplay = b.propId !== null && b.propId !== undefined ? b.propId : '-';
+                            const st = b.status || 'insured';
+
+                            const btnInsured = `<button class="btn-opt ${st==='insured'?'active-insured':''}" onclick="setStatus('${srv}', '${selectedScan.scanId}', 'biz', ${b.pos}, 'insured')">Стр</button>`;
+                            const btnUninsured = `<button class="btn-opt ${st==='uninsured'?'active-uninsured':''}" onclick="setStatus('${srv}', '${selectedScan.scanId}', 'biz', ${b.pos}, 'uninsured')">Б/С</button>`;
+                            const btnNoAct = `<button class="btn-opt ${st==='no_activity'?'active-noact':''}" onclick="setStatus('${srv}', '${selectedScan.scanId}', 'biz', ${b.pos}, 'no_activity')">Б/З</button>`;
+                            const btnFrozen = `<button class="btn-opt ${st==='frozen'?'active-frozen':''}" onclick="setStatus('${srv}', '${selectedScan.scanId}', 'biz', ${b.pos}, 'frozen')">Зам</button>`;
+
+                            html += `<tr>
+                                <td><b>${idDisplay}</b></td>
+                                <td><span class="pd-badge">${b.pd} PD</span></td>
+                                <td><div class="btn-group">${btnInsured}${btnUninsured}${btnNoAct}${btnFrozen}</div></td>
+                                <td><button class="btn-del" onclick="deleteItem('${srv}', '${selectedScan.scanId}', 'biz', ${b.pos})">✕</button></td>
+                            </tr>`;
+                        });
+                        bizElem.innerHTML = html + '</table>';
+                    } else {
+                        bizElem.innerHTML = '<span class="empty">Нет бизнесов</span>';
+                    }
                 }
             });
         }
 
-        window.onload = checkAuth;
+        window.onload = function() {
+            checkAuth();
+        };
     </script>
 </body>
 </html>
