@@ -27,6 +27,7 @@ db_pool: Optional[asyncpg.Pool] = None
 
 # Активные сессии в памяти: token -> username
 active_sessions: Dict[str, str] = {}
+manual_action_logs_mem: List[dict] = []
 
 ALL_SERVERS = [
     "Phoenix", "Tucson", "Scottdale", "Chandler", "Brainburg",
@@ -165,6 +166,31 @@ class ChangePasswordModel(BaseModel):
     user_id: int
     new_password: str
 
+# --- ЛОГИРОВАНИЕ РУЧНЫХ ДЕЙСТВИЙ ---
+async def log_manual_action(username: str, server: str, action: str):
+    now_msk = datetime.now(MSK_TZ)
+    time_str = now_msk.strftime("%H:%M:%S")
+    
+    log_item = {
+        "created_at": time_str,
+        "username": username,
+        "server": server,
+        "action": action
+    }
+    manual_action_logs_mem.insert(0, log_item)
+    if len(manual_action_logs_mem) > 500:
+        manual_action_logs_mem.pop()
+
+    if db_pool:
+        try:
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO manual_action_logs (created_at, username, server, action) VALUES ($1, $2, $3, $4)",
+                    now_msk.replace(tzinfo=None), username, server, action
+                )
+        except Exception as e:
+            print(f"Ошибка записи ручного лога в БД: {e}")
+
 # --- РАБОТА С БД POSTGRESQL И АВТОРИЗАЦИЕЙ ---
 async def init_db():
     if not db_pool:
@@ -187,6 +213,16 @@ async def init_db():
                 server VARCHAR(50) NOT NULL,
                 scanner VARCHAR(100) NOT NULL,
                 created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL
+            );
+        """)
+
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS manual_action_logs (
+                id SERIAL PRIMARY KEY,
+                created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL,
+                username VARCHAR(50) NOT NULL,
+                server VARCHAR(50) NOT NULL,
+                action TEXT NOT NULL
             );
         """)
 
@@ -434,13 +470,18 @@ async def process_hourly_payday():
     now_msk = datetime.now(MSK_TZ)
     is_restart_hour = (now_msk.hour == 5)
 
-    if now_msk.hour == 0 and db_pool:
-        try:
-            async with db_pool.acquire() as conn:
-                await conn.execute("TRUNCATE TABLE scan_logs;")
-                print(f"[{now_msk.strftime('%Y-%m-%d %H:%M:%S')}] Логи сканов успешно очищены (00:00 МСК).")
-        except Exception as e:
-            print(f"Ошибка очистки логов сканирования: {e}")
+    # Очистка логов сканов и ручных действий каждый день в 0:00 МСК
+    if now_msk.hour == 0:
+        global manual_action_logs_mem
+        manual_action_logs_mem.clear()
+        if db_pool:
+            try:
+                async with db_pool.acquire() as conn:
+                    await conn.execute("TRUNCATE TABLE scan_logs;")
+                    await conn.execute("TRUNCATE TABLE manual_action_logs;")
+                    print(f"[{now_msk.strftime('%Y-%m-%d %H:%M:%S')}] Логи сканов и ручных действий успешно очищены (00:00 МСК).")
+            except Exception as e:
+                print(f"Ошибка очистки логов: {e}")
 
     async with data_lock:
         check_and_update_outdated_scans()
@@ -630,10 +671,32 @@ async def get_scan_logs(username: str = Depends(verify_admin)):
             result.append(r)
         return result
 
+@app.get("/api/manual_action_logs")
+async def get_manual_action_logs(username: str = Depends(verify_auth)):
+    if db_pool:
+        try:
+            async with db_pool.acquire() as conn:
+                rows = await conn.fetch("""
+                    SELECT created_at, username, server, action 
+                    FROM manual_action_logs 
+                    ORDER BY id DESC 
+                    LIMIT 200
+                """)
+                result = []
+                for row in rows:
+                    r = dict(row)
+                    if r["created_at"]:
+                        r["created_at"] = r["created_at"].strftime("%H:%M:%S")
+                    result.append(r)
+                return result
+        except Exception as e:
+            print(f"Ошибка получения логов ручных действий: {e}")
+    return manual_action_logs_mem
+
 @app.post("/api/admin/toggle_access")
 async def toggle_access(data: ToggleAccessModel, username: str = Depends(verify_admin)):
     if not db_pool:
-        raise HTTPException(status_code=53, detail="БД недоступна")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="БД недоступна")
     async with db_pool.acquire() as conn:
         await conn.execute("UPDATE users SET is_allowed = $1 WHERE id = $2", data.is_allowed, data.user_id)
     return {"status": "success"}
@@ -641,7 +704,7 @@ async def toggle_access(data: ToggleAccessModel, username: str = Depends(verify_
 @app.post("/api/admin/create_user")
 async def create_user(data: CreateUserModel, username: str = Depends(verify_admin)):
     if not db_pool:
-        raise HTTPException(status_code=53, detail="БД недоступна")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="БД недоступна")
     role = data.role if data.role in ["user", "support", "admin"] else "user"
     hashed_pw = pwd_context.hash(data.password)
     async with db_pool.acquire() as conn:
@@ -658,7 +721,7 @@ async def create_user(data: CreateUserModel, username: str = Depends(verify_admi
 @app.post("/api/admin/delete_user")
 async def delete_user(data: DeleteUserModel, current_admin: str = Depends(verify_admin)):
     if not db_pool:
-        raise HTTPException(status_code=53, detail="БД недоступна")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="БД недоступна")
     async with db_pool.acquire() as conn:
         target = await conn.fetchrow("SELECT username FROM users WHERE id = $1", data.user_id)
         if not target:
@@ -678,7 +741,7 @@ async def delete_user(data: DeleteUserModel, current_admin: str = Depends(verify
 @app.post("/api/admin/update_role")
 async def update_role(data: UpdateRoleModel, current_admin: str = Depends(verify_admin)):
     if not db_pool:
-        raise HTTPException(status_code=53, detail="БД недоступна")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="БД недоступна")
     if data.role not in ["user", "support", "admin"]:
         raise HTTPException(status_code=400, detail="Недопустимая роль")
         
@@ -696,7 +759,7 @@ async def update_role(data: UpdateRoleModel, current_admin: str = Depends(verify
 @app.post("/api/admin/change_password")
 async def change_password(data: ChangePasswordModel, current_admin: str = Depends(verify_admin)):
     if not db_pool:
-        raise HTTPException(status_code=53, detail="БД недоступна")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="БД недоступна")
     if not data.new_password or len(data.new_password.strip()) < 4:
         raise HTTPException(status_code=400, detail="Пароль слишком короткий (минимум 4 символа)")
 
@@ -964,6 +1027,22 @@ async def update_status(data: UpdateStatusModel, username: str = Depends(verify_
                             item["status"] = data.status
                             item["isPendingPair"] = False
                             await save_data_to_file_async()
+
+                            prop_label = "Дом" if data.propType in ["house", "houses"] else "Бизнес"
+                            prop_id_str = f" №{item['propId']}" if item.get("propId") else ""
+                            status_names = {
+                                "insured": "Страховка",
+                                "uninsured": "Без страховки",
+                                "no_activity": "Без занятости",
+                                "frozen": "Заморожен"
+                            }
+                            st_display = status_names.get(data.status, data.status)
+
+                            await log_manual_action(
+                                username,
+                                srv,
+                                f"Выставление статуса '{st_display}' для {prop_label.lower()}{prop_id_str} (поз. {data.pos})"
+                            )
                             return {"status": "success"}
     raise HTTPException(status_code=404, detail="Scan or Item not found")
 
@@ -975,8 +1054,19 @@ async def delete_item(data: DeleteItemModel, username: str = Depends(verify_edit
             for scan in server_data[srv].get("scans", []):
                 if scan["scanId"] == data.scanId:
                     target_key = "houses" if data.propType in ["house", "houses"] else "businesses"
+                    item_to_delete = next((i for i in scan[target_key] if i["pos"] == data.pos), None)
+                    
                     scan[target_key] = [item for item in scan[target_key] if item["pos"] != data.pos]
                     await save_data_to_file_async()
+
+                    prop_label = "дома" if data.propType in ["house", "houses"] else "бизнеса"
+                    prop_id_str = f" №{item_to_delete['propId']}" if item_to_delete and item_to_delete.get("propId") else ""
+
+                    await log_manual_action(
+                        username,
+                        srv,
+                        f"Удаление {prop_label}{prop_id_str} (поз. {data.pos})"
+                    )
                     return {"status": "success"}
     raise HTTPException(status_code=404, detail="Server or Scan not found")
 
@@ -989,11 +1079,24 @@ async def delete_scan(data: DeleteScanModel, username: str = Depends(verify_edit
                 s for s in server_data[srv]["scans"] if s["scanId"] != data.scanId
             ]
             await save_data_to_file_async()
+
+            await log_manual_action(
+                username,
+                srv,
+                f"Удаление скана {data.scanId}"
+            )
             return {"status": "success"}
     raise HTTPException(status_code=404, detail="Scan not found")
 
 @app.post("/api/add_item")
 async def add_item(data: AddItemModel, username: str = Depends(verify_editor)):
+    # Ограничение по кол-ву PayDay: должно быть строго меньше 100
+    if data.pd >= 100 or data.pd < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Количество PayDay должно быть меньше 100 (от 0 до 99)"
+        )
+
     srv = data.server
     async with data_lock:
         if srv in server_data:
@@ -1016,6 +1119,15 @@ async def add_item(data: AddItemModel, username: str = Depends(verify_editor)):
                     scan[target_key].append(new_record)
                     scan[target_key] = sorted(scan[target_key], key=lambda x: x["pos"])
                     await save_data_to_file_async()
+
+                    prop_label = "дома" if data.propType in ["house", "houses"] else "бизнеса"
+                    prop_id_str = f" №{data.propId}" if data.propId else ""
+
+                    await log_manual_action(
+                        username,
+                        srv,
+                        f"Добавление {prop_label}{prop_id_str} ({data.pd} PD)"
+                    )
                     return {"status": "success"}
     raise HTTPException(status_code=404, detail="Server or Scan not found")
 
@@ -1568,6 +1680,7 @@ DASHBOARD_HTML = """
         let favoriteServers = JSON.parse(localStorage.getItem('fav_servers') || '[]');
         let globalServerData = {};
         let selectedUpcomingHours = 1;
+        let isManualLogsCollapsed = false;
 
         function updateLotteryTimer() {
             const now = new Date();
@@ -1609,6 +1722,44 @@ DASHBOARD_HTML = """
             renderViewTab();
         }
 
+        function initDashboard() {
+            const containerManage = document.getElementById('servers-manage');
+            if (!containerManage) return;
+            containerManage.innerHTML = '';
+            ALL_SERVERS.forEach(srv => {
+                const displayName = getServerDisplayName(srv);
+                const cardManage = `
+                    <div class="server-card">
+                        <div class="server-header">
+                            <div class="server-title">
+                                <span>${displayName}</span>
+                                <button id="btn-del-scan-${srv}" class="btn-delete-scan" onclick="deleteWholeScan('${srv}')" style="display:none;">Удалить скан</button>
+                            </div>
+                        </div>
+                        <div class="scan-tabs-bar">
+                            <div id="scan-tabs-${srv}" class="scan-tabs-container"></div>
+                        </div>
+                        <div class="tables-grid">
+                            <div>
+                                <div class="section-header">
+                                    <span class="section-title">Дома</span>
+                                    <button class="btn-add" onclick="addItemPrompt('${srv}', 'house')">+ Дом</button>
+                                </div>
+                                <div id="houses-manage-${srv}"></div>
+                            </div>
+                            <div>
+                                <div class="section-header">
+                                    <span class="section-title">Бизнесы</span>
+                                    <button class="btn-add" onclick="addItemPrompt('${srv}', 'biz')">+ Бизнес</button>
+                                </div>
+                                <div id="biz-manage-${srv}"></div>
+                            </div>
+                        </div>
+                    </div>`;
+                containerManage.insertAdjacentHTML('beforeend', cardManage);
+            });
+        }
+
         async function checkAuth() {
             try {
                 const res = await fetch('/api/auth/me');
@@ -1631,6 +1782,9 @@ DASHBOARD_HTML = """
                     document.getElementById('btn-tab-admin').style.display = isAdmin ? 'inline-block' : 'none';
                     
                     initDashboard();
+                    loadData();
+                    setInterval(updateLotteryTimer, 1000);
+                    updateLotteryTimer();
                 } else {
                     document.getElementById('login-screen').style.display = 'block';
                     document.getElementById('main-dashboard').style.display = 'none';
@@ -1700,6 +1854,7 @@ DASHBOARD_HTML = """
             if (tabName === 'manage') {
                 document.getElementById('btn-tab-manage').classList.add('active');
                 document.getElementById('tab-manage').classList.add('active');
+                loadManualLogs();
             } else if (tabName === 'upcoming') {
                 document.getElementById('btn-tab-upcoming').classList.add('active');
                 document.getElementById('tab-upcoming').classList.add('active');
@@ -1719,6 +1874,49 @@ DASHBOARD_HTML = """
             document.querySelectorAll('.time-filter-btn').forEach(btn => btn.classList.remove('active'));
             document.getElementById(`btn-upcoming-${hours}h`).classList.add('active');
             loadData();
+        }
+
+        function toggleManualLogs() {
+            isManualLogsCollapsed = !isManualLogsCollapsed;
+            const content = document.getElementById('manual-logs-content');
+            const btn = document.getElementById('btn-toggle-manual-log');
+            if (content && btn) {
+                if (isManualLogsCollapsed) {
+                    content.style.display = 'none';
+                    btn.innerText = '▼ Развернуть';
+                } else {
+                    content.style.display = 'block';
+                    btn.innerText = '▲ Свернуть';
+                    loadManualLogs();
+                }
+            }
+        }
+
+        async function loadManualLogs() {
+            if (isManualLogsCollapsed) return;
+            try {
+                const res = await fetch('/api/manual_action_logs');
+                if (!res.ok) return;
+                const logs = await res.json();
+                const container = document.getElementById('manual-logs-table-container');
+                if (!container) return;
+
+                if (!logs || logs.length === 0) {
+                    container.innerHTML = '<span class="empty">За сегодня ручных действий не зафиксировано</span>';
+                    return;
+                }
+
+                let html = '<table><tr><th>Время (МСК)</th><th>Имя пользователя</th><th>Сервер</th><th>Что делал</th></tr>';
+                logs.forEach(l => {
+                    html += `<tr>
+                        <td><b>${l.created_at}</b></td>
+                        <td><span style="color: #00e676; font-weight: 600;">${l.username}</span></td>
+                        <td><span style="color: #00bcd4; font-weight: 600;">${l.server}</span></td>
+                        <td>${l.action}</td>
+                    </tr>`;
+                });
+                container.innerHTML = html + '</table>';
+            } catch(e) { console.error(e); }
         }
 
         async function handleCreateUser() {
@@ -1884,6 +2082,7 @@ DASHBOARD_HTML = """
                     body: JSON.stringify({ server, scanId, propType, pos, status })
                 });
                 loadData();
+                loadManualLogs();
             } catch(e) { console.error(e); }
         }
 
@@ -1896,6 +2095,7 @@ DASHBOARD_HTML = """
                     body: JSON.stringify({ server, scanId, propType, pos })
                 });
                 loadData();
+                loadManualLogs();
             } catch(e) { console.error(e); }
         }
 
@@ -1912,6 +2112,7 @@ DASHBOARD_HTML = """
                 });
                 delete activeServerScans[server];
                 loadData();
+                loadManualLogs();
             } catch(e) { console.error(e); }
         }
 
@@ -1923,12 +2124,12 @@ DASHBOARD_HTML = """
             }
 
             const title = propType === 'house' ? 'дом' : 'бизнес';
-            const pdStr = prompt(`Введите оставшиеся PayDay для нового ${title}:`);
-            if (!pdStr) return;
+            const pdStr = prompt(`Введите оставшиеся PayDay для нового ${title} (менее 100):`);
+            if (pdStr === null) return;
             
             const pd = parseInt(pdStr, 10);
-            if (isNaN(pd) || pd <= 0) {
-                alert('Некорректное значение PayDay!');
+            if (isNaN(pd) || pd < 0 || pd >= 100) {
+                alert('Некорректное значение PayDay! Число должно быть строго меньше 100 (от 0 до 99).');
                 return;
             }
 
@@ -1936,12 +2137,18 @@ DASHBOARD_HTML = """
             const propId = idStr && !isNaN(parseInt(idStr, 10)) ? parseInt(idStr, 10) : null;
 
             try {
-                await fetch('/api/add_item', {
+                const res = await fetch('/api/add_item', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ server, scanId, propType, pd, propId })
                 });
+                if (!res.ok) {
+                    const err = await res.json();
+                    alert(err.detail || 'Ошибка добавления');
+                    return;
+                }
                 loadData();
+                loadManualLogs();
             } catch(e) { console.error(e); }
         }
 
@@ -2309,73 +2516,12 @@ DASHBOARD_HTML = """
             } catch(e) { console.error(e); }
         }
 
-        function initDashboard() {
-            const containerManage = document.getElementById('servers-manage');
-            if (!containerManage) return;
-            containerManage.innerHTML = '';
-
-            const canManage = currentUser && (currentUser.role === 'admin' || currentUser.role === 'support');
-
-            if (canManage) {
-                ALL_SERVERS.forEach(srv => {
-                    const displayName = getServerDisplayName(srv);
-                    const cardManage = `
-                        <div class="server-card">
-                            <div class="server-header">
-                                <div class="server-title">
-                                    <span>${displayName}</span>
-                                    <span class="season-badge season-badge-${srv}">Загрузка...</span>
-                                </div>
-                            </div>
-                            <div class="scan-tabs-bar">
-                                <div class="scan-tabs-container" id="scan-tabs-${srv}"></div>
-                                <button class="btn-delete-scan" id="btn-del-scan-${srv}" onclick="deleteWholeScan('${srv}')">Удалить скан</button>
-                            </div>
-                            <div class="tables-grid">
-                                <div>
-                                    <div class="section-header">
-                                        <span class="section-title">Дома</span>
-                                        <button class="btn-add" onclick="addItemPrompt('${srv}', 'house')">+ Дом</button>
-                                    </div>
-                                    <div id="houses-manage-${srv}"></div>
-                                </div>
-                                <div>
-                                    <div class="section-header">
-                                        <span class="section-title">Бизнесы</span>
-                                        <button class="btn-add" onclick="addItemPrompt('${srv}', 'biz')">+ Бизнес</button>
-                                    </div>
-                                    <div id="biz-manage-${srv}"></div>
-                                </div>
-                            </div>
-                        </div>`;
-                    containerManage.insertAdjacentHTML('beforeend', cardManage);
-                });
-            }
-            loadData();
-        }
-
-        setInterval(updateLotteryTimer, 1000);
-        setInterval(loadData, 30000);
-        window.onload = checkAuth;
+        window.onload = function() {
+            checkAuth();
+        };
     </script>
 </head>
 <body>
-    <h1>Arizona RP — Мониторинг Слётов</h1>
-    
-    <div class="lottery-banner">
-        <div class="lottery-info">
-            <span class="lottery-icon">🎟️</span>
-            <div>
-                <div class="lottery-title">Лотерейный билет</div>
-                <div class="lottery-sub">Списание произойдёт в <b>21:10 МСК</b></div>
-            </div>
-        </div>
-        <div class="lottery-countdown">
-            <span class="lottery-label">До слёта:</span>
-            <span class="lottery-timer" id="lottery-timer">00:00:00</span>
-        </div>
-    </div>
-
     <div id="login-screen" class="login-box" style="display: none;">
         <h2>Авторизация</h2>
         <input type="text" id="login-username" placeholder="Логин">
@@ -2384,18 +2530,35 @@ DASHBOARD_HTML = """
     </div>
 
     <div id="main-dashboard" style="display: none;">
+        <h1>Arizona RP — Мониторинг Слётов</h1>
+        
+        <div class="lottery-banner">
+            <div class="lottery-info">
+                <div class="lottery-icon">🎰</div>
+                <div>
+                    <div class="lottery-title">Лотерейный розыгрыш</div>
+                    <div class="lottery-sub">Ежедневно в <b>21:10 МСК</b> на всех серверах</div>
+                </div>
+            </div>
+            <div class="lottery-countdown">
+                <span class="lottery-label">До слёта:</span>
+                <span id="lottery-timer" class="lottery-timer">00:00:00</span>
+            </div>
+        </div>
+
         <div class="user-nav">
-            <span id="user-info"></span>
+            <div id="user-info">Вы вошли как: ...</div>
             <button class="btn-logout" onclick="handleLogout()">Выйти</button>
         </div>
 
         <div class="tabs">
-            <button id="btn-tab-view" class="tab-btn active" onclick="switchTab('view')">📊 Просмотр</button>
-            <button id="btn-tab-upcoming" class="tab-btn" onclick="switchTab('upcoming')">🚨 Скоро слетят</button>
-            <button id="btn-tab-manage" class="tab-btn" onclick="switchTab('manage')">⚙️️ Управление</button>
-            <button id="btn-tab-admin" class="tab-btn" onclick="switchTab('admin')">👑 Админ-панель</button>
+            <button id="btn-tab-view" class="tab-btn active" onclick="switchTab('view')">📊 Слёты</button>
+            <button id="btn-tab-upcoming" class="tab-btn" onclick="switchTab('upcoming')">⏰ Скоро слетят</button>
+            <button id="btn-tab-manage" class="tab-btn" onclick="switchTab('manage')" style="display: none;">⚙️ Управление</button>
+            <button id="btn-tab-admin" class="tab-btn" onclick="switchTab('admin')" style="display: none;">👑 Админ-панель</button>
         </div>
 
+        <!-- ВКЛАДКА СЛЁТЫ -->
         <div id="tab-view" class="tab-content active">
             <div class="filter-panel">
                 <div class="filter-group">
@@ -2413,13 +2576,14 @@ DASHBOARD_HTML = """
                     <label for="filter-fav">Избранное:</label>
                     <select id="filter-fav" class="filter-select" onchange="renderViewTab()">
                         <option value="all">Все сервера</option>
-                        <option value="fav_only">⭐ Только избранное</option>
+                        <option value="fav_only">Только избранные ⭐</option>
                     </select>
                 </div>
             </div>
             <div id="servers-view" class="servers-container"></div>
         </div>
 
+        <!-- ВКЛАДКА СКОРО СЛЕТЯТ -->
         <div id="tab-upcoming" class="tab-content">
             <div class="upcoming-filters">
                 <button id="btn-upcoming-1h" class="time-filter-btn active" onclick="setUpcomingHoursFilter(1)">В этот час</button>
@@ -2429,33 +2593,46 @@ DASHBOARD_HTML = """
             <div id="servers-upcoming" class="servers-container"></div>
         </div>
 
+        <!-- ВКЛАДКА УПРАВЛЕНИЕ -->
         <div id="tab-manage" class="tab-content">
+            <div class="manual-log-wrapper" style="max-width: 1600px; margin: 0 auto 20px auto; background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 10px; padding: 14px 20px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; cursor: pointer; user-select: none;" onclick="toggleManualLogs()">
+                    <div style="font-weight: 700; font-size: 1rem; color: var(--accent-orange); display: flex; align-items: center; gap: 8px;">
+                        📜 Лог ручных действий (Управление)
+                    </div>
+                    <button id="btn-toggle-manual-log" class="btn-opt" style="padding: 4px 10px; font-size: 0.8rem;">▲ Свернуть</button>
+                </div>
+                <div id="manual-logs-content" style="margin-top: 12px; display: block;">
+                    <div id="manual-logs-table-container">
+                        <span class="empty">Загрузка логов...</span>
+                    </div>
+                </div>
+            </div>
             <div id="servers-manage" class="servers-container"></div>
         </div>
 
+        <!-- ВКЛАДКА АДМИН-ПАНЕЛЬ -->
         <div id="tab-admin" class="tab-content">
-            <div style="max-width: 1200px; margin: 0 auto;">
-                <div class="server-card" style="margin-bottom: 20px;">
-                    <div class="section-title" style="margin-bottom: 12px;">Создать пользователя</div>
-                    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                        <input type="text" id="new-username" placeholder="Логин" style="padding: 8px; background: #0f121a; border: 1px solid #263043; color: #fff; border-radius: 4px;">
-                        <input type="password" id="new-password" placeholder="Пароль" style="padding: 8px; background: #0f121a; border: 1px solid #263043; color: #fff; border-radius: 4px;">
-                        <select id="new-role" class="select-role">
+            <div style="max-width: 1200px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px;">
+                <div style="background: var(--card-bg); border: 1px solid var(--card-border); padding: 20px; border-radius: 10px;">
+                    <h3 style="margin-top: 0; color: var(--accent-orange);">Создать пользователя</h3>
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
+                        <input type="text" id="new-username" placeholder="Логин" style="background: #0f121a; border: 1px solid #263043; color: #fff; padding: 8px 12px; border-radius: 6px; outline: none;">
+                        <input type="password" id="new-password" placeholder="Пароль" style="background: #0f121a; border: 1px solid #263043; color: #fff; padding: 8px 12px; border-radius: 6px; outline: none;">
+                        <select id="new-role" class="select-role" style="padding: 8px;">
                             <option value="user">User</option>
                             <option value="support">Support</option>
                             <option value="admin">Admin</option>
                         </select>
-                        <button class="btn-add" onclick="handleCreateUser()">Создать</button>
+                        <button class="btn-add" style="padding: 8px 16px; font-size: 0.9rem;" onclick="handleCreateUser()">Создать</button>
                     </div>
                 </div>
-
-                <div class="server-card" style="margin-bottom: 20px;">
-                    <div class="section-title" style="margin-bottom: 12px;">Пользователи</div>
+                <div style="background: var(--card-bg); border: 1px solid var(--card-border); padding: 20px; border-radius: 10px;">
+                    <h3 style="margin-top: 0; color: var(--accent-orange);">Пользователи</h3>
                     <div id="admin-users-table"></div>
                 </div>
-
-                <div class="server-card">
-                    <div class="section-title" style="margin-bottom: 12px;">Логи сканирований за сегодня</div>
+                <div style="background: var(--card-bg); border: 1px solid var(--card-border); padding: 20px; border-radius: 10px;">
+                    <h3 style="margin-top: 0; color: var(--accent-orange);">Лог полученных сканов (за сегодня)</h3>
                     <div id="admin-scan-logs-table"></div>
                 </div>
             </div>
