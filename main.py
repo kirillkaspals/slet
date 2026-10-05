@@ -2395,7 +2395,7 @@ DASHBOARD_HTML = """
                 <span class="lottery-icon">🎰</span>
                 <div>
                     <div class="lottery-title">Лотерейный Билет</div>
-                    <div class="lottery-sub">Спишется <b>1-3 AZ-Coins</b> за каждые 10 минут после розыгрыша в 21:10 МСК</div>
+                    <div class="lottery-sub"><b>Слет билетов каждый день в 21:10 по МСК</b></div>
                 </div>
             </div>
             <div class="lottery-countdown">
