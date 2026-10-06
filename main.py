@@ -997,8 +997,8 @@ async def add_item(data: AddItemModel, username: str = Depends(verify_editor)):
     if data.pd > 100:
         raise HTTPException(status_code=400, detail="Количество PayDay не может быть больше 100")
 
-    if data.propType in ["house", "houses"] and data.propId is not None and data.propId > 3000:
-        raise HTTPException(status_code=400, detail="ID дома не может быть больше 3000")
+    if data.propId is not None and data.propId > 3000:
+        raise HTTPException(status_code=400, detail="ID имущества не может быть больше 3000")
 
     srv = data.server
     async with data_lock:
@@ -1942,8 +1942,8 @@ DASHBOARD_HTML = """
             let propId = null;
             if (idStr && idStr.trim() !== '' && !isNaN(parseInt(idStr, 10))) {
                 propId = parseInt(idStr, 10);
-                if ((propType === 'house' || propType === 'houses') && propId > 3000) {
-                    alert('ID дома не может быть больше 3000!');
+                if (propId > 3000) {
+                    alert('ID не может быть больше 3000!');
                     return;
                 }
             }
@@ -2188,6 +2188,42 @@ DASHBOARD_HTML = """
             return dropInfo.hourSteps === targetHours;
         }
 
+        function renderManageContainer() {
+            const container = document.getElementById('servers-manage');
+            if (!container || container.children.length > 0) return;
+            container.innerHTML = ALL_SERVERS.map(srv => {
+                const displayName = getServerDisplayName(srv);
+                return `
+                    <div class="server-card">
+                        <div class="server-header">
+                            <div class="server-title">
+                                <span>${displayName}</span>
+                                <button id="btn-del-scan-${srv}" class="btn-delete-scan" style="display:none;" onclick="deleteWholeScan('${srv}')">Удалить скан</button>
+                            </div>
+                        </div>
+                        <div class="scan-tabs-bar">
+                            <div id="scan-tabs-${srv}" class="scan-tabs-container"></div>
+                        </div>
+                        <div class="tables-grid">
+                            <div>
+                                <div class="section-header">
+                                    <span class="section-title">Дома</span>
+                                    <button class="btn-add" onclick="addItemPrompt('${srv}', 'house')">+ Дом</button>
+                                </div>
+                                <div id="houses-manage-${srv}"></div>
+                            </div>
+                            <div>
+                                <div class="section-header">
+                                    <span class="section-title">Бизнесы</span>
+                                    <button class="btn-add" onclick="addItemPrompt('${srv}', 'biz')">+ Бизнес</button>
+                                </div>
+                                <div id="biz-manage-${srv}"></div>
+                            </div>
+                        </div>
+                    </div>`;
+            }).join('');
+        }
+
         async function loadData() {
             try {
                 const res = await fetch('/api/paydays');
@@ -2200,11 +2236,14 @@ DASHBOARD_HTML = """
                 
                 renderViewTab();
 
+                const canManage = currentUser && (currentUser.role === 'admin' || currentUser.role === 'support');
+                if (canManage) {
+                    renderManageContainer();
+                }
+
                 const containerUpcoming = document.getElementById('servers-upcoming');
                 containerUpcoming.innerHTML = '';
                 let hasUpcomingDrops = false;
-
-                const canManage = currentUser && (currentUser.role === 'admin' || currentUser.role === 'support');
 
                 for (const srv of ALL_SERVERS) {
                     const info = data[srv];
@@ -2322,102 +2361,60 @@ DASHBOARD_HTML = """
                     let hourMsg = 'в этот час';
                     if (selectedUpcomingHours === 2) hourMsg = 'через 2 часа';
                     if (selectedUpcomingHours === 3) hourMsg = 'через 3 часа';
-                    containerUpcoming.innerHTML = `<div class="empty-center">Слётов имущества ${hourMsg} не ожидается</div>`;
+                    containerUpcoming.innerHTML = `<div class="empty-center">Нет слётов ${hourMsg}</div>`;
                 }
             } catch(e) { console.error(e); }
         }
 
         function initDashboard() {
-            const containerManage = document.getElementById('servers-manage');
-            if (!containerManage) return;
-            containerManage.innerHTML = '';
-
-            const canManage = currentUser && (currentUser.role === 'admin' || currentUser.role === 'support');
-
-            if (canManage) {
-                ALL_SERVERS.forEach(srv => {
-                    const displayName = getServerDisplayName(srv);
-                    const cardManage = `
-                        <div class="server-card">
-                            <div class="server-header">
-                                <div class="server-title">
-                                    <span>${displayName}</span>
-                                    <span class="season-badge season-badge-${srv}">Загрузка...</span>
-                                </div>
-                            </div>
-                            <div class="scan-tabs-bar">
-                                <div class="scan-tabs-container" id="scan-tabs-${srv}"></div>
-                                <button class="btn-delete-scan" id="btn-del-scan-${srv}" onclick="deleteWholeScan('${srv}')">Удалить скан</button>
-                            </div>
-                            <div class="tables-grid">
-                                <div>
-                                    <div class="section-header">
-                                        <span class="section-title">Дома</span>
-                                        <button class="btn-add" onclick="addItemPrompt('${srv}', 'house')">+ Дом</button>
-                                    </div>
-                                    <div id="houses-manage-${srv}"></div>
-                                </div>
-                                <div>
-                                    <div class="section-header">
-                                        <span class="section-title">Бизнесы</span>
-                                        <button class="btn-add" onclick="addItemPrompt('${srv}', 'biz')">+ Бизнес</button>
-                                    </div>
-                                    <div id="biz-manage-${srv}"></div>
-                                </div>
-                            </div>
-                        </div>`;
-                    containerManage.insertAdjacentHTML('beforeend', cardManage);
-                });
-            }
             loadData();
+            setInterval(loadData, 30000);
+            setInterval(updateLotteryTimer, 1000);
+            updateLotteryTimer();
         }
 
-        setInterval(updateLotteryTimer, 1000);
-        setInterval(loadData, 30000);
         window.onload = checkAuth;
     </script>
 </head>
 <body>
-    <h1>Arizona RP — Мониторинг Слётов</h1>
-    
-    <div class="lottery-banner">
-        <div class="lottery-info">
-            <span class="lottery-icon">🎟️</span>
-            <div>
-                <div class="lottery-title">Лотерейный билет</div>
-                <div class="lottery-sub">Списание произойдёт в <b>21:10 МСК</b></div>
-            </div>
-        </div>
-        <div class="lottery-countdown">
-            <span class="lottery-label">До слёта:</span>
-            <span class="lottery-timer" id="lottery-timer">00:00:00</span>
-        </div>
-    </div>
-
-    <div id="login-screen" class="login-box" style="display: none;">
+    <div id="login-screen" class="login-box" style="display:none;">
         <h2>Авторизация</h2>
         <input type="text" id="login-username" placeholder="Логин">
         <input type="password" id="login-password" placeholder="Пароль">
         <button onclick="handleLogin()">Войти</button>
     </div>
 
-    <div id="main-dashboard" style="display: none;">
+    <div id="main-dashboard" style="display:none;">
         <div class="user-nav">
             <span id="user-info"></span>
             <button class="btn-logout" onclick="handleLogout()">Выйти</button>
         </div>
 
+        <div class="lottery-banner">
+            <div class="lottery-info">
+                <div class="lottery-icon">🎰</div>
+                <div>
+                    <div class="lottery-title">Розыгрыш Лотереи</div>
+                    <div class="lottery-sub">Слёт билетов происходит каждый день в <b>21:10 МСК</b></div>
+                </div>
+            </div>
+            <div class="lottery-countdown">
+                <span class="lottery-label">До слёта:</span>
+                <span id="lottery-timer" class="lottery-timer">00:00:00</span>
+            </div>
+        </div>
+
         <div class="tabs">
-            <button id="btn-tab-view" class="tab-btn active" onclick="switchTab('view')">📊 Просмотр</button>
-            <button id="btn-tab-upcoming" class="tab-btn" onclick="switchTab('upcoming')">🚨 Скоро слетят</button>
-            <button id="btn-tab-manage" class="tab-btn" onclick="switchTab('manage')">⚙ Управление</button>
-            <button id="btn-tab-admin" class="tab-btn" onclick="switchTab('admin')">👑 Админ-панель</button>
+            <button id="btn-tab-view" class="tab-btn active" onclick="switchTab('view')">📊 Мониторинг</button>
+            <button id="btn-tab-upcoming" class="tab-btn" onclick="switchTab('upcoming')">🔥 Ближайшие слёты</button>
+            <button id="btn-tab-manage" class="tab-btn" onclick="switchTab('manage')" style="display:none;">⚙️ Управление</button>
+            <button id="btn-tab-admin" class="tab-btn" onclick="switchTab('admin')" style="display:none;">👑 Админ-панель</button>
         </div>
 
         <div id="tab-view" class="tab-content active">
             <div class="filter-panel">
                 <div class="filter-group">
-                    <label for="filter-season">Сезон:</label>
+                    <label>Сезон:</label>
                     <select id="filter-season" class="filter-select" onchange="renderViewTab()">
                         <option value="all">Все сезоны</option>
                         <option value="1">📱 По инфе (1)</option>
@@ -2428,10 +2425,10 @@ DASHBOARD_HTML = """
                     </select>
                 </div>
                 <div class="filter-group">
-                    <label for="filter-fav">Избранное:</label>
+                    <label>Избранное:</label>
                     <select id="filter-fav" class="filter-select" onchange="renderViewTab()">
                         <option value="all">Все сервера</option>
-                        <option value="fav_only">⭐ Только избранное</option>
+                        <option value="fav_only">⭐ Только избранные</option>
                     </select>
                 </div>
             </div>
@@ -2452,9 +2449,9 @@ DASHBOARD_HTML = """
         </div>
 
         <div id="tab-admin" class="tab-content">
-            <div style="max-width: 1200px; margin: 0 auto;">
+            <div style="max-width: 1000px; margin: 0 auto;">
                 <div class="server-card" style="margin-bottom: 20px;">
-                    <div class="section-title" style="margin-bottom: 12px;">Создать пользователя</div>
+                    <div class="section-title" style="margin-bottom: 12px;">Создать нового пользователя</div>
                     <div style="display: flex; gap: 10px; flex-wrap: wrap;">
                         <input type="text" id="new-username" placeholder="Логин" style="padding: 8px; background: #0f121a; border: 1px solid #263043; color: #fff; border-radius: 4px;">
                         <input type="password" id="new-password" placeholder="Пароль" style="padding: 8px; background: #0f121a; border: 1px solid #263043; color: #fff; border-radius: 4px;">
@@ -2463,17 +2460,17 @@ DASHBOARD_HTML = """
                             <option value="support">Support</option>
                             <option value="admin">Admin</option>
                         </select>
-                        <button class="btn-add" style="padding: 8px 16px;" onclick="handleCreateUser()">Создать</button>
+                        <button class="btn-add" onclick="handleCreateUser()" style="padding: 8px 16px;">Создать</button>
                     </div>
                 </div>
 
                 <div class="server-card" style="margin-bottom: 20px;">
-                    <div class="section-title" style="margin-bottom: 12px;">Пользователи</div>
+                    <div class="section-title" style="margin-bottom: 12px;">Список пользователей</div>
                     <div id="admin-users-table"></div>
                 </div>
 
                 <div class="server-card">
-                    <div class="section-title" style="margin-bottom: 12px;">Логи сканирований (За сегодня)</div>
+                    <div class="section-title" style="margin-bottom: 12px;">Логи сканирований</div>
                     <div id="admin-scan-logs-table"></div>
                 </div>
             </div>
