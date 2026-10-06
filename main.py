@@ -994,6 +994,12 @@ async def delete_scan(data: DeleteScanModel, username: str = Depends(verify_edit
 
 @app.post("/api/add_item")
 async def add_item(data: AddItemModel, username: str = Depends(verify_editor)):
+    if data.pd > 100:
+        raise HTTPException(status_code=400, detail="Количество PayDay не может быть больше 100")
+
+    if data.propType in ["house", "houses"] and data.propId is not None and data.propId > 3000:
+        raise HTTPException(status_code=400, detail="ID дома не может быть больше 3000")
+
     srv = data.server
     async with data_lock:
         if srv in server_data:
@@ -1927,20 +1933,32 @@ DASHBOARD_HTML = """
             if (!pdStr) return;
             
             const pd = parseInt(pdStr, 10);
-            if (isNaN(pd) || pd <= 0) {
-                alert('Некорректное значение PayDay!');
+            if (isNaN(pd) || pd <= 0 || pd > 100) {
+                alert('Некорректное значение PayDay! Допустимо от 1 до 100.');
                 return;
             }
 
             const idStr = prompt(`Введите ID ${title} (или оставьте пустым):`);
-            const propId = idStr && !isNaN(parseInt(idStr, 10)) ? parseInt(idStr, 10) : null;
+            let propId = null;
+            if (idStr && idStr.trim() !== '' && !isNaN(parseInt(idStr, 10))) {
+                propId = parseInt(idStr, 10);
+                if ((propType === 'house' || propType === 'houses') && propId > 3000) {
+                    alert('ID дома не может быть больше 3000!');
+                    return;
+                }
+            }
 
             try {
-                await fetch('/api/add_item', {
+                const res = await fetch('/api/add_item', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ server, scanId, propType, pd, propId })
                 });
+                if (!res.ok) {
+                    const err = await res.json();
+                    alert(err.detail || 'Ошибка добавления');
+                    return;
+                }
                 loadData();
             } catch(e) { console.error(e); }
         }
@@ -2392,7 +2410,7 @@ DASHBOARD_HTML = """
         <div class="tabs">
             <button id="btn-tab-view" class="tab-btn active" onclick="switchTab('view')">📊 Просмотр</button>
             <button id="btn-tab-upcoming" class="tab-btn" onclick="switchTab('upcoming')">🚨 Скоро слетят</button>
-            <button id="btn-tab-manage" class="tab-btn" onclick="switchTab('manage')">⚙️️ Управление</button>
+            <button id="btn-tab-manage" class="tab-btn" onclick="switchTab('manage')">⚙ Управление</button>
             <button id="btn-tab-admin" class="tab-btn" onclick="switchTab('admin')">👑 Админ-панель</button>
         </div>
 
@@ -2445,7 +2463,7 @@ DASHBOARD_HTML = """
                             <option value="support">Support</option>
                             <option value="admin">Admin</option>
                         </select>
-                        <button class="btn-add" onclick="handleCreateUser()">Создать</button>
+                        <button class="btn-add" style="padding: 8px 16px;" onclick="handleCreateUser()">Создать</button>
                     </div>
                 </div>
 
@@ -2455,7 +2473,7 @@ DASHBOARD_HTML = """
                 </div>
 
                 <div class="server-card">
-                    <div class="section-title" style="margin-bottom: 12px;">Логи сканирований за сегодня</div>
+                    <div class="section-title" style="margin-bottom: 12px;">Логи сканирований (За сегодня)</div>
                     <div id="admin-scan-logs-table"></div>
                 </div>
             </div>
