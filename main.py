@@ -191,6 +191,16 @@ async def init_db():
         """)
 
         await conn.execute("""
+            CREATE TABLE IF NOT EXISTS manual_action_logs (
+                id SERIAL PRIMARY KEY,
+                created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL,
+                username VARCHAR(50) NOT NULL,
+                server VARCHAR(50) NOT NULL,
+                action VARCHAR(255) NOT NULL
+            );
+        """)
+
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS server_scans_data (
                 server VARCHAR(50) PRIMARY KEY,
                 data JSONB NOT NULL
@@ -212,6 +222,18 @@ async def init_db():
             VALUES ('admin', $1, 'admin', TRUE)
             ON CONFLICT (username) DO NOTHING;
         """, hashed_pw)
+
+async def log_manual_action(username: str, server: str, action: str):
+    if db_pool:
+        try:
+            now_msk = datetime.now(MSK_TZ)
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO manual_action_logs (created_at, username, server, action) VALUES ($1, $2, $3, $4)",
+                    now_msk.replace(tzinfo=None), username, server, action
+                )
+        except Exception as e:
+            print(f"Ошибка сохранения лога ручных действий: {e}")
 
 async def get_user_by_username(username: str):
     if not db_pool:
@@ -438,9 +460,10 @@ async def process_hourly_payday():
         try:
             async with db_pool.acquire() as conn:
                 await conn.execute("TRUNCATE TABLE scan_logs;")
-                print(f"[{now_msk.strftime('%Y-%m-%d %H:%M:%S')}] Логи сканов успешно очищены (00:00 МСК).")
+                await conn.execute("TRUNCATE TABLE manual_action_logs;")
+                print(f"[{now_msk.strftime('%Y-%m-%d %H:%M:%S')}] Логи сканов и ручных действий успешно очищены (00:00 МСК).")
         except Exception as e:
-            print(f"Ошибка очистки логов сканирования: {e}")
+            print(f"Ошибка очистки логов: {e}")
 
     async with data_lock:
         check_and_update_outdated_scans()
@@ -627,6 +650,25 @@ async def get_scan_logs(username: str = Depends(verify_admin)):
             r = dict(row)
             if r["created_at"]:
                 r["created_at"] = r["created_at"].strftime("%H:%M:%S")
+            result.append(r)
+        return result
+
+@app.get("/api/admin/manual_logs")
+async def get_manual_logs(username: str = Depends(verify_admin)):
+    if not db_pool:
+        return []
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT created_at, username, server, action 
+            FROM manual_action_logs 
+            ORDER BY created_at DESC 
+            LIMIT 200
+        """)
+        result = []
+        for row in rows:
+            r = dict(row)
+            if r["created_at"]:
+                r["created_at"] = r["created_at"].strftime("%Y-%m-%d %H:%M:%S")
             result.append(r)
         return result
 
@@ -977,6 +1019,10 @@ async def delete_item(data: DeleteItemModel, username: str = Depends(verify_edit
                     target_key = "houses" if data.propType in ["house", "houses"] else "businesses"
                     scan[target_key] = [item for item in scan[target_key] if item["pos"] != data.pos]
                     await save_data_to_file_async()
+                    
+                    action_name = "удалил дом" if data.propType in ["house", "houses"] else "удалил бизнес"
+                    await log_manual_action(username, srv, action_name)
+                    
                     return {"status": "success"}
     raise HTTPException(status_code=404, detail="Server or Scan not found")
 
@@ -989,6 +1035,9 @@ async def delete_scan(data: DeleteScanModel, username: str = Depends(verify_edit
                 s for s in server_data[srv]["scans"] if s["scanId"] != data.scanId
             ]
             await save_data_to_file_async()
+            
+            await log_manual_action(username, srv, "удалил скан")
+            
             return {"status": "success"}
     raise HTTPException(status_code=404, detail="Scan not found")
 
@@ -1022,6 +1071,10 @@ async def add_item(data: AddItemModel, username: str = Depends(verify_editor)):
                     scan[target_key].append(new_record)
                     scan[target_key] = sorted(scan[target_key], key=lambda x: x["pos"])
                     await save_data_to_file_async()
+                    
+                    action_name = "добавил дом" if data.propType in ["house", "houses"] else "добавил бизнес"
+                    await log_manual_action(username, srv, action_name)
+                    
                     return {"status": "success"}
     raise HTTPException(status_code=404, detail="Server or Scan not found")
 
@@ -1815,6 +1868,38 @@ DASHBOARD_HTML = """
             document.getElementById('admin-scan-logs-table').innerHTML = html + '</table>';
         }
 
+        async function loadManualLogs() {
+            if (!currentUser || currentUser.role !== 'admin') {
+                const wrapper = document.getElementById('manual-logs-wrapper');
+                if (wrapper) wrapper.style.display = 'none';
+                return;
+            }
+
+            const wrapper = document.getElementById('manual-logs-wrapper');
+            if (wrapper) wrapper.style.display = 'block';
+
+            const res = await fetch('/api/admin/manual_logs');
+            if (!res.ok) return;
+            const logs = await res.json();
+
+            const container = document.getElementById('manual-logs-container');
+            if (!logs || logs.length === 0) {
+                container.innerHTML = '<span class="empty">За сегодня ручных действий не зафиксировано</span>';
+                return;
+            }
+
+            let html = `<table><tr><th>Время и дата</th><th>Пользователь</th><th>Сервер</th><th>Действие</th></tr>`;
+            logs.forEach(l => {
+                html += `<tr>
+                    <td><b>${l.created_at}</b></td>
+                    <td><span style="color: #ffb74d;">${l.username}</span></td>
+                    <td><span style="color: #00bcd4;">${l.server}</span></td>
+                    <td><span style="color: #81c784;">${l.action}</span></td>
+                </tr>`;
+            });
+            container.innerHTML = html + '</table>';
+        }
+
         async function changeUserPassword(userId, username) {
             const newPassword = prompt(`Введите новый пароль для пользователя ${username}:`);
             if (!newPassword) return;
@@ -2239,6 +2324,7 @@ DASHBOARD_HTML = """
                 const canManage = currentUser && (currentUser.role === 'admin' || currentUser.role === 'support');
                 if (canManage) {
                     renderManageContainer();
+                    loadManualLogs();
                 }
 
                 const containerUpcoming = document.getElementById('servers-upcoming');
@@ -2445,33 +2531,43 @@ DASHBOARD_HTML = """
         </div>
 
         <div id="tab-manage" class="tab-content">
+            <div id="manual-logs-wrapper" style="display: none; max-width: 1600px; margin: 0 auto 20px auto;">
+                <details style="background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 10px; padding: 12px 16px;">
+                    <summary style="cursor: pointer; font-weight: 700; color: var(--accent-orange); font-size: 0.95rem; user-select: none;">
+                        📜 Лог ручных действий (Admin)
+                    </summary>
+                    <div id="manual-logs-container" style="margin-top: 12px; max-height: 250px; overflow-y: auto;">
+                        <span class="empty">Загрузка...</span>
+                    </div>
+                </details>
+            </div>
             <div id="servers-manage" class="servers-container"></div>
         </div>
 
         <div id="tab-admin" class="tab-content">
             <div style="max-width: 1000px; margin: 0 auto;">
                 <div class="server-card" style="margin-bottom: 20px;">
-                    <div class="section-title" style="margin-bottom: 12px;">Создать нового пользователя</div>
+                    <h3 style="margin-top: 0; color: var(--accent-orange);">Создать пользователя</h3>
                     <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                        <input type="text" id="new-username" placeholder="Логин" style="padding: 8px; background: #0f121a; border: 1px solid #263043; color: #fff; border-radius: 4px;">
-                        <input type="password" id="new-password" placeholder="Пароль" style="padding: 8px; background: #0f121a; border: 1px solid #263043; color: #fff; border-radius: 4px;">
-                        <select id="new-role" class="select-role">
+                        <input type="text" id="new-username" placeholder="Логин" style="flex: 1; min-width: 150px; padding: 8px; background: #0f121a; border: 1px solid #263043; color: #fff; border-radius: 6px;">
+                        <input type="password" id="new-password" placeholder="Пароль" style="flex: 1; min-width: 150px; padding: 8px; background: #0f121a; border: 1px solid #263043; color: #fff; border-radius: 6px;">
+                        <select id="new-role" style="padding: 8px; background: #0f121a; border: 1px solid #263043; color: #fff; border-radius: 6px;">
                             <option value="user">User</option>
                             <option value="support">Support</option>
                             <option value="admin">Admin</option>
                         </select>
-                        <button class="btn-add" onclick="handleCreateUser()" style="padding: 8px 16px;">Создать</button>
+                        <button class="btn-add" style="padding: 8px 16px;" onclick="handleCreateUser()">Создать</button>
                     </div>
                 </div>
 
                 <div class="server-card" style="margin-bottom: 20px;">
-                    <div class="section-title" style="margin-bottom: 12px;">Список пользователей</div>
+                    <h3 style="margin-top: 0; color: var(--accent-orange);">Список пользователей</h3>
                     <div id="admin-users-table"></div>
                 </div>
 
                 <div class="server-card">
-                    <div class="section-title" style="margin-bottom: 12px;">Логи сканирований</div>
-                    <div id="admin-scan-logs-table"></div>
+                    <h3 style="margin-top: 0; color: var(--accent-orange);">Логи сканирований (За сегодня)</h3>
+                    <div id="admin-scan-logs-table" style="max-height: 300px; overflow-y: auto;"></div>
                 </div>
             </div>
         </div>
