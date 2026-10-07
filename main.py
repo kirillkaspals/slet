@@ -1659,7 +1659,7 @@ DASHBOARD_HTML = """
             <div class="lottery-info">
                 <span class="lottery-icon">🎟️</span>
                 <div>
-                    <div class="lottery-title">Лотерейный Билет</div>
+                    <div class="lottery-title">Лотерейные Билеты</div>
                     <div class="lottery-sub">Розыгрыш проходит каждый день в <b>21:10 МСК</b></div>
                 </div>
             </div>
