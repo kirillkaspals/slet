@@ -516,7 +516,7 @@ async def process_hourly_payday():
 async def hourly_loop():
     while True:
         now = datetime.now(MSK_TZ)
-        seconds_until_next_hour = (60 - now.minute - 1) * 60 + (60 - now.second)
+        seconds_until_next_hour = (60 - now.minute - 1) * 60 + (60 - now.second) + 1
         if seconds_until_next_hour <= 0:
             seconds_until_next_hour = 3600
         
@@ -675,7 +675,7 @@ async def get_manual_logs(username: str = Depends(verify_admin)):
 @app.post("/api/admin/toggle_access")
 async def toggle_access(data: ToggleAccessModel, username: str = Depends(verify_admin)):
     if not db_pool:
-        raise HTTPException(status_code=53, detail="БД недоступна")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="БД недоступна")
     async with db_pool.acquire() as conn:
         await conn.execute("UPDATE users SET is_allowed = $1 WHERE id = $2", data.is_allowed, data.user_id)
     return {"status": "success"}
@@ -683,7 +683,7 @@ async def toggle_access(data: ToggleAccessModel, username: str = Depends(verify_
 @app.post("/api/admin/create_user")
 async def create_user(data: CreateUserModel, username: str = Depends(verify_admin)):
     if not db_pool:
-        raise HTTPException(status_code=53, detail="БД недоступна")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="БД недоступна")
     role = data.role if data.role in ["user", "support", "admin"] else "user"
     hashed_pw = pwd_context.hash(data.password)
     async with db_pool.acquire() as conn:
@@ -700,7 +700,7 @@ async def create_user(data: CreateUserModel, username: str = Depends(verify_admi
 @app.post("/api/admin/delete_user")
 async def delete_user(data: DeleteUserModel, current_admin: str = Depends(verify_admin)):
     if not db_pool:
-        raise HTTPException(status_code=53, detail="БД недоступна")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="БД недоступна")
     async with db_pool.acquire() as conn:
         target = await conn.fetchrow("SELECT username FROM users WHERE id = $1", data.user_id)
         if not target:
@@ -720,7 +720,7 @@ async def delete_user(data: DeleteUserModel, current_admin: str = Depends(verify
 @app.post("/api/admin/update_role")
 async def update_role(data: UpdateRoleModel, current_admin: str = Depends(verify_admin)):
     if not db_pool:
-        raise HTTPException(status_code=53, detail="БД недоступна")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="БД недоступна")
     if data.role not in ["user", "support", "admin"]:
         raise HTTPException(status_code=400, detail="Недопустимая роль")
         
@@ -738,7 +738,7 @@ async def update_role(data: UpdateRoleModel, current_admin: str = Depends(verify
 @app.post("/api/admin/change_password")
 async def change_password(data: ChangePasswordModel, current_admin: str = Depends(verify_admin)):
     if not db_pool:
-        raise HTTPException(status_code=53, detail="БД недоступна")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="БД недоступна")
     if not data.new_password or len(data.new_password.strip()) < 4:
         raise HTTPException(status_code=400, detail="Пароль слишком короткий (минимум 4 символа)")
 
@@ -1201,51 +1201,14 @@ DASHBOARD_HTML = """
             gap: 15px;
             box-shadow: 0 4px 15px rgba(0,0,0,0.3);
         }
-        .lottery-info {
-            display: flex;
-            align-items: center;
-            gap: 14px;
-        }
-        .lottery-icon {
-            font-size: 2.2rem;
-            line-height: 1;
-        }
-        .lottery-title {
-            font-size: 1.05rem;
-            font-weight: 800;
-            color: #ffb74d;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-        .lottery-sub {
-            font-size: 0.85rem;
-            color: var(--text-muted);
-            margin-top: 2px;
-        }
-        .lottery-sub b {
-            color: #ffffff;
-        }
-        .lottery-countdown {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            background: rgba(15, 18, 26, 0.7);
-            padding: 8px 16px;
-            border-radius: 8px;
-            border: 1px solid var(--card-border);
-        }
-        .lottery-label {
-            font-size: 0.85rem;
-            font-weight: 600;
-            color: var(--text-muted);
-        }
-        .lottery-timer {
-            font-size: 1.25rem;
-            font-weight: 800;
-            color: #00e676;
-            font-family: monospace;
-            letter-spacing: 1px;
-        }
+        .lottery-info { display: flex; align-items: center; gap: 14px; }
+        .lottery-icon { font-size: 2.2rem; line-height: 1; }
+        .lottery-title { font-size: 1.05rem; font-weight: 800; color: #ffb74d; text-transform: uppercase; letter-spacing: 0.5px; }
+        .lottery-sub { font-size: 0.85rem; color: var(--text-muted); margin-top: 2px; }
+        .lottery-sub b { color: #ffffff; }
+        .lottery-countdown { display: flex; align-items: center; gap: 10px; background: rgba(15, 18, 26, 0.7); padding: 8px 16px; border-radius: 8px; border: 1px solid var(--card-border); }
+        .lottery-label { font-size: 0.85rem; font-weight: 600; color: var(--text-muted); }
+        .lottery-timer { font-size: 1.25rem; font-weight: 800; color: #00e676; font-family: monospace; letter-spacing: 1px; }
 
         /* Auth Screen */
         .login-box { 
@@ -1258,12 +1221,7 @@ DASHBOARD_HTML = """
             text-align: center; 
             box-shadow: 0 10px 30px rgba(0,0,0,0.5);
         }
-        .login-box h2 {
-            margin-top: 0;
-            margin-bottom: 20px;
-            color: var(--text-main);
-            font-size: 1.4rem;
-        }
+        .login-box h2 { margin-top: 0; margin-bottom: 20px; color: var(--text-main); font-size: 1.4rem; }
         .login-box input { 
             width: 100%; 
             padding: 12px; 
@@ -1276,10 +1234,7 @@ DASHBOARD_HTML = """
             outline: none;
             transition: 0.2s;
         }
-        .login-box input:focus {
-            border-color: var(--accent-orange);
-            box-shadow: 0 0 8px var(--accent-orange-glow);
-        }
+        .login-box input:focus { border-color: var(--accent-orange); box-shadow: 0 0 8px var(--accent-orange-glow); }
         .login-box button { 
             width: 100%; 
             padding: 12px; 
@@ -1293,10 +1248,7 @@ DASHBOARD_HTML = """
             font-size: 1rem;
             transition: transform 0.1s, box-shadow 0.2s;
         }
-        .login-box button:hover {
-            transform: translateY(-1px);
-            box-shadow: 0 4px 15px var(--accent-orange-glow);
-        }
+        .login-box button:hover { transform: translateY(-1px); box-shadow: 0 4px 15px var(--accent-orange-glow); }
 
         /* Top Navigation */
         .user-nav { 
@@ -1321,19 +1273,10 @@ DASHBOARD_HTML = """
             font-weight: 600;
             transition: 0.2s;
         }
-        .btn-logout:hover {
-            background: #e53935;
-            color: #fff;
-        }
+        .btn-logout:hover { background: #e53935; color: #fff; }
 
         /* Tabs Navigation */
-        .tabs { 
-            display: flex; 
-            justify-content: center; 
-            gap: 10px; 
-            margin-bottom: 25px; 
-            flex-wrap: wrap;
-        }
+        .tabs { display: flex; justify-content: center; gap: 10px; margin-bottom: 25px; flex-wrap: wrap; }
         .tab-btn { 
             background-color: var(--card-bg); 
             color: var(--text-muted); 
@@ -1351,11 +1294,7 @@ DASHBOARD_HTML = """
             border-color: #ff9800; 
             box-shadow: 0 4px 15px var(--accent-orange-glow);
         }
-        .tab-btn:hover:not(.active) { 
-            background-color: #1c2333; 
-            color: #fff; 
-            border-color: #2e384e;
-        }
+        .tab-btn:hover:not(.active) { background-color: #1c2333; color: #fff; border-color: #2e384e; }
 
         .tab-content { display: none; }
         .tab-content.active { display: block; }
@@ -1425,15 +1364,9 @@ DASHBOARD_HTML = """
             margin: 0 auto; 
         }
 
-        @media (min-width: 600px) {
-            .servers-container { grid-template-columns: repeat(2, 1fr); }
-        }
-        @media (min-width: 1100px) {
-            .servers-container { grid-template-columns: repeat(3, 1fr); }
-        }
-        @media (min-width: 1500px) {
-            .servers-container { grid-template-columns: repeat(4, 1fr); }
-        }
+        @media (min-width: 600px) { .servers-container { grid-template-columns: repeat(2, 1fr); } }
+        @media (min-width: 1100px) { .servers-container { grid-template-columns: repeat(3, 1fr); } }
+        @media (min-width: 1500px) { .servers-container { grid-template-columns: repeat(4, 1fr); } }
 
         /* Server Card Styling */
         .server-card { 
@@ -1446,24 +1379,10 @@ DASHBOARD_HTML = """
             flex-direction: column;
             transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
         }
-        .server-card:hover {
-            border-color: #2e384e;
-            box-shadow: 0 6px 18px rgba(0,0,0,0.4);
-        }
+        .server-card:hover { border-color: #2e384e; box-shadow: 0 6px 18px rgba(0,0,0,0.4); }
         
-        .server-header { 
-            border-bottom: 1px solid #1f2736; 
-            padding-bottom: 8px; 
-            margin-bottom: 10px; 
-        }
-        .server-title { 
-            font-size: 1.05rem; 
-            font-weight: 700; 
-            color: #ffffff; 
-            display: flex; 
-            justify-content: space-between; 
-            align-items: center; 
-        }
+        .server-header { border-bottom: 1px solid #1f2736; padding-bottom: 8px; margin-bottom: 10px; }
+        .server-title { font-size: 1.05rem; font-weight: 700; color: #ffffff; display: flex; justify-content: space-between; align-items: center; }
         .season-badge { 
             font-size: 0.7rem; 
             background: rgba(255, 152, 0, 0.12); 
@@ -1501,41 +1420,14 @@ DASHBOARD_HTML = """
             gap: 4px;
         }
 
-        .scan-subtab.current-pair { 
-            background-color: rgba(46, 125, 50, 0.2); 
-            color: #81c784; 
-            border-color: #4caf50; 
-        }
-        .scan-subtab.current-pair.active { 
-            background-color: #2e7d32; 
-            color: #ffffff; 
-            border-color: #66bb6a; 
-            box-shadow: 0 0 8px rgba(76, 175, 80, 0.4);
-        }
+        .scan-subtab.current-pair { background-color: rgba(46, 125, 50, 0.2); color: #81c784; border-color: #4caf50; }
+        .scan-subtab.current-pair.active { background-color: #2e7d32; color: #ffffff; border-color: #66bb6a; box-shadow: 0 0 8px rgba(76, 175, 80, 0.4); }
 
-        .scan-subtab.old-pair { 
-            background-color: rgba(55, 71, 79, 0.25); 
-            color: #78909c; 
-            border-color: #37474f; 
-            opacity: 0.75;
-        }
-        .scan-subtab.old-pair.active { 
-            background-color: #37474f; 
-            color: #cfd8dc; 
-            border-color: #546e7a; 
-            opacity: 1;
-        }
+        .scan-subtab.old-pair { background-color: rgba(55, 71, 79, 0.25); color: #78909c; border-color: #37474f; opacity: 0.75; }
+        .scan-subtab.old-pair.active { background-color: #37474f; color: #cfd8dc; border-color: #546e7a; opacity: 1; }
 
-        .scan-subtab.single { 
-            background-color: rgba(255, 152, 0, 0.15); 
-            color: #ffb74d; 
-            border-color: #ff9800; 
-        }
-        .scan-subtab.single.active { 
-            background-color: #f57c00; 
-            color: #ffffff; 
-            border-color: #ffb74d; 
-        }
+        .scan-subtab.single { background-color: rgba(255, 152, 0, 0.15); color: #ffb74d; border-color: #ff9800; }
+        .scan-subtab.single.active { background-color: #f57c00; color: #ffffff; border-color: #ffb74d; }
 
         .scan-subtab:hover:not(.active) { opacity: 1; filter: brightness(1.2); }
 
@@ -1553,12 +1445,7 @@ DASHBOARD_HTML = """
         }
         .btn-delete-scan:hover { background-color: #d32f2f; color: #fff; }
 
-        .tables-grid { 
-            display: grid; 
-            grid-template-columns: 1fr 1fr; 
-            gap: 10px; 
-            flex-grow: 1;
-        }
+        .tables-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; flex-grow: 1; }
         @media (max-width: 480px) { .tables-grid { grid-template-columns: 1fr; } }
         
         .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
@@ -1589,11 +1476,7 @@ DASHBOARD_HTML = """
         .time-left-badge { font-weight: 700; color: #ffb74d; font-size: 0.75rem; background-color: rgba(255, 152, 0, 0.1); padding: 2px 5px; border-radius: 4px; border: 1px solid rgba(255, 152, 0, 0.3); }
         .time-left-frozen { font-weight: 700; color: #64b5f6; font-size: 0.75rem; }
 
-        @keyframes pulse {
-            0% { opacity: 1; }
-            50% { opacity: 0.5; }
-            100% { opacity: 1; }
-        }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
 
         .btn-group { display: flex; gap: 2px; flex-wrap: wrap; }
         .btn-opt { 
@@ -1628,6 +1511,123 @@ DASHBOARD_HTML = """
         .empty { color: #546e7a; font-style: italic; font-size: 0.78rem; display: block; padding: 4px 0; }
         .empty-center { text-align: center; color: var(--text-muted); font-style: italic; padding: 30px; background-color: var(--card-bg); border-radius: 10px; border: 1px solid var(--card-border); max-width: 600px; margin: 0 auto; grid-column: 1 / -1; }
     </style>
+</head>
+<body>
+    <!-- Auth Screen -->
+    <div id="login-screen" class="login-box" style="display:none;">
+        <h2>Авторизация</h2>
+        <input type="text" id="login-username" placeholder="Логин" autocomplete="username" onkeypress="if(event.key==='Enter') handleLogin()">
+        <input type="password" id="login-password" placeholder="Пароль" autocomplete="current-password" onkeypress="if(event.key==='Enter') handleLogin()">
+        <button onclick="handleLogin()">Войти</button>
+    </div>
+
+    <!-- Main Dashboard -->
+    <div id="main-dashboard" style="display:none;">
+        <div class="user-nav">
+            <span id="user-info">Загрузка...</span>
+            <button class="btn-logout" onclick="handleLogout()">Выйти</button>
+        </div>
+
+        <h1>Arizona RP — Мониторинг Слётов</h1>
+
+        <!-- Banner -->
+        <div class="lottery-banner">
+            <div class="lottery-info">
+                <span class="lottery-icon">🎰</span>
+                <div>
+                    <div class="lottery-title">Лотерейный билетик</div>
+                    <div class="lottery-sub">Слёт билетов происходит каждый день в <b>21:10 МСК</b></div>
+                </div>
+            </div>
+            <div class="lottery-countdown">
+                <span class="lottery-label">До слёта:</span>
+                <span id="lottery-timer" class="lottery-timer">00:00:00</span>
+            </div>
+        </div>
+
+        <!-- Navigation Tabs -->
+        <div class="tabs">
+            <button id="btn-tab-view" class="tab-btn active" onclick="switchTab('view')">📊 Мониторинг</button>
+            <button id="btn-tab-upcoming" class="tab-btn" onclick="switchTab('upcoming')">⏰ Ближайшие слёты</button>
+            <button id="btn-tab-manage" class="tab-btn" onclick="switchTab('manage')" style="display:none;">⚙️ Управление</button>
+            <button id="btn-tab-admin" class="tab-btn" onclick="switchTab('admin')" style="display:none;">👑 Админка</button>
+        </div>
+
+        <!-- Tab 1: View -->
+        <div id="tab-view" class="tab-content active">
+            <div class="filter-panel">
+                <div class="filter-group">
+                    <label>Сезон:</label>
+                    <select id="filter-season" class="filter-select" onchange="renderViewTab()">
+                        <option value="all">Все сезоны</option>
+                        <option value="1">📱 По инфе (1)</option>
+                        <option value="2">⌨ Скорострелы (2)</option>
+                        <option value="3">🏎️ Автогонки (3)</option>
+                        <option value="4">✈️ По новому (4)</option>
+                        <option value="5">🏍 Мотогонки (5)</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label>Избранное:</label>
+                    <select id="filter-fav" class="filter-select" onchange="renderViewTab()">
+                        <option value="all">Все сервера</option>
+                        <option value="fav_only">⭐ Только избранные</option>
+                    </select>
+                </div>
+            </div>
+            <div id="servers-view" class="servers-container"></div>
+        </div>
+
+        <!-- Tab 2: Upcoming -->
+        <div id="tab-upcoming" class="tab-content">
+            <div class="upcoming-filters">
+                <button id="btn-upcoming-1h" class="time-filter-btn active" onclick="setUpcomingHoursFilter(1)">1 час</button>
+                <button id="btn-upcoming-2h" class="time-filter-btn" onclick="setUpcomingHoursFilter(2)">2 часа</button>
+                <button id="btn-upcoming-3h" class="time-filter-btn" onclick="setUpcomingHoursFilter(3)">3 часа</button>
+            </div>
+            <div id="servers-upcoming" class="servers-container"></div>
+        </div>
+
+        <!-- Tab 3: Manage -->
+        <div id="tab-manage" class="tab-content">
+            <div id="servers-manage" class="servers-container"></div>
+        </div>
+
+        <!-- Tab 4: Admin -->
+        <div id="tab-admin" class="tab-content">
+            <div style="max-width: 1200px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px;">
+                <div style="background: var(--card-bg); padding: 20px; border-radius: 10px; border: 1px solid var(--card-border);">
+                    <h3 style="margin-top:0; color: var(--accent-orange);">Создать пользователя</h3>
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center;">
+                        <input type="text" id="new-username" placeholder="Логин" style="padding: 8px; background:#0f121a; border:1px solid #263043; color:#fff; border-radius:4px;">
+                        <input type="password" id="new-password" placeholder="Пароль" style="padding: 8px; background:#0f121a; border:1px solid #263043; color:#fff; border-radius:4px;">
+                        <select id="new-role" class="filter-select">
+                            <option value="user">User</option>
+                            <option value="support">Support</option>
+                            <option value="admin">Admin</option>
+                        </select>
+                        <button class="btn-add" style="padding: 8px 16px; background:#4caf50;" onclick="handleCreateUser()">Создать</button>
+                    </div>
+                </div>
+
+                <div style="background: var(--card-bg); padding: 20px; border-radius: 10px; border: 1px solid var(--card-border);">
+                    <h3 style="margin-top:0; color: var(--accent-orange);">Список пользователей</h3>
+                    <div id="admin-users-table"></div>
+                </div>
+
+                <div style="background: var(--card-bg); padding: 20px; border-radius: 10px; border: 1px solid var(--card-border);">
+                    <h3 style="margin-top:0; color: var(--accent-orange);">Логи сканирований (последние 200)</h3>
+                    <div id="admin-scan-logs-table"></div>
+                </div>
+
+                <div id="manual-logs-wrapper" style="background: var(--card-bg); padding: 20px; border-radius: 10px; border: 1px solid var(--card-border);">
+                    <h3 style="margin-top:0; color: var(--accent-orange);">Логи ручных действий (последние 200)</h3>
+                    <div id="manual-logs-container"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script>
         const ALL_SERVERS = [
             "Phoenix", "Tucson", "Scottdale", "Chandler", "Brainburg",
@@ -2306,9 +2306,61 @@ DASHBOARD_HTML = """
             return dropInfo.hourSteps === targetHours;
         }
 
+        function renderUpcomingTab() {
+            const container = document.getElementById('servers-upcoming');
+            if (!container) return;
+
+            let count = 0;
+            container.innerHTML = '';
+
+            ALL_SERVERS.forEach(srv => {
+                const info = globalServerData[srv];
+                if (!info || !info.latestConfirmedScan) return;
+
+                const scan = info.latestConfirmedScan;
+                if (!scan.isConfirmed && !scan.hasPair) return;
+
+                const houseRules = getPropRules(info, 'house');
+                const bizRules = getPropRules(info, 'biz');
+
+                const matchingHouses = (scan.houses || []).filter(h => willDropInExactHours(h, houseRules, selectedUpcomingHours));
+                const matchingBiz = (scan.businesses || []).filter(b => willDropInExactHours(b, bizRules, selectedUpcomingHours));
+
+                if (matchingHouses.length > 0 || matchingBiz.length > 0) {
+                    count++;
+                    const displayName = getServerDisplayName(srv);
+                    const card = `
+                        <div class="server-card">
+                            <div class="server-header">
+                                <div class="server-title">
+                                    <span>${displayName}</span>
+                                    <span class="season-badge">${info.season ? info.season.display : ''}</span>
+                                </div>
+                            </div>
+                            <div class="tables-grid">
+                                <div>
+                                    <div class="section-title">Дома</div>
+                                    ${renderTable(matchingHouses, srv, scan.scanId, 'house', false, true, info)}
+                                </div>
+                                <div>
+                                    <div class="section-title">Бизнесы</div>
+                                    ${renderTable(matchingBiz, srv, scan.scanId, 'biz', false, true, info)}
+                                </div>
+                            </div>
+                        </div>`;
+                    container.insertAdjacentHTML('beforeend', card);
+                }
+            });
+
+            if (count === 0) {
+                container.innerHTML = `<div class="empty-center">Нет слётов в ближайшие ${selectedUpcomingHours} ч.</div>`;
+            }
+        }
+
         function renderManageContainer() {
             const container = document.getElementById('servers-manage');
             if (!container || container.children.length > 0) return;
+            
             container.innerHTML = ALL_SERVERS.map(srv => {
                 const displayName = getServerDisplayName(srv);
                 return `
@@ -2316,11 +2368,11 @@ DASHBOARD_HTML = """
                         <div class="server-header">
                             <div class="server-title">
                                 <span>${displayName}</span>
-                                <button id="btn-del-scan-${srv}" class="btn-delete-scan" style="display:none;" onclick="deleteWholeScan('${srv}')">Удалить скан</button>
+                                <button id="btn-del-scan-${srv}" class="btn-delete-scan" onclick="deleteWholeScan('${srv}')" style="display:none;">Удалить скан</button>
                             </div>
-                        </div>
-                        <div class="scan-tabs-bar">
-                            <div id="scan-tabs-${srv}" class="scan-tabs-container"></div>
+                            <div class="scan-tabs-bar">
+                                <div id="scan-tabs-${srv}" class="scan-tabs-container"></div>
+                            </div>
                         </div>
                         <div class="tables-grid">
                             <div>
@@ -2342,280 +2394,89 @@ DASHBOARD_HTML = """
             }).join('');
         }
 
+        function renderManageTab() {
+            renderManageContainer();
+
+            ALL_SERVERS.forEach(srv => {
+                const info = globalServerData[srv];
+                if (!info) return;
+
+                const scans = info.scans || [];
+                const tabsContainer = document.getElementById(`scan-tabs-${srv}`);
+                const deleteBtn = document.getElementById(`btn-del-scan-${srv}`);
+                const houseElem = document.getElementById(`houses-manage-${srv}`);
+                const bizElem = document.getElementById(`biz-manage-${srv}`);
+
+                if (!tabsContainer || !houseElem || !bizElem) return;
+
+                if (scans.length === 0) {
+                    tabsContainer.innerHTML = '<span class="empty">Нет сканов</span>';
+                    if (deleteBtn) deleteBtn.style.display = 'none';
+                    houseElem.innerHTML = '<span class="empty">Нет сканов</span>';
+                    bizElem.innerHTML = '<span class="empty">Нет сканов</span>';
+                    return;
+                }
+
+                if (!activeServerScans[srv] || !scans.some(s => s.scanId === activeServerScans[srv])) {
+                    activeServerScans[srv] = scans[scans.length - 1].scanId;
+                }
+
+                const currentSelectedScanId = activeServerScans[srv];
+
+                let tabsHtml = '';
+                scans.forEach(s => {
+                    let typeClass = 'single';
+                    if (s.hasPair) {
+                        typeClass = s.isCurrentPair ? 'current-pair' : 'old-pair';
+                    }
+                    const isActive = s.scanId === currentSelectedScanId ? 'active' : '';
+                    tabsHtml += `<button class="scan-subtab ${typeClass} ${isActive}" onclick="selectScanTab('${srv}', '${s.scanId}')">${s.hourLabel}</button>`;
+                });
+                tabsContainer.innerHTML = tabsHtml;
+
+                if (deleteBtn) deleteBtn.style.display = 'inline-block';
+
+                const targetScan = scans.find(s => s.scanId === currentSelectedScanId);
+                if (targetScan) {
+                    houseElem.innerHTML = renderTable(targetScan.houses, srv, targetScan.scanId, 'house', true, false, info);
+                    bizElem.innerHTML = renderTable(targetScan.businesses, srv, targetScan.scanId, 'biz', true, false, info);
+                }
+            });
+        }
+
         async function loadData() {
             try {
                 const res = await fetch('/api/paydays');
-                if (!res.ok) {
-                    if (res.status === 401 || res.status === 403) checkAuth();
+                if (res.status === 401) {
+                    checkAuth();
                     return;
                 }
-                const data = await res.json();
-                globalServerData = data;
-                
-                renderViewTab();
+                if (!res.ok) return;
 
+                globalServerData = await res.json();
+                renderViewTab();
+                renderUpcomingTab();
+                
                 const canManage = currentUser && (currentUser.role === 'admin' || currentUser.role === 'support');
                 if (canManage) {
-                    renderManageContainer();
+                    renderManageTab();
+                }
+                if (currentUser && currentUser.role === 'admin') {
                     loadManualLogs();
                 }
-
-                const containerUpcoming = document.getElementById('servers-upcoming');
-                containerUpcoming.innerHTML = '';
-                let hasUpcomingDrops = false;
-
-                for (const srv of ALL_SERVERS) {
-                    const info = data[srv];
-                    if (!info) continue;
-
-                    const scans = info.scans || [];
-                    const manageTabsElem = document.getElementById(`scan-tabs-${srv}`);
-                    const delScanBtnElem = document.getElementById(`btn-del-scan-${srv}`);
-                    
-                    if (scans.length === 0) {
-                        if (manageTabsElem) manageTabsElem.innerHTML = '<span class="empty">Сканирований нет</span>';
-                        if (delScanBtnElem) delScanBtnElem.style.display = 'none';
-                        if (canManage) {
-                            const hm = document.getElementById(`houses-manage-${srv}`);
-                            const bm = document.getElementById(`biz-manage-${srv}`);
-                            if (hm) hm.innerHTML = '<span class="empty">Нет данных</span>';
-                            if (bm) bm.innerHTML = '<span class="empty">Нет данных</span>';
-                        }
-                        continue;
-                    }
-
-                    if (delScanBtnElem) delScanBtnElem.style.display = 'inline-block';
-
-                    if (!activeServerScans[srv] || !scans.some(s => s.scanId === activeServerScans[srv])) {
-                        activeServerScans[srv] = scans[scans.length - 1].scanId;
-                    }
-
-                    const activeScanId = activeServerScans[srv];
-
-                    if (manageTabsElem) {
-                        manageTabsElem.innerHTML = scans.map(s => {
-                            let typeClass = 'single';
-                            let statusIcon = '⏳';
-                            let titleHint = 'Ожидает пару';
-
-                            if (s.hasPair) {
-                                if (s.isCurrentPair) {
-                                    typeClass = 'current-pair';
-                                    statusIcon = '🟢';
-                                    titleHint = 'Актуальная пара';
-                                } else {
-                                    typeClass = 'old-pair';
-                                    statusIcon = '⚪';
-                                    titleHint = 'Старый скан (устарел)';
-                                }
-                            } else if (s.isOutdated) {
-                                typeClass = 'old-pair';
-                                statusIcon = '🔴';
-                                titleHint = 'Скан устарел (не дождался пары)';
-                            }
-
-                            const isActive = s.scanId === activeScanId ? 'active' : '';
-
-                            return `
-                                <button class="scan-subtab ${typeClass} ${isActive}" 
-                                        title="${s.scanId} — ${titleHint}"
-                                        onclick="selectScanTab('${srv}', '${s.scanId}')">
-                                    <span>${statusIcon}</span> ${s.hourLabel}
-                                </button>
-                            `;
-                        }).join('');
-                    }
-
-                    const curScan = scans.find(s => s.scanId === activeScanId) || scans[scans.length - 1];
-
-                    if (canManage) {
-                        const hm = document.getElementById(`houses-manage-${srv}`);
-                        const bm = document.getElementById(`biz-manage-${srv}`);
-                        if (hm) hm.innerHTML = renderTable(curScan.houses, srv, curScan.scanId, 'house', true, false, info);
-                        if (bm) bm.innerHTML = renderTable(curScan.businesses, srv, curScan.scanId, 'biz', true, false, info);
-                    }
-
-                    const latestConfirmed = info.latestConfirmedScan;
-                    if (latestConfirmed && (latestConfirmed.isConfirmed || latestConfirmed.hasPair)) {
-                        const houseRules = getPropRules(info, 'house');
-                        const bizRules = getPropRules(info, 'biz');
-
-                        const droppingHouses = (latestConfirmed.houses || []).filter(h => willDropInExactHours(h, houseRules, selectedUpcomingHours));
-                        const droppingBiz = (latestConfirmed.businesses || []).filter(b => willDropInExactHours(b, bizRules, selectedUpcomingHours));
-
-                        if (droppingHouses.length > 0 || droppingBiz.length > 0) {
-                            hasUpcomingDrops = true;
-                            
-                            let hourTitleStr = 'в этот час';
-                            if (selectedUpcomingHours === 2) hourTitleStr = 'через 2 часа';
-                            if (selectedUpcomingHours === 3) hourTitleStr = 'через 3 часа';
-
-                            const displayName = getServerDisplayName(srv);
-
-                            const cardUpcoming = `
-                                <div class="server-card">
-                                    <div class="server-header">
-                                        <div class="server-title">
-                                            <span>${displayName}</span>
-                                            <span class="season-badge">${info.season ? info.season.display : ''}</span>
-                                        </div>
-                                    </div>
-                                    <div class="tables-grid">
-                                        <div>
-                                            <div class="section-title">Дома (${hourTitleStr})</div>
-                                            ${renderTable(droppingHouses, srv, latestConfirmed.scanId, 'house', false, true, info)}
-                                        </div>
-                                        <div>
-                                            <div class="section-title">Бизнесы (${hourTitleStr})</div>
-                                            ${renderTable(droppingBiz, srv, latestConfirmed.scanId, 'biz', false, true, info)}
-                                        </div>
-                                    </div>
-                                </div>`;
-                            containerUpcoming.insertAdjacentHTML('beforeend', cardUpcoming);
-                        }
-                    }
-                }
-
-                if (!hasUpcomingDrops) {
-                    let hourMsg = 'в этот час';
-                    if (selectedUpcomingHours === 2) hourMsg = 'через 2 часа';
-                    if (selectedUpcomingHours === 3) hourMsg = 'через 3 часа';
-                    containerUpcoming.innerHTML = `<div class="empty-center">Нет слётов ${hourMsg}</div>`;
-                }
-            } catch(e) { console.error(e); }
+            } catch (e) {
+                console.error("Ошибка загрузки данных:", e);
+            }
         }
-    </script>
-</head>
-<body>
-    <div id="login-screen" class="login-box" style="display:none;">
-        <h2>Авторизация</h2>
-        <input type="text" id="login-username" placeholder="Логин">
-        <input type="password" id="login-password" placeholder="Пароль">
-        <button onclick="handleLogin()">Войти</button>
-    </div>
 
-    <div id="main-dashboard" style="display:none;">
-        <div class="user-nav">
-            <span id="user-info"></span>
-            <button class="btn-logout" onclick="handleLogout()">Выйти</button>
-        </div>
-
-        <h1>Arizona RP — Мониторинг Слётов</h1>
-
-        <div class="lottery-banner">
-            <div class="lottery-info">
-                <span class="lottery-icon">🎰</span>
-                <div>
-                    <div class="lottery-title">Лотерейный билетик</div>
-                    <div class="lottery-sub">Слёт каждые сутки в <b>21:10 МСК</b></div>
-                </div>
-            </div>
-            <div class="lottery-countdown">
-                <span class="lottery-label">До слёта:</span>
-                <span id="lottery-timer" class="lottery-timer">00:00:00</span>
-            </div>
-        </div>
-
-        <div class="tabs">
-            <button id="btn-tab-view" class="tab-btn active" onclick="switchTab('view')">Мониторинг</button>
-            <button id="btn-tab-upcoming" class="tab-btn" onclick="switchTab('upcoming')">Слёты</button>
-            <button id="btn-tab-manage" class="tab-btn" style="display:none;" onclick="switchTab('manage')">Управление</button>
-            <button id="btn-tab-admin" class="tab-btn" style="display:none;" onclick="switchTab('admin')">Админ-панель</button>
-        </div>
-
-        <!-- Tab 1: Мониторинг -->
-        <div id="tab-view" class="tab-content active">
-            <div class="filter-panel">
-                <div class="filter-group">
-                    <label>Сезон:</label>
-                    <select id="filter-season" class="filter-select" onchange="renderViewTab()">
-                        <option value="all">Все сезоны</option>
-                        <option value="1">1. 📱 По инфе</option>
-                        <option value="2">2. ⌨ Скорострелы</option>
-                        <option value="3">3. 🏎️ Автогонки</option>
-                        <option value="4">4. ✈️ По новому</option>
-                        <option value="5">5. 🏍 Мотогонки</option>
-                    </select>
-                </div>
-                <div class="filter-group">
-                    <label>Избранное:</label>
-                    <select id="filter-fav" class="filter-select" onchange="renderViewTab()">
-                        <option value="all">Все сервера</option>
-                        <option value="fav_only">Только избранные ⭐</option>
-                    </select>
-                </div>
-            </div>
-            <div id="servers-view" class="servers-container"></div>
-        </div>
-
-        <!-- Tab 2: Слёты -->
-        <div id="tab-upcoming" class="tab-content">
-            <div class="upcoming-filters">
-                <button id="btn-upcoming-1h" class="time-filter-btn active" onclick="setUpcomingHoursFilter(1)">В этот час</button>
-                <button id="btn-upcoming-2h" class="time-filter-btn" onclick="setUpcomingHoursFilter(2)">Через 2 часа</button>
-                <button id="btn-upcoming-3h" class="time-filter-btn" onclick="setUpcomingHoursFilter(3)">Через 3 часа</button>
-            </div>
-            <div id="servers-upcoming" class="servers-container"></div>
-        </div>
-
-        <!-- Tab 3: Управление -->
-        <div id="tab-manage" class="tab-content">
-            <!-- Сворачиваемый лог ручных действий (виден только admin) -->
-            <div id="manual-logs-wrapper" style="display: none; max-width: 1600px; margin: 0 auto 20px auto;">
-                <details style="background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 10px; padding: 12px 16px;">
-                    <summary style="font-weight: 700; font-size: 0.95rem; color: var(--accent-orange); cursor: pointer; user-select: none;">
-                        📜 Лог ручных действий (видят только администраторы)
-                    </summary>
-                    <div id="manual-logs-container" style="margin-top: 12px; overflow-x: auto;">
-                        <span class="empty">Загрузка логов...</span>
-                    </div>
-                </details>
-            </div>
-
-            <div id="servers-manage" class="servers-container"></div>
-        </div>
-
-        <!-- Tab 4: Админ-панель -->
-        <div id="tab-admin" class="tab-content">
-            <div style="max-width: 1200px; margin: 0 auto;">
-                <div style="background: var(--card-bg); border: 1px solid var(--card-border); padding: 20px; border-radius: 10px; margin-bottom: 20px;">
-                    <h3 style="margin-top:0; color: var(--accent-orange);">Создать пользователя</h3>
-                    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                        <input type="text" id="new-username" placeholder="Логин" style="background:#0f121a; color:#fff; border:1px solid #263043; padding:8px; border-radius:4px;">
-                        <input type="password" id="new-password" placeholder="Пароль" style="background:#0f121a; color:#fff; border:1px solid #263043; padding:8px; border-radius:4px;">
-                        <select id="new-role" class="select-role" style="padding:8px;">
-                            <option value="user">User</option>
-                            <option value="support">Support</option>
-                            <option value="admin">Admin</option>
-                        </select>
-                        <button class="btn-add" style="padding: 8px 16px;" onclick="handleCreateUser()">Создать</button>
-                    </div>
-                </div>
-
-                <div style="background: var(--card-bg); border: 1px solid var(--card-border); padding: 20px; border-radius: 10px; margin-bottom: 20px;">
-                    <h3 style="margin-top:0; color: var(--accent-orange);">Пользователи системы</h3>
-                    <div id="admin-users-table" style="overflow-x: auto;"></div>
-                </div>
-
-                <div style="background: var(--card-bg); border: 1px solid var(--card-border); padding: 20px; border-radius: 10px;">
-                    <h3 style="margin-top:0; color: var(--accent-orange);">Логи сканирований (последние 200)</h3>
-                    <div id="admin-scan-logs-table" style="overflow-x: auto;"></div>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <script>
         function initDashboard() {
-            loadData();
-            setInterval(loadData, 30000);
-            setInterval(updateLotteryTimer, 1000);
             updateLotteryTimer();
+            setInterval(updateLotteryTimer, 1000);
+            loadData();
+            setInterval(loadData, 10000);
         }
 
-        document.addEventListener('DOMContentLoaded', () => {
-            checkAuth();
-        });
+        window.addEventListener('DOMContentLoaded', checkAuth);
     </script>
 </body>
 </html>
